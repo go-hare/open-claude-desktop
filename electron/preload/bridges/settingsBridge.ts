@@ -1,0 +1,108 @@
+import type { NamespaceBridgeSpec } from "../../../shared/bridge/spec";
+
+export const settingsBridgeSpec: NamespaceBridgeSpec = {
+  AppConfig: {
+    invoke: ["getAppConfig", "setAppFeature", "setIsUsingBuiltInNodeForMcp", "setIsDxtAutoUpdatesEnabled"],
+  },
+  Startup: {
+    invoke: ["isStartupOnLoginEnabled", "setStartupOnLoginEnabled", "isMenuBarEnabled", "setMenuBarEnabled"],
+  },
+  GlobalShortcut: {
+    invoke: ["setGlobalShortcut", "getGlobalShortcut"],
+    events: ["globalShortcutChange"],
+  },
+  MCP: {
+    invoke: [
+      "isLocalDevMcpEnabled",
+      "setMcpServerConfigs",
+      "getMcpServersConfig",
+      "getMcpServersConfigWithStatus",
+      "revealConfig",
+      "revealLogs",
+      "revealServerLog",
+    ],
+    events: ["mcpConfigChange", "mcpStatusChanged", "revealMcpServerSettingsRequested"],
+  },
+  FilePickers: {
+    invoke: ["getDirectoryPath", "getFilePath"],
+  },
+  DesktopInfo: {
+    invoke: ["getSystemInfo", "showLogsInFileManager"],
+  },
+  AppFeatures: {
+    invoke: ["getSupportedFeatures"],
+  },
+  AppPreferences: {
+    invoke: ["getPreferences", "setPreference"],
+    events: ["preferencesChanged"],
+  },
+  WakeScheduler: {
+    invoke: ["getStatus", "openSettings"],
+  },
+  Custom3pHelperRun: {
+    invoke: ["getCredentialHelperLastRun", "runCredentialHelper"],
+  },
+  Custom3pSetup: {
+    invoke: [
+      "listConfigs",
+      "readConfig",
+      "writeConfig",
+      "createConfig",
+      "duplicateConfig",
+      "renameConfig",
+      "deleteConfig",
+      "exportConfig",
+      "setAppliedConfig",
+      "unsetAppliedConfig",
+      "revealConfig",
+      "getConfigHealth",
+      "recheckConfigHealth",
+      "probeEgressHosts",
+      "probeMcpServer",
+      "authorizeAndProbeMcpServer",
+      "forgetMcpOAuth",
+      "triggerBootstrapAuth",
+      "openSetupWindow",
+      "openDeviceCodeWindowForE2e",
+      "getLoginDesktop3pStatus",
+      "relaunchApp",
+    ],
+    events: ["bootstrapState_"],
+  },
+  Extensions: {
+    invoke: [
+      "getInstalledExtensionsWithState",
+      "getExtensions",
+      "getExtension",
+      "getExtensionSettings",
+      "setExtensionSettings",
+      "getExtensionVersion",
+      "getExtensionVersions",
+      "getAvailableExtensionRuntimes",
+      "getDirectoryUrl",
+      "getIsUpdateAvailable",
+      "getManifestCompatibilityResult",
+      "installDxt",
+      "installDxtFromDirectory",
+      "installDxtUnpacked",
+      "installExtensionFromPreview",
+      "handleDxtFile",
+      "deleteExtension",
+      "uninstallExtension",
+      "updateExtension",
+      "openDirectory",
+      "openExtensionDirectory",
+      "openLogsDirectory",
+      "revealExtension",
+      "reloadExtension",
+      "isDesktopExtensionDirectoryEnabled",
+      "setDesktopExtensionDirectoryEnabled",
+      "setExtensionEnabled",
+    ],
+    events: ["extensionsChanged", "extensionSettingsChanged", "extensionDownloadProgress"],
+  },
+  SupportBundle: {
+    invoke: ["submitAction"],
+    events: ["supportBundleState_"],
+  },
+};

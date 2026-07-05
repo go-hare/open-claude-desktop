@@ -1,0 +1,583 @@
+import { app, dialog, shell } from "electron";
+import { execFile, spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
+import type { LocalSessionStore } from "../services/localSessions/localSessionStore";
+import { loadOriginalNodePty } from "../services/originalRuntime/originalRuntimeModules";
+import type { IpcHandlerContext } from "./context";
+import type { InterfaceHandlers } from "./registerIpc";
+import { dispatchBridgeEvent, registerInterfaceHandlers } from "./registerIpc";
+
+const execFileAsync = promisify(execFile);
+const TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
+
+const LOCAL_SESSIONS_METHODS = [
+  "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getDetectedProjects","getDiffFileContent","getEffort","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrReviewComments","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
+] as const;
+
+const LOCAL_AGENT_METHODS = [
+  "abandonBridgeEnvironment","addFolderToSession","addTrustedFolder","archive","authorizeDirectMcpServer","delete","deleteBridgeAgentMemory","deleteBridgeSession","deleteLocalSkill","disconnectDirectMcpServer","getAll","getBridgeConsent","getDirectMcpServerStatuses","getLocalSkillFiles","getSession","getSessionsBridgeEnabled","getSessionsForScheduledTask","getSupportedCommands","getTranscript","getTranscriptFeedback","getTrustedFolders","interactiveAuth_$store$_getState","isFolderTrusted","kickBridgePoll","listLocalSkills","mcpCallTool","mcpListResources","mcpReadResource","noteCuWindowMentions","openOutputsDir","removeTrustedFolder","replaceEnabledMcpTools","replaceRemoteMcpServers","requestFolderTccAccess","resetBridge","resetBridgeSession","respondBridgePermissionPreflight","respondDirectoryServers","respondPluginSearch","respondSlashMenuSkills","respondToToolPermission","revealLocalSkill","revokeInteractiveAuth","rewind","saveLocalSkill","searchSessions","sendMessage","sessionsBridgeStatus_$store$_getState","setChromePermissionMode","setDraftSessionFolders","setFocusedSession","setLocalSkillEnabled","setMcpServers","setModel","setPermissionMode","setSessionsBridgeEnabled","shareSession","start","stop","submitTranscriptFeedback","syncSkills","triggerInteractiveAuth","updateSession",
+] as const;
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function ok(value: unknown = true) {
+  return value;
+}
+
+async function commandExists(command: string): Promise<boolean> {
+  try {
+    await execFileAsync("/usr/bin/env", ["which", command], { timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runGit(cwd: string | null, args: string[]) {
+  if (!cwd) return { ok: false, error: "missing cwd" };
+  try {
+    const { stdout, stderr } = await execFileAsync("git", args, { cwd, timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+    return { ok: true, stdout, stderr };
+  } catch (error) {
+    const err = error as { stdout?: string; stderr?: string; message?: string; code?: unknown };
+    return { ok: false, stdout: err.stdout ?? "", stderr: err.stderr ?? err.message ?? "", code: err.code };
+  }
+}
+
+async function runProcess(cwd: string | null, command: string, args: string[], timeout = 30000) {
+  if (!cwd) return { stdout: "", stderr: "missing cwd", code: 1, error: "missing cwd" };
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, { cwd, timeout, maxBuffer: 8 * 1024 * 1024 });
+    return { stdout, stderr, code: 0 };
+  } catch (error) {
+    const err = error as { stdout?: string; stderr?: string; message?: string; code?: unknown };
+    return { stdout: err.stdout ?? "", stderr: err.stderr ?? err.message ?? "", code: typeof err.code === "number" ? err.code : 1, error: err.message };
+  }
+}
+
+async function gitSuccess(cwd: string | null, args: string[]) {
+  const result = await runGit(cwd, args);
+  return result.ok ? { success: true } : { success: false, error: String(result.stderr || result.stdout || "git command failed") };
+}
+
+function cwdFromSession(store: LocalSessionStore, sessionIdOrCwd: unknown): string | null {
+  const raw = asString(sessionIdOrCwd);
+  if (!raw) return store.getAll(true)[0]?.cwd ?? process.cwd();
+  return store.getSession(raw)?.cwd ?? raw;
+}
+
+async function readText(filePath: string) {
+  const stat = await fs.stat(filePath);
+  if (stat.size > TEXT_LIMIT_BYTES) return { path: filePath, size: stat.size, tooLarge: true };
+  return fs.readFile(filePath, "utf8");
+}
+
+async function listDirectory(target: string) {
+  const entries = await fs.readdir(target, { withFileTypes: true });
+  return Promise.all(entries.map(async (entry) => {
+    const filePath = path.join(target, entry.name);
+    const stat = await fs.stat(filePath);
+    return { name: entry.name, path: filePath, isFile: entry.isFile(), isDirectory: entry.isDirectory(), size: stat.size, modifiedAt: stat.mtime.toISOString() };
+  }));
+}
+
+async function getCodeStats(cwd: string | null) {
+  if (!cwd) return { files: 0, lines: 0, bytes: 0, byExtension: {} };
+  const tracked = await runGit(cwd, ["ls-files"]);
+  const files = tracked.ok ? String(tracked.stdout ?? "").split(/\r?\n/).filter(Boolean).slice(0, 2000) : [];
+  const byExtension: Record<string, { files: number; lines: number; bytes: number }> = {};
+  let lines = 0;
+  let bytes = 0;
+  for (const relative of files) {
+    const filePath = path.resolve(cwd, relative);
+    try {
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile() || stat.size > 1024 * 1024) continue;
+      const text = await fs.readFile(filePath, "utf8");
+      const ext = path.extname(filePath).slice(1) || "plain";
+      const lineCount = text.length === 0 ? 0 : text.split(/\r?\n/).length;
+      byExtension[ext] ??= { files: 0, lines: 0, bytes: 0 };
+      byExtension[ext].files += 1;
+      byExtension[ext].lines += lineCount;
+      byExtension[ext].bytes += stat.size;
+      lines += lineCount;
+      bytes += stat.size;
+    } catch {
+      // Ignore unreadable/binary files.
+    }
+  }
+  return { files: files.length, lines, bytes, byExtension };
+}
+
+function sessionFileRoot(store: LocalSessionStore, sessionId: string): string {
+  const root = path.join(store.getOutputsDir(), sessionId);
+  return root;
+}
+
+function resolveSessionFile(store: LocalSessionStore, sessionId: string, relativePath: string): string | null {
+  const root = sessionFileRoot(store, sessionId);
+  const target = path.resolve(root, relativePath || ".");
+  return target.startsWith(root) ? target : null;
+}
+
+function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerContext, allMethods: readonly string[], bridgeInterface: "LocalSessions" | "LocalAgentModeSessions"): InterfaceHandlers {
+  const ptys = new Map<string, { terminal: { write: (data: string) => void; kill: (signal?: string) => void; resize?: (cols: number, rows: number) => void }; buffer: string }>();
+  const handlers: InterfaceHandlers = {};
+
+  const dispatchSessionEvent = (type: string, sessionId?: string, session?: unknown) => {
+    dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type, sessionId, session });
+  };
+
+  const appendPtyData = (sessionId: string, data: Buffer) => {
+    const entry = ptys.get(sessionId);
+    if (!entry) return;
+    entry.buffer += data.toString("utf8");
+    if (entry.buffer.length > TEXT_LIMIT_BYTES) entry.buffer = entry.buffer.slice(-TEXT_LIMIT_BYTES);
+    dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "pty-data", sessionId, data: data.toString("utf8") });
+  };
+
+  const startShell = (sessionId: string, cols?: number, rows?: number) => {
+    const cwd = cwdFromSession(store, sessionId) ?? process.cwd();
+    ptys.get(sessionId)?.terminal.kill("SIGTERM");
+    const shellPath = process.env.SHELL || "/bin/zsh";
+    const nodePty = loadOriginalNodePty();
+    if (nodePty) {
+      const terminal = nodePty.spawn(shellPath, ["-l"], {
+        name: "xterm-256color",
+        cols: cols ?? 80,
+        rows: rows ?? 24,
+        cwd,
+        env: { ...process.env, TERM: "xterm-256color" },
+      });
+      ptys.set(sessionId, { terminal, buffer: "" });
+      terminal.onData((data) => appendPtyData(sessionId, Buffer.from(data)));
+      terminal.onExit(({ exitCode, signal }) => {
+        dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "pty-exit", sessionId, code: exitCode, signal });
+        ptys.delete(sessionId);
+      });
+      return true;
+    }
+    const child = spawn(shellPath, ["-l"], { cwd, env: { ...process.env, COLUMNS: String(cols ?? 80), LINES: String(rows ?? 24) } });
+    const terminal = {
+      write: (data: string) => { child.stdin.write(data); },
+      kill: (signal?: string) => { child.kill((signal as NodeJS.Signals | undefined) ?? "SIGTERM"); },
+    };
+    ptys.set(sessionId, { terminal, buffer: "" });
+    child.stdout.on("data", (data: Buffer) => appendPtyData(sessionId, data));
+    child.stderr.on("data", (data: Buffer) => appendPtyData(sessionId, data));
+    child.on("exit", (code, signal) => {
+      dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "pty-exit", sessionId, code, signal });
+      ptys.delete(sessionId);
+    });
+    return true;
+  };
+
+  const realHandlers: InterfaceHandlers = {
+    getAll: async () => store.getAll(),
+    getSession: async (_event, id) => (asString(id) ? store.getSession(asString(id)!) : null),
+    getTranscript: async (_event, id) => (asString(id) ? store.getTranscript(asString(id)!) : []),
+    start: async (_event, input) => {
+      const session = store.start(asObject(input) as never);
+      dispatchSessionEvent("start", session.id, session);
+      return session;
+    },
+    importCliSession: async (_event, input) => {
+      const session = store.importSession(asObject(input) as never);
+      dispatchSessionEvent("start", session.id, session);
+      return session;
+    },
+    updateSession: async (_event, id, input) => {
+      const sessionId = asString(id);
+      const session = sessionId ? store.update(sessionId, asObject(input) as never) : null;
+      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      return session;
+    },
+    sendMessage: async (_event, id, text) => {
+      const sessionId = asString(id);
+      const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text) : null;
+      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      return session;
+    },
+    sendSideChatMessage: async (_event, id, text) => {
+      const sessionId = asString(id);
+      const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text, "user") : null;
+      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      return session;
+    },
+    forkSession: async (_event, id) => {
+      const existing = asString(id) ? store.getSession(asString(id)!) : null;
+      const session = store.start({ title: existing ? `${existing.title} fork` : "Forked session", cwd: existing?.cwd, prompt: existing?.messages.at(-1)?.text });
+      dispatchSessionEvent("start", session.id, session);
+      return session;
+    },
+    archive: async (_event, id) => {
+      const sessionId = asString(id);
+      const ok = sessionId ? store.archive(sessionId) : false;
+      if (ok && sessionId) dispatchSessionEvent("archived", sessionId);
+      return ok;
+    },
+    unarchive: async (_event, id) => {
+      const sessionId = asString(id);
+      const ok = sessionId ? store.unarchive(sessionId) : false;
+      if (ok && sessionId) dispatchSessionEvent("unarchived", sessionId, store.getSession(sessionId));
+      return ok;
+    },
+    delete: async (_event, id) => {
+      const sessionId = asString(id);
+      const ok = sessionId ? store.delete(sessionId) : false;
+      if (ok && sessionId) dispatchSessionEvent("deleted", sessionId);
+      return ok;
+    },
+    clearSession: async (_event, id) => {
+      const sessionId = asString(id);
+      const ok = sessionId ? store.clearSession(sessionId) : false;
+      if (ok && sessionId) dispatchSessionEvent("cleared", sessionId, store.getSession(sessionId));
+      return ok;
+    },
+    stop: async (_event, id) => {
+      const sessionId = asString(id);
+      const ok = sessionId ? store.stop(sessionId) : false;
+      if (ok && sessionId) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
+      return ok;
+    },
+    interrupt: async (_event, id) => {
+      const sessionId = asString(id);
+      const ok = sessionId ? store.stop(sessionId) : false;
+      if (ok && sessionId) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
+      return ok;
+    },
+    stopTask: async (_event, id) => {
+      const sessionId = asString(id);
+      const ok = sessionId ? store.stop(sessionId) : false;
+      if (ok && sessionId) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
+      return ok;
+    },
+    searchSessions: async (_event, query) => store.search(String(query ?? "")),
+    addDirectories: async (_event, id, directories) => {
+      const sessionId = asString(id);
+      const session = sessionId ? store.addFolders(sessionId, directories) : null;
+      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      return session;
+    },
+    addFolderToSession: async (_event, id, folder) => {
+      const sessionId = asString(id);
+      const session = sessionId ? store.addFolders(sessionId, [folder]) : null;
+      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      return session;
+    },
+    addTrustedFolder: async (_event, folder) => {
+      const target = asString(folder);
+      if (!target) return false;
+      store.addTrustedFolder(target);
+      return true;
+    },
+    removeTrustedFolder: async (_event, folder) => {
+      const target = asString(folder);
+      if (!target) return false;
+      store.removeTrustedFolder(target);
+      return true;
+    },
+    getTrustedFolders: async () => store.getTrustedFolders(),
+    isFolderTrusted: async (_event, folder) => Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)),
+    checkTrust: async (_event, folder) => ({ trusted: Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)) }),
+    checkRemoteTrust: async () => ({ trusted: false, remote: true }),
+    saveTrust: async (_event, folder) => {
+      const target = asString(folder);
+      if (!target) return false;
+      store.addTrustedFolder(target);
+      return true;
+    },
+    getSessionsForScheduledTask: async () => store.getAll(),
+    getSupportedCommands: async () => ["start", "sendMessage", "stop", "readFileAtCwd", "writeSessionFile", "getGitInfo"],
+    getSessionsBridgeEnabled: async () => true,
+    sessionsBridgeStatus_$store$_getState: async () => ({ enabled: true, status: "ready" }),
+    interactiveAuth_$store$_getState: async () => ({ status: "idle" }),
+    getContextUsage: async (_event, id) => ({ messages: asString(id) ? store.getTranscript(asString(id)!).length : 0 }),
+    getCodeStats: async (_event, cwdOrSession) => getCodeStats(cwdFromSession(store, cwdOrSession)),
+    getDefaultEffort: async () => "medium",
+    getEffort: async (_event, id) => (asString(id) ? store.getSession(asString(id)!)?.effort ?? "medium" : "medium"),
+    setEffort: async (_event, id, effort) => (asString(id) ? store.update(asString(id)!, { effort: String(effort ?? "medium") }) : null),
+    getDefaultPermissionMode: async () => "default",
+    getPermissionMode: async (_event, id) => (asString(id) ? store.getSession(asString(id)!)?.permissionMode ?? "default" : "default"),
+    setPermissionMode: async (_event, id, mode) => (asString(id) ? store.update(asString(id)!, { permissionMode: String(mode ?? "default") }) : null),
+    setModel: async (_event, id, model) => (asString(id) ? store.update(asString(id)!, { model: String(model ?? "") }) : null),
+    setVisibility: async (_event, id, visibility) => (asString(id) ? store.update(asString(id)!, { visibility: String(visibility ?? "") }) : null),
+    setFocusedSession: async () => true,
+    setFastMode: async () => true,
+    setAutoFixEnabled: async () => true,
+    setMcpServers: async () => true,
+    replaceEnabledMcpTools: async () => true,
+    replaceRemoteMcpServers: async () => true,
+    setAvailableCodeModels: async () => true,
+    setChromePermissionMode: async () => true,
+    setDraftSessionFolders: async () => true,
+    setSessionsBridgeEnabled: async () => true,
+    getBridgeConsent: async () => ({ granted: true }),
+    deleteBridgeSession: async () => true,
+    deleteBridgeAgentMemory: async () => true,
+    abandonBridgeEnvironment: async () => true,
+    resetBridge: async () => true,
+    resetBridgeSession: async () => true,
+    kickBridgePoll: async () => true,
+    respondToToolPermission: async () => true,
+    respondBridgePermissionPreflight: async () => true,
+    respondDirectoryServers: async () => true,
+    respondPluginSearch: async () => true,
+    respondSlashMenuSkills: async () => true,
+    submitFeedback: async () => ({ ok: true }),
+    submitTranscriptFeedback: async () => ({ ok: true }),
+    getTranscriptFeedback: async () => [],
+    shareSession: async (_event, id) => ({ ok: true, id, localOnly: true }),
+    summarizeSession: async (_event, id) => {
+      const transcript = asString(id) ? store.getTranscript(asString(id)!) : [];
+      return transcript.map((message) => message.text).join("\n").slice(0, 1000);
+    },
+    summarizeTranscript: async (_event, transcript) => Array.isArray(transcript) ? transcript.map((item) => asObject(item).text ?? "").join("\n").slice(0, 1000) : "",
+    getPlanForSession: async () => null,
+    popBackgroundTaskSuggestion: async () => null,
+    getAgents: async () => [],
+    createAgent: async () => null,
+    getDirectMcpServerStatuses: async () => [],
+    authorizeDirectMcpServer: async (_event, serverName) => ({ ok: true, serverName, authorized: true }),
+    disconnectDirectMcpServer: async () => true,
+    getLocalSkillFiles: async () => [],
+    listLocalSkills: async () => [],
+    syncSkills: async () => [],
+    deleteLocalSkill: async () => true,
+    saveLocalSkill: async () => true,
+    revealLocalSkill: async () => true,
+    setLocalSkillEnabled: async () => true,
+    noteCuWindowMentions: async () => true,
+    triggerInteractiveAuth: async () => ({ ok: false, reason: "interactive_auth_not_required" }),
+    revokeInteractiveAuth: async () => true,
+    mcpListResources: async () => [],
+    mcpReadResource: async () => null,
+    mcpCallTool: async (_event, serverName, toolName, input) => ({ ok: false, reason: "mcp_tool_runtime_absent", serverName, toolName, input }),
+    requestFolderTccAccess: async () => ({ granted: true }),
+    openOutputsDir: async () => {
+      await shell.openPath(store.getOutputsDir());
+      return true;
+    },
+    listSessionDirectory: async (_event, id, relative = ".") => {
+      const sessionId = asString(id);
+      if (!sessionId) return [];
+      const target = resolveSessionFile(store, sessionId, String(relative ?? "."));
+      if (!target) return [];
+      await fs.mkdir(target, { recursive: true });
+      return listDirectory(target);
+    },
+    readSessionFile: async (_event, id, relative) => {
+      const sessionId = asString(id);
+      if (!sessionId) return null;
+      const target = resolveSessionFile(store, sessionId, String(relative ?? ""));
+      return target ? readText(target) : null;
+    },
+    readSessionImageAsDataUrl: async (_event, id, relative) => {
+      const sessionId = asString(id);
+      if (!sessionId) return null;
+      const target = resolveSessionFile(store, sessionId, String(relative ?? ""));
+      if (!target) return null;
+      const buffer = await fs.readFile(target);
+      const ext = path.extname(target).slice(1) || "png";
+      return `data:image/${ext};base64,${buffer.toString("base64")}`;
+    },
+    writeSessionFile: async (_event, id, relative, content) => {
+      const sessionId = asString(id);
+      if (!sessionId) return null;
+      const target = resolveSessionFile(store, sessionId, String(relative ?? "file.txt"));
+      if (!target) return null;
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, typeof content === "string" ? content : JSON.stringify(content, null, 2));
+      return target;
+    },
+    pickSessionFile: async (_event, id) => {
+      const sessionId = asString(id);
+      const defaultPath = sessionId ? sessionFileRoot(store, sessionId) : store.getOutputsDir();
+      const result = await dialog.showOpenDialog(context.windows.mainWindow, { defaultPath, properties: ["openFile"] });
+      return result.canceled ? null : result.filePaths[0] ?? null;
+    },
+    readFileAtCwd: async (_event, cwdOrSession, relative) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      if (!cwd) return null;
+      return readText(path.resolve(cwd, String(relative ?? "")));
+    },
+    pickFileAtCwd: async (_event, cwdOrSession) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const result = await dialog.showOpenDialog(context.windows.mainWindow, { defaultPath: cwd ?? undefined, properties: ["openFile"] });
+      return result.canceled ? null : result.filePaths[0] ?? null;
+    },
+    listSSHDirectory: async (_event, directory) => listDirectory(path.resolve(String(directory ?? app.getPath("home")))),
+    validateSSHPath: async (_event, filePath) => {
+      try { await fs.access(String(filePath)); return { valid: true }; } catch { return { valid: false }; }
+    },
+    checkGhAvailable: async () => ({ available: await commandExists("gh") }),
+    installGh: async () => {
+      await shell.openExternal("https://cli.github.com/");
+      return true;
+    },
+    getGhIssue: async () => null,
+    listGhIssues: async () => [],
+    getPrDetails: async () => null,
+    getPrChecks: async () => [],
+    getPrReviewComments: async () => [],
+    getPrStateForBranch: async () => null,
+    createLocalPr: async (_event, cwdOrSession, title, body) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const args = ["pr", "create"];
+      if (asString(title)) args.push("--title", asString(title)!);
+      if (asString(body)) args.push("--body", asString(body)!);
+      if (!asString(title) && !asString(body)) args.push("--fill");
+      return runProcess(cwd, "gh", args, 30000);
+    },
+    generateLocalPrContent: async () => null,
+    updatePrBody: async (_event, cwdOrSession, prNumber, body) => runProcess(cwdFromSession(store, cwdOrSession), "gh", ["pr", "edit", String(prNumber ?? ""), "--body", String(body ?? "")], 30000),
+    mergePr: async (_event, cwdOrSession, prNumber) => runProcess(cwdFromSession(store, cwdOrSession), "gh", ["pr", "merge", String(prNumber ?? ""), "--merge"], 30000),
+    getGitInfo: async (_event, cwdOrSession) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const root = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+      const branch = await runGit(cwd, ["branch", "--show-current"]);
+      const remote = await runGit(cwd, ["remote", "-v"]);
+      return { cwd, root: root.ok ? String(root.stdout ?? "").trim() : null, branch: branch.ok ? String(branch.stdout ?? "").trim() : null, remotes: remote.ok ? String(remote.stdout ?? "").trim() : "" };
+    },
+    getWorkingTreeStatus: async (_event, cwdOrSession) => runGit(cwdFromSession(store, cwdOrSession), ["status", "--short", "--branch"]),
+    getUncommittedChanges: async (_event, cwdOrSession) => runGit(cwdFromSession(store, cwdOrSession), ["status", "--porcelain=v1"]),
+    isWorkingTreeDirty: async (_event, cwdOrSession) => {
+      const result = await runGit(cwdFromSession(store, cwdOrSession), ["status", "--porcelain=v1"]);
+      return result.ok && String(result.stdout ?? "").trim().length > 0;
+    },
+    getGitDiff: async (_event, cwdOrSession, args) => runGit(cwdFromSession(store, cwdOrSession), ["diff", ...(Array.isArray(args) ? args.map(String) : [])]),
+    getGitDiffStats: async (_event, cwdOrSession) => runGit(cwdFromSession(store, cwdOrSession), ["diff", "--stat"]),
+    getDiffFileContent: async (_event, cwdOrSession, filePath) => runGit(cwdFromSession(store, cwdOrSession), ["show", `HEAD:${String(filePath ?? "")}`]),
+    getCommitDiff: async (_event, cwdOrSession, commit) => runGit(cwdFromSession(store, cwdOrSession), ["show", "--stat", String(commit ?? "HEAD")]),
+    getGitCommits: async (_event, cwdOrSession, limit) => runGit(cwdFromSession(store, cwdOrSession), ["log", `-${Number(limit) || 20}`, "--oneline"]),
+    getLocalBranches: async (_event, cwdOrSession) => runGit(cwdFromSession(store, cwdOrSession), ["branch", "--list"]),
+    getSSHConfigs: async () => [],
+    setSSHConfigs: async () => true,
+    getTrustedSSHHosts: async () => [],
+    setTrustedSSHHosts: async () => true,
+    getSSHGitInfo: async () => null,
+    getSSHSupportedCommands: async () => ["git status", "git diff", "git log"],
+    resolveSSHSettings: async () => ({}),
+    respondToSSHPassword: async () => true,
+    testSSHConnection: async (_event, host) => {
+      const target = asString(host) ?? asString(asObject(host).host);
+      if (!target) return { ok: false, reason: "missing_ssh_host" };
+      return runProcess(process.cwd(), "ssh", ["-G", target], 10000);
+    },
+    ensureSSHConnected: async (_event, host) => {
+      const target = asString(host) ?? asString(asObject(host).host);
+      if (!target) return { ok: false, reason: "missing_ssh_host" };
+      return runProcess(process.cwd(), "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target, "true"], 10000);
+    },
+    ensureBranchPushed: async (_event, cwdOrSession) => gitSuccess(cwdFromSession(store, cwdOrSession), ["push", "-u", "origin", "HEAD"]),
+    commitAllChanges: async (_event, cwdOrSession, message) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const add = await runGit(cwd, ["add", "-A"]);
+      if (!add.ok) return { success: false, error: String(add.stderr || add.stdout || "git add failed") };
+      return gitSuccess(cwd, ["commit", "-m", String(message ?? "WIP")]);
+    },
+    commitWipForBranchSwitch: async (_event, cwdOrSession, branchName) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const add = await runGit(cwd, ["add", "-A"]);
+      if (!add.ok) return { success: false, error: String(add.stderr || add.stdout || "git add failed") };
+      return gitSuccess(cwd, ["commit", "-m", `WIP before switching to ${String(branchName ?? "branch")}`]);
+    },
+    discardWorkingTree: async (_event, cwdOrSession) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const reset = await runGit(cwd, ["reset", "--hard"]);
+      if (!reset.ok) return { success: false, error: String(reset.stderr || reset.stdout || "git reset failed") };
+      return gitSuccess(cwd, ["clean", "-fd"]);
+    },
+    stashWorkingTree: async (_event, cwdOrSession, message) => gitSuccess(cwdFromSession(store, cwdOrSession), ["stash", "push", "-u", "-m", String(message ?? "WIP")]),
+    reviewDiff: async () => null,
+    launchUltrareview: async (_event, cwdOrSession) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      if (cwd) await shell.openPath(cwd);
+      return true;
+    },
+    runBashCommand: async (_event, sessionId, command) => runProcess(cwdFromSession(store, sessionId), process.env.SHELL || "/bin/zsh", ["-lc", String(command ?? "")], 60000),
+    startPty: async (_event, sessionId, cols, rows) => (asString(sessionId) ? startShell(asString(sessionId)!, Number(cols) || 80, Number(rows) || 24) : false),
+    stopPty: async (_event, sessionId) => {
+      const entry = asString(sessionId) ? ptys.get(asString(sessionId)!) : null;
+      entry?.terminal.kill("SIGTERM");
+      return true;
+    },
+    writePty: async (_event, sessionId, data) => {
+      const entry = asString(sessionId) ? ptys.get(asString(sessionId)!) : null;
+      entry?.terminal.write(String(data ?? ""));
+      return Boolean(entry);
+    },
+    resizePty: async (_event, sessionId, cols, rows) => {
+      const entry = asString(sessionId) ? ptys.get(asString(sessionId)!) : null;
+      entry?.terminal.resize?.(Number(cols) || 80, Number(rows) || 24);
+      return true;
+    },
+    startShellPty: async (_event, sessionId, cols, rows) => (asString(sessionId) ? startShell(asString(sessionId)!, Number(cols) || 80, Number(rows) || 24) : false),
+    stopShellPty: async (_event, sessionId) => {
+      const entry = asString(sessionId) ? ptys.get(asString(sessionId)!) : null;
+      entry?.terminal.kill("SIGTERM");
+      return true;
+    },
+    writeShellPty: async (_event, sessionId, data) => {
+      const entry = asString(sessionId) ? ptys.get(asString(sessionId)!) : null;
+      entry?.terminal.write(String(data ?? ""));
+      return Boolean(entry);
+    },
+    resizeShellPty: async (_event, sessionId, cols, rows) => {
+      const entry = asString(sessionId) ? ptys.get(asString(sessionId)!) : null;
+      entry?.terminal.resize?.(Number(cols) || 80, Number(rows) || 24);
+      return true;
+    },
+    getShellPtyBuffer: async (_event, sessionId) => (asString(sessionId) ? ptys.get(asString(sessionId)!)?.buffer ?? "" : ""),
+    startSideChat: async () => null,
+    stopSideChat: async () => true,
+    stopSessionSummary: async () => true,
+    cancelQueuedMessage: async () => true,
+    enableAutoMerge: async () => true,
+    disableAutoMerge: async () => true,
+    releaseWorktree: async () => true,
+    rewind: async () => true,
+    teleportToCloud: async (_event, id) => ({ success: false, error: `cloud_teleport_absent:${String(id ?? "")}` }),
+    getTeleportReadiness: async () => ({ ready: false, reason: "cloud_teleport_absent" }),
+    getDetectedProjects: async () => [],
+    getInstalledEditors: async () => ({ vscode: await commandExists("code") }),
+    isVSCodeInstalled: async () => commandExists("code"),
+    openInVSCode: async (_event, target) => {
+      const filePath = asString(target);
+      if (!filePath) return false;
+      const error = await shell.openExternal(`vscode://file/${encodeURIComponent(filePath)}`);
+      return error;
+    },
+    openInEditor: async (_event, target) => {
+      const filePath = asString(target);
+      if (!filePath) return false;
+      return (await shell.openPath(filePath)).length === 0;
+    },
+    logCliEvent: async () => true,
+  };
+
+  const allowedMethods = new Set<string>(allMethods);
+  for (const [method, handler] of Object.entries(realHandlers)) {
+    if (allowedMethods.has(method)) handlers[method] = handler;
+  }
+  const missingMethods = allMethods.filter((method) => !(method in handlers));
+  if (missingMethods.length > 0) throw new Error(`Missing LocalSessions handler implementations: ${missingMethods.join(", ")}`);
+  return handlers;
+}
+
+export function registerLocalSessionsHandlers(context: IpcHandlerContext): void {
+  registerInterfaceHandlers("claude.web", "LocalSessions", createSessionHandlers(context.localSessions, context, LOCAL_SESSIONS_METHODS, "LocalSessions"), "claude.web.LocalSessions");
+  registerInterfaceHandlers("claude.web", "LocalAgentModeSessions", createSessionHandlers(context.localAgentModeSessions, context, LOCAL_AGENT_METHODS, "LocalAgentModeSessions"), "claude.web.LocalAgentModeSessions");
+  registerInterfaceHandlers("claude.web", "LocalSessionEnvironment", {
+    get: async () => ({ env: {}, userData: app.getPath("userData") }),
+    save: async () => true,
+  }, "claude.web.LocalSessionEnvironment");
+}

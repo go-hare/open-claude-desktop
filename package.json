@@ -1,0 +1,47 @@
+{
+  "name": "claude-deepseek-desktop",
+  "productName": "Claude-Deepseek",
+  "version": "1.6608.2-deepseek.0",
+  "description": "Electron desktop shell reconstructed from Claude Desktop app.asar resources",
+  "author": "local reconstruction",
+  "private": true,
+  "main": ".vite/build/index.pre.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "clean": "node scripts/clean-build.mjs",
+    "build:main": "vite build --config vite.main.config.ts",
+    "build:preload": "node scripts/build-preload.mjs",
+    "build:renderer-shell": "node scripts/copy-renderer-shell.mjs",
+    "copy:original-shell": "node scripts/copy-original-shell-resources.mjs",
+    "build": "npm run clean && npm run build:main && npm run build:preload && npm run copy:original-shell && npm run copy:original-runtime && npm run audit:original",
+    "start": "npm run build && electron .",
+    "package": "npm run build && electron_config_cache=./.electron-cache electron-forge package && npm run align:bundle && npm run audit:bundle",
+    "make": "npm run build && electron_config_cache=./.electron-cache electron-forge make",
+    "sync:ion-dist": "node scripts/sync-ion-dist.mjs",
+    "verify:config": "node scripts/verify-project-config.mjs",
+    "audit:shell": "node scripts/audit-shell-alignment.mjs",
+    "smoke": "node scripts/smoke-desktop.mjs",
+    "smoke:packaged": "node scripts/smoke-desktop.mjs --packaged",
+    "copy:original-runtime": "node scripts/copy-original-runtime-modules.mjs",
+    "verify:runtime": "node scripts/verify-original-runtime.mjs",
+    "audit:original": "node scripts/audit-original-alignment.mjs",
+    "verify:alignment": "npm run audit:original && npm run audit:shell && npm run audit:semantic && npm run audit:bundle",
+    "audit:semantic": "node scripts/audit-shell-semantics.mjs",
+    "align:bundle": "node scripts/align-packaged-macos-bundle.mjs",
+    "audit:bundle": "node scripts/audit-packaged-bundle.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@electron-forge/cli": "^7.8.3",
+    "@electron-forge/maker-zip": "^7.8.3",
+    "@types/node": "^22.10.7",
+    "electron": "41.5.0",
+    "typescript": "~6.0.2",
+    "vite": "6.4.1"
+  },
+  "config": {
+    "forge": "./forge.config.cjs"
+  }
+}

@@ -1,0 +1,26 @@
+import { BrowserWindow } from "electron";
+import type { DesktopWindowOptions } from "./types";
+
+export function createMainWindow(options: DesktopWindowOptions): BrowserWindow {
+  const persisted = options.windowState;
+  const mainWindow = new BrowserWindow({
+    x: persisted?.x,
+    y: persisted?.y,
+    width: options.width ?? persisted?.width ?? 1200,
+    height: options.height ?? persisted?.height ?? 800,
+    minWidth: options.minWidth ?? 600,
+    minHeight: options.minHeight ?? 400,
+    titleBarStyle: "hidden",
+    titleBarOverlay: options.titleBarOverlay,
+    trafficLightPosition: options.trafficLightPosition,
+    show: options.showOnCreate ?? true,
+    backgroundColor: options.backgroundColor ?? "#ffffff",
+    opacity: 0,
+    webPreferences: {
+      preload: options.paths.mainWindowPreload,
+      enableBlinkFeatures: undefined,
+    },
+  });
+
+  return mainWindow;
+}
