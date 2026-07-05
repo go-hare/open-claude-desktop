@@ -1,0 +1,11 @@
+node_modules/
+.npm-cache/
+.electron-cache/
+.smoke-user-data/
+.smoke-user-data-packaged/
+.vite/
+out/
+dist/
+resources/ion-dist/
+.DS_Store
+*.log

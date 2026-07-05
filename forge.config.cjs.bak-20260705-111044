@@ -1,0 +1,50 @@
+const fs = require("node:fs");
+const path = require("node:path");
+
+const root = __dirname;
+const resourcesDir = path.join(root, "resources");
+const iconPath = path.join(resourcesDir, "electron");
+const ionDistRoot = path.join(resourcesDir, "ion-dist");
+const extraResource = [];
+
+if (fs.existsSync(ionDistRoot)) {
+  extraResource.push(ionDistRoot);
+}
+
+module.exports = {
+  packagerConfig: {
+    name: "Claude-Deepseek",
+    executableName: "Claude-Deepseek",
+    appBundleId: "com.local.claude-deepseek.desktop",
+    appCategoryType: "public.app-category.productivity",
+    asar: true,
+    download: {
+      cacheRoot: path.join(root, ".electron-cache"),
+    },
+    ignore: [
+      /^\/\.electron-cache(?:\/|$)/,
+      /^\/\.gitignore$/,
+      /^\/\.npm-cache(?:\/|$)/,
+      /^\/forge\.config\.cjs$/,
+      /^\/node_modules(?:\/|$)/,
+      /^\/out(?:\/|$)/,
+      /^\/resources(?:\/|$)/,
+      /^\/scripts(?:\/|$)/,
+      /^\/electron(?:\/|$)/,
+      /^\/shared(?:\/|$)/,
+      /^\/package-lock\.json$/,
+      /^\/tsconfig\.json$/,
+      /^\/vite\..*\.config\.ts$/,
+      /^\/README\.md$/,
+    ],
+    icon: iconPath,
+    extraResource,
+  },
+  rebuildConfig: {},
+  makers: [
+    {
+      name: "@electron-forge/maker-zip",
+      platforms: ["darwin"],
+    },
+  ],
+};

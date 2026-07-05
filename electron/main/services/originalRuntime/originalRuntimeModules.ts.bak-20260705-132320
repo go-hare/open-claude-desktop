@@ -1,0 +1,72 @@
+import { app } from "electron";
+import { createRequire } from "node:module";
+import fs from "node:fs";
+import path from "node:path";
+
+export type NodePtyModule = {
+  spawn: (file: string, args: string[], options: {
+    name?: string;
+    cols?: number;
+    rows?: number;
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+  }) => {
+    write: (data: string) => void;
+    kill: (signal?: string) => void;
+    resize?: (cols: number, rows: number) => void;
+    onData: (listener: (data: string) => void) => void;
+    onExit: (listener: (event: { exitCode: number; signal?: number | string }) => void) => void;
+  };
+};
+
+let configured = false;
+let nodePty: NodePtyModule | null | undefined;
+
+export function getOriginalRuntimeNodeModulesPath(): string {
+  if (app.isPackaged) return path.join(process.resourcesPath, "original-runtime-node_modules", "node_modules");
+  return path.join(app.getAppPath(), "resources", "original-runtime-node_modules", "node_modules");
+}
+
+export function configureOriginalRuntimeModules(): string | null {
+  const nodeModulesPath = getOriginalRuntimeNodeModulesPath();
+  if (!fs.existsSync(nodeModulesPath)) return null;
+  if (!process.env.NODE_PATH?.split(path.delimiter).includes(nodeModulesPath)) {
+    process.env.NODE_PATH = [nodeModulesPath, process.env.NODE_PATH].filter(Boolean).join(path.delimiter);
+  }
+  if (!configured) {
+    // Make Node's CommonJS resolver honor NODE_PATH for original compiled workers/runtimes too.
+    const Module = require("node:module") as { Module?: { _initPaths?: () => void }; _initPaths?: () => void };
+    Module.Module?._initPaths?.();
+    Module._initPaths?.();
+    configured = true;
+  }
+  return nodeModulesPath;
+}
+
+export function loadOriginalNodePty(): NodePtyModule | null {
+  if (nodePty !== undefined) return nodePty;
+  const nodeModulesPath = configureOriginalRuntimeModules();
+  if (!nodeModulesPath) {
+    nodePty = null;
+    return nodePty;
+  }
+  const packagePath = path.join(nodeModulesPath, "node-pty", "package.json");
+  if (!fs.existsSync(packagePath)) {
+    nodePty = null;
+    return nodePty;
+  }
+  const spawnHelper = path.join(nodeModulesPath, "node-pty", "build", "Release", "spawn-helper");
+  try {
+    if (fs.existsSync(spawnHelper)) fs.chmodSync(spawnHelper, 0o755);
+  } catch {
+    // Packaged app resources may be read-only; copy step should already preserve executable bit.
+  }
+  try {
+    const runtimeRequire = createRequire(packagePath);
+    nodePty = runtimeRequire("node-pty") as NodePtyModule;
+  } catch (error) {
+    console.warn("[original-runtime] node-pty unavailable", error);
+    nodePty = null;
+  }
+  return nodePty;
+}

@@ -1,0 +1,11 @@
+export { createDesktopWindow } from "./createDesktopWindow";
+export { createFindInPageView } from "./createFindInPageView";
+export { createMainView } from "./createMainView";
+export { createMainWindow } from "./createMainWindow";
+export { getFindInPageBounds } from "./findInPageBounds";
+export { layoutDesktopViews, layoutFindInPageView, layoutMainView } from "./layoutChildViews";
+export { defaultNavigationPolicy, handleNavigationUrl, installNavigationGuards, isInternalNavigationUrl } from "./navigationPolicy";
+export { normalizeSidebarMode, resolveInitialMainViewUrl } from "./routeMode";
+export type { DesktopTelemetryConfig, DesktopWindowOptions, DesktopWindowParts, InitialRouteMode, SidebarMode } from "./types";
+export { createSecondaryWindowManager } from "./secondaryWindows";
+export type { SecondaryWindowManager, SecondaryWindowName } from "./secondaryWindows";

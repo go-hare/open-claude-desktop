@@ -1,0 +1,205 @@
+import { app, dialog, nativeImage, shell } from "electron";
+import fs from "node:fs/promises";
+import path from "node:path";
+import type { IpcHandlerContext } from "./context";
+import type { InterfaceHandlers } from "./registerIpc";
+
+const TEXT_LIMIT_BYTES = 20 * 1024 * 1024;
+
+function asObject(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function asPath(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function safeName(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 180) || `download-${Date.now()}`;
+}
+
+function dataToBuffer(data: unknown, options: Record<string, unknown> = {}): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (data instanceof Uint8Array) return Buffer.from(data);
+  if (typeof data === "string") {
+    const encoding = options.encoding === "base64" ? "base64" : "utf8";
+    return Buffer.from(data, encoding);
+  }
+  if (typeof data === "object" && data !== null) {
+    const record = data as Record<string, unknown>;
+    if (typeof record.base64 === "string") return Buffer.from(record.base64, "base64");
+    if (typeof record.content === "string") return dataToBuffer(record.content, asObject(record));
+    if (typeof record.data === "string") return dataToBuffer(record.data, asObject(record));
+  }
+  return Buffer.from(String(data ?? ""));
+}
+
+async function statEntry(filePath: string) {
+  const stat = await fs.stat(filePath);
+  return {
+    name: path.basename(filePath),
+    path: filePath,
+    isDirectory: stat.isDirectory(),
+    isFile: stat.isFile(),
+    size: stat.size,
+    modifiedAt: stat.mtime.toISOString(),
+  };
+}
+
+async function listFilesRecursive(root: string, limit: number, output: string[] = []): Promise<string[]> {
+  if (output.length >= limit) return output;
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    if (output.length >= limit) break;
+    if (entry.name.startsWith(".")) continue;
+    const filePath = path.join(root, entry.name);
+    if (entry.isDirectory()) await listFilesRecursive(filePath, limit, output);
+    else if (entry.isFile()) output.push(filePath);
+  }
+  return output;
+}
+
+function resolveSystemPath(name: string): string | null {
+  const aliases: Record<string, Parameters<typeof app.getPath>[0]> = {
+    home: "home",
+    appData: "appData",
+    userData: "userData",
+    sessionData: "sessionData",
+    temp: "temp",
+    exe: "exe",
+    module: "module",
+    desktop: "desktop",
+    documents: "documents",
+    downloads: "downloads",
+    music: "music",
+    pictures: "pictures",
+    videos: "videos",
+    logs: "logs",
+    crashDumps: "crashDumps",
+  };
+  const key = aliases[name];
+  if (!key) return null;
+  try {
+    return app.getPath(key);
+  } catch {
+    return null;
+  }
+}
+
+async function writeDownload(fileName: string, data: unknown, options: Record<string, unknown> = {}): Promise<string> {
+  const targetDir = asPath(options.directory) ?? app.getPath("downloads");
+  await fs.mkdir(targetDir, { recursive: true });
+  const targetPath = path.join(targetDir, safeName(fileName));
+  await fs.writeFile(targetPath, dataToBuffer(data, options));
+  return targetPath;
+}
+
+export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceHandlers {
+  const pickDirectory = async (multiSelections: boolean, options: unknown, defaultPath?: unknown) => {
+    const optionObj = asObject(options);
+    const result = await dialog.showOpenDialog(context.windows.mainWindow, {
+      title: typeof optionObj.title === "string" ? optionObj.title : undefined,
+      defaultPath: asPath(defaultPath) ?? asPath(optionObj.defaultPath) ?? undefined,
+      properties: multiSelections ? ["openDirectory", "multiSelections"] : ["openDirectory"],
+    });
+    if (result.canceled) return multiSelections ? [] : null;
+    return multiSelections ? result.filePaths : result.filePaths[0] ?? null;
+  };
+
+  return {
+    browseFiles: async (_event, options) => {
+      const optionObj = asObject(options);
+      const result = await dialog.showOpenDialog(context.windows.mainWindow, {
+        title: typeof optionObj.title === "string" ? optionObj.title : undefined,
+        defaultPath: asPath(optionObj.defaultPath) ?? undefined,
+        properties: optionObj.multiSelections === false ? ["openFile"] : ["openFile", "multiSelections"],
+      });
+      return result.canceled ? [] : result.filePaths;
+    },
+    browseFolder: async (_event, options, defaultPath) => pickDirectory(false, options, defaultPath),
+    browseFolders: async (_event, options, defaultPath) => pickDirectory(true, options, defaultPath),
+    listDirectory: async (_event, directory) => {
+      const dir = asPath(directory);
+      if (!dir) return [];
+      const entries = await fs.readdir(dir);
+      return Promise.all(entries.map((entry) => statEntry(path.join(dir, entry))));
+    },
+    listFilesInFolder: async (_event, directory, options) => {
+      const dir = asPath(directory);
+      if (!dir) return [];
+      const optionObj = asObject(options);
+      if (optionObj.recursive) return listFilesRecursive(dir, Number(optionObj.limit ?? 500));
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      return entries.filter((entry) => entry.isFile()).map((entry) => path.join(dir, entry.name));
+    },
+    readLocalFile: async (_event, filePath, options) => {
+      const target = asPath(filePath);
+      if (!target) return null;
+      const stat = await fs.stat(target);
+      if (stat.size > TEXT_LIMIT_BYTES && asObject(options).encoding !== "base64") {
+        return { path: target, name: path.basename(target), size: stat.size, tooLarge: true };
+      }
+      const buffer = await fs.readFile(target);
+      return asObject(options).encoding === "base64" ? buffer.toString("base64") : buffer.toString("utf8");
+    },
+    writeLocalFile: async (_event, filePath, data, options) => {
+      const target = asPath(filePath);
+      if (!target) return null;
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, dataToBuffer(data, asObject(options)));
+      return target;
+    },
+    writeFileDownload: async (_event, fileName, data, options) => writeDownload(asPath(fileName) ?? `download-${Date.now()}.txt`, data, asObject(options)),
+    writeFileDownloadAndOpen: async (_event, fileName, data, options) => {
+      const target = await writeDownload(asPath(fileName) ?? `download-${Date.now()}.txt`, data, asObject(options));
+      await shell.openPath(target);
+      return target;
+    },
+    openLocalFile: async (_event, filePath) => {
+      const target = asPath(filePath);
+      if (!target) return { ok: false, error: "missing path" };
+      const error = await shell.openPath(target);
+      return { ok: error.length === 0, error: error || undefined };
+    },
+    showInFolder: async (_event, filePath) => {
+      const target = asPath(filePath);
+      if (!target) return false;
+      shell.showItemInFolder(target);
+      return true;
+    },
+    whichApplication: async () => null,
+    getSystemPath: async (_event, name) => (typeof name === "string" ? resolveSystemPath(name) : null),
+    getLocalFileThumbnail: async (_event, filePath, width, height) => {
+      const target = asPath(filePath);
+      if (!target) return null;
+      const image = await nativeImage.createThumbnailFromPath(target, { width: Number(width) || 256, height: Number(height) || 256 });
+      return image.isEmpty() ? null : image.toDataURL();
+    },
+    savePastedFile: async (_event, fileName, data, directory) => writeDownload(asPath(fileName) ?? `paste-${Date.now()}`, data, { directory: asPath(directory) ?? app.getPath("downloads") }),
+    promoteScratchpadFile: async (_event, sourcePath, targetDirectory) => {
+      const source = asPath(sourcePath);
+      if (!source) return null;
+      const targetDir = asPath(targetDirectory) ?? app.getPath("downloads");
+      await fs.mkdir(targetDir, { recursive: true });
+      const target = path.join(targetDir, path.basename(source));
+      await fs.copyFile(source, target);
+      return target;
+    },
+    exportLocalFileToGoogleDrive: async (_event, filePath) => {
+      const target = asPath(filePath);
+      if (!target) return { ok: false, error: "missing path" };
+      const cloudStorage = path.join(app.getPath("home"), "Library", "CloudStorage");
+      const candidates = await fs.readdir(cloudStorage).catch(() => []);
+      const googleDriveRoot = candidates.find((entry) => entry.toLowerCase().startsWith("googledrive"));
+      if (!googleDriveRoot) {
+        shell.showItemInFolder(target);
+        return { ok: true, exported: false, localPath: target };
+      }
+      const destinationDir = path.join(cloudStorage, googleDriveRoot);
+      const destination = path.join(destinationDir, path.basename(target));
+      await fs.copyFile(target, destination);
+      shell.showItemInFolder(destination);
+      return { ok: true, exported: true, localPath: target, cloudPath: destination };
+    },
+  };
+}
