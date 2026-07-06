@@ -1,6 +1,22 @@
 import { app, Menu, shell } from "electron";
 import type { IpcHandlerContext } from "./context";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
+import { setOriginalIncognitoTitleBarMode } from "../windows/createMainWindow";
+
+function navigationState(context: IpcHandlerContext) {
+  const { mainView } = context.windows;
+  const history = mainView.webContents.navigationHistory;
+  return {
+    url: mainView.webContents.getURL(),
+    canGoBack: history.canGoBack(),
+    canGoForward: history.canGoForward(),
+  };
+}
+
+function emitNavigationState(context: IpcHandlerContext): void {
+  const { mainView } = context.windows;
+  dispatchBridgeEvent(mainView.webContents, "claude.web", "BrowserNavigation", "navigationState_$store$_update", navigationState(context));
+}
 
 function popupMainMenu(context: IpcHandlerContext): void {
   const { mainWindow, mainView, secondaryWindows } = context.windows;
@@ -42,7 +58,10 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
         return true;
       },
       captureScreenshot: async () => (await mainWindow.capturePage()).toDataURL(),
-      setIncognitoMode: async () => true,
+      setIncognitoMode: async (_event, enabled) => {
+        setOriginalIncognitoTitleBarMode(Boolean(enabled));
+        return true;
+      },
       setThemeMode: async () => true,
     },
     WindowState: {
@@ -52,29 +71,38 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
       fullscreenChanged: async () => mainWindow.isFullScreen(),
       visibilityChanged: async () => mainWindow.isVisible(),
       zoomFactorChanged: async () => mainView.webContents.getZoomFactor(),
-      cuDockStateChanged: async () => null,
+      cuDockStateChanged: async () => ({
+        visible: mainWindow.isVisible(),
+        focused: mainWindow.isFocused(),
+        fullscreen: mainWindow.isFullScreen(),
+      }),
     },
     BrowserNavigation: {
       goBack: async () => {
         if (mainView.webContents.navigationHistory.canGoBack()) mainView.webContents.navigationHistory.goBack();
+        setTimeout(() => emitNavigationState(context), 0);
         return true;
       },
       goForward: async () => {
         if (mainView.webContents.navigationHistory.canGoForward()) mainView.webContents.navigationHistory.goForward();
+        setTimeout(() => emitNavigationState(context), 0);
         return true;
       },
-      reportNavigationState: async () => ({ url: mainView.webContents.getURL() }),
+      reportNavigationState: async () => navigationState(context),
       requestMainMenuPopup: async () => {
         popupMainMenu(context);
         return true;
       },
-      navigationState_: async () => ({ url: mainView.webContents.getURL() }),
+      navigationState_: async () => navigationState(context),
     },
   });
 
   registerNamespaceHandlers("claude.internal.ui", {
     MainWindowTitleBar: {
-      titleBarReady: async () => true,
+      titleBarReady: async () => {
+        setOriginalIncognitoTitleBarMode(false);
+        return true;
+      },
       updateTitleBar: async () => true,
       requestReloadMainView: async () => {
         mainView.webContents.reload();
@@ -113,4 +141,9 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
       },
     },
   });
+
+  const reportNavigationChange = () => emitNavigationState(context);
+  mainView.webContents.on("did-navigate", reportNavigationChange);
+  mainView.webContents.on("did-navigate-in-page", reportNavigationChange);
+  mainView.webContents.on("did-finish-load", reportNavigationChange);
 }

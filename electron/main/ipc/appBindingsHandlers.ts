@@ -1,4 +1,5 @@
 import type { IpcHandlerContext } from "./context";
+import { describeMcpServer, mcpConfigEntries } from "../services/mcp/mcpRuntime";
 import { dispatchBridgeEvent, registerDirectInvokeHandler } from "./registerIpc";
 
 export const CLAUDE_APP_BINDING_CHANNELS = {
@@ -10,7 +11,7 @@ export const CLAUDE_APP_BINDING_CHANNELS = {
 export function registerAppBindingsHandlers(context: IpcHandlerContext): void {
   registerDirectInvokeHandler(
     CLAUDE_APP_BINDING_CHANNELS.listMcpServers,
-    async () => Object.entries(context.settings.getMcpServersConfig()).map(([name, config]) => ({ name, config, status: "configured" })),
+    async () => mcpConfigEntries(context.settings.getMcpServersConfig()).map(([name, config]) => ({ ...describeMcpServer(name, config), config })),
     "claudeAppBindings",
   );
 
@@ -18,11 +19,12 @@ export function registerAppBindingsHandlers(context: IpcHandlerContext): void {
     CLAUDE_APP_BINDING_CHANNELS.connectToMcpServer,
     async (_event, serverName) => {
       const name = typeof serverName === "string" ? serverName : "";
-      const config = context.settings.getMcpServersConfig()[name];
+      const config = mcpConfigEntries(context.settings.getMcpServersConfig()).find(([candidate]) => candidate === name)?.[1];
       const payload = config
-        ? { ok: true, serverName: name, uuid: `local-${name}`, status: "configured" }
+        ? { ok: true, serverName: name, uuid: `local-${name}`, ...describeMcpServer(name, config) }
         : { ok: false, serverName: name, error: "missing_mcp_server_config" };
-      dispatchBridgeEvent(context.windows.mainView.webContents, "claude.settings", "MCP", "mcpStatusChanged", name, payload.status, payload);
+      const status = "status" in payload && typeof payload.status === "string" ? payload.status : "missing";
+      dispatchBridgeEvent(context.windows.mainView.webContents, "claude.settings", "MCP", "mcpStatusChanged", name, status, payload);
       return payload;
     },
     "claudeAppBindings",

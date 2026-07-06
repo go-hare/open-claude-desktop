@@ -9,7 +9,9 @@ export type FeatureStateKey =
   | "orbitDeploys"
   | "customMarketplaces"
   | "localPlugins"
-  | "autoVerify";
+  | "autoVerify"
+  | "vmState"
+  | "vmForceDisableHostLoop";
 
 type FeatureState = Record<FeatureStateKey, Record<string, unknown>>;
 
@@ -22,6 +24,8 @@ function emptyState(): FeatureState {
     customMarketplaces: {},
     localPlugins: {},
     autoVerify: {},
+    vmState: {},
+    vmForceDisableHostLoop: {},
   };
 }
 

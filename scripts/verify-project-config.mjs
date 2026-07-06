@@ -11,6 +11,7 @@ const forgeConfig = require(path.join(root, "forge.config.cjs"));
 const requiredFiles = [
   "electron/main/index.pre.ts",
   "electron/main/index.ts",
+  "electron/preload/coworkArtifact.ts",
   "vite.main.config.ts",
   "vite.preload.config.ts",
   "electron/renderer-shell/main-window.html",
@@ -33,5 +34,7 @@ if (pkg.devDependencies.electron !== "41.5.0") {
 if (!forgeConfig.packagerConfig?.asar) {
   throw new Error("Forge asar packaging is not enabled");
 }
+
+await import("./verify-bridge-parity.mjs");
 
 console.log("project config ok");

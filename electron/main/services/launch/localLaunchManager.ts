@@ -56,6 +56,12 @@ function appendLog(server: RunningServer, stream: "stdout" | "stderr", chunk: Bu
   if (server.logs.length > 1000) server.logs.splice(0, server.logs.length - 1000);
 }
 
+function npmCommand(scriptName: string): { command: string; args: string[] } {
+  return process.platform === "win32"
+    ? { command: "npm.cmd", args: ["run", scriptName] }
+    : { command: "/usr/bin/env", args: ["npm", "run", scriptName] };
+}
+
 async function waitForPort(port: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -93,6 +99,18 @@ export class LocalLaunchManager {
     return Array.from(this.servers.values()).map(({ child: _child, logs: _logs, command: _command, args: _args, ...server }) => server);
   }
 
+  getServer(serverId?: string): LaunchServerRecord | null {
+    const server = serverId ? this.servers.get(serverId) : Array.from(this.servers.values()).find((item) => item.status !== "stopped");
+    if (!server) return null;
+    const { child: _child, logs: _logs, command: _command, args: _args, ...record } = server;
+    return record;
+  }
+
+  getPreviewUrl(serverId?: string): string | null {
+    const server = this.getServer(serverId);
+    return server ? `http://127.0.0.1:${server.port}` : null;
+  }
+
   async startFromConfig(cwd: string, name?: string): Promise<{ serverId?: string; error?: string }> {
     const services = await this.getConfiguredServices(cwd);
     const selected = services.find((service) => service.name === name) ?? services[0];
@@ -103,7 +121,8 @@ export class LocalLaunchManager {
   async startPackageScript(cwd: string, scriptName: string, port: number): Promise<{ serverId?: string; error?: string }> {
     try {
       const serverId = id("server");
-      const record: RunningServer = { serverId, name: scriptName, port, status: "starting", startedAt: new Date().toISOString(), cwd, logs: [], command: "/usr/bin/env", args: ["npm", "run", scriptName] };
+      const command = npmCommand(scriptName);
+      const record: RunningServer = { serverId, name: scriptName, port, status: "starting", startedAt: new Date().toISOString(), cwd, logs: [], command: command.command, args: command.args };
       const child = spawn(record.command!, record.args!, { cwd, env: { ...process.env, PORT: String(port) } });
       record.child = child;
       child.stdout.on("data", (chunk: Buffer) => appendLog(record, "stdout", chunk));

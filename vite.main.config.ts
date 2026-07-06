@@ -8,7 +8,7 @@ export default defineConfig({
   publicDir: false,
   build: {
     outDir: ".vite/build",
-    emptyOutDir: true,
+    emptyOutDir: false,
     sourcemap: false,
     minify: false,
     target: "node22",

@@ -10,7 +10,8 @@ export type IpcNamespace =
   | "claude.skills"
   | "claude.simulator"
   | "claude.officeAddin"
-  | "claude.buddy";
+  | "claude.buddy"
+  | "claude.coworkArtifact";
 
 export function buildIpcChannel(namespace: IpcNamespace | string, iface: string, method: string): string {
   return `${EIPC_MESSAGE_PREFIX}_${EIPC_NAMESPACE_UUID}_$_${namespace}_$_${iface}_$_${method}`;

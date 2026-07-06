@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
@@ -10,7 +11,14 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const docsRoot = path.resolve(projectRoot, "../docs");
 const mirrorRoot = path.resolve(projectRoot, "../electron-shell-source/app-asar");
 const buildRoot = path.join(projectRoot, ".vite");
-const originalAsarPath = path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources/app.asar");
+const originalAsarCandidates = [
+  process.env.CLAUDE_ORIGINAL_ASAR,
+  process.env.CLAUDE_ORIGINAL_RESOURCES ? path.join(process.env.CLAUDE_ORIGINAL_RESOURCES, "app.asar") : undefined,
+  process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources/app.asar") : undefined,
+  path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources/app.asar"),
+  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app\\Contents\\Resources\\app.asar",
+].filter(Boolean);
+const originalAsarPath = originalAsarCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAsarCandidates[0];
 const packagedAsarPath = path.join(projectRoot, "out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app/Contents/Resources/app.asar");
 const runtimeModulesRoot = path.join(projectRoot, "resources/original-runtime-node_modules/node_modules");
 const packagedRuntimeUnpackedRoot = path.join(projectRoot, "out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app/Contents/Resources/app.asar.unpacked");
@@ -109,6 +117,7 @@ async function listAsarViteEntries(asarPath) {
   const asar = require("@electron/asar");
   return asar
     .listPackage(asarPath)
+    .map((entry) => `/${entry.replace(/\\/g, "/").replace(/^\/+/, "")}`)
     .filter((entry) => /^\/\.vite\/(build|renderer)(?:\/|$)/.test(entry))
     .sort();
 }
@@ -116,7 +125,7 @@ async function listAsarViteEntries(asarPath) {
 async function asarFileInfos(asarPath, relativePaths) {
   if (!(await exists(asarPath))) return relativePaths.map((entry) => ({ path: entry, exists: false }));
   const asar = require("@electron/asar");
-  const entries = new Set(asar.listPackage(asarPath));
+  const entries = new Set(asar.listPackage(asarPath).map((entry) => `/${entry.replace(/\\/g, "/").replace(/^\/+/, "")}`));
   return relativePaths.map((entry) => ({ path: entry, exists: entries.has(`/${entry}`) }));
 }
 

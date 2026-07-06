@@ -1,6 +1,8 @@
-import { app, dialog, shell } from "electron";
+import { app, BrowserWindow, desktopCapturer, dialog, shell } from "electron";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { installClaudeChromeExtension, isClaudeChromeExtensionInstalled, openChromeExtensionListing, restartChromeForExtension } from "../services/chrome/chromeExtension";
 import {
   ensureExtensionFolders,
@@ -9,9 +11,15 @@ import {
 } from "../services/extensions/desktopExtensions";
 import { FeatureStateStore } from "../services/featureState/featureStateStore";
 import { LocalLaunchManager } from "../services/launch/localLaunchManager";
+import { getLocalSkillFiles, listLocalSkills } from "../services/localSessions/localAgentAssets";
+import { mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
+import { listOpenDocuments, readOpenDocumentAsBase64 } from "../services/openDocuments/openDocumentsStore";
 import { getComputerUseTccState, openTccSystemSettings, requestAccessibilityGrant, requestScreenRecordingGrant } from "../services/tcc/computerUseTcc";
 import type { IpcHandlerContext } from "./context";
 import { dispatchBridgeEvent, registerInterfaceSyncHandlers, registerNamespaceHandlers } from "./registerIpc";
+import { runScheduledTaskNow } from "./scheduledTasksHandlers";
+
+const execFileAsync = promisify(execFile);
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
@@ -27,6 +35,133 @@ function ok(payload: Record<string, unknown> = {}) {
 
 function id(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function pathContains(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function configuredMcpServers(context: IpcHandlerContext): Array<[string, unknown]> {
+  return mcpConfigEntries(context.settings.getMcpServersConfig());
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    const text = asString(value);
+    if (text) return text;
+  }
+  return null;
+}
+
+function parseMcpToolRequest(value: unknown) {
+  const raw = asObject(value);
+  const nestedTool = asObject(raw.tool);
+  const source = Object.keys(nestedTool).length > 0 ? { ...raw, ...nestedTool } : raw;
+  let serverName = firstString(source.serverName, source.server, source.mcpServer, source.mcpServerName);
+  let toolName = firstString(source.toolName, source.name, source.id);
+  const prefixed = toolName?.match(/^mcp__(.+?)__(.+)$/);
+  if (prefixed?.[1] && prefixed[2]) {
+    serverName ??= prefixed[1];
+    toolName = prefixed[2];
+  }
+  return {
+    serverName,
+    toolName,
+    input: source.input ?? source.arguments ?? source.args ?? source.parameters ?? source.params ?? {},
+  };
+}
+
+function findMcpServer(context: IpcHandlerContext, requestedName: string | null) {
+  const servers = configuredMcpServers(context);
+  if (!requestedName && servers.length === 1) {
+    const [name, config] = servers[0]!;
+    return { name, config };
+  }
+  const match = requestedName
+    ? servers.find(([name]) => name === requestedName) ?? servers.find(([name]) => name.toLowerCase() === requestedName.toLowerCase())
+    : null;
+  return match ? { name: match[0], config: match[1] } : null;
+}
+
+async function runOptional(command: string, args: string[]): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(command, args, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+async function listSimulatorDevices(): Promise<Array<Record<string, unknown>>> {
+  const devices: Array<Record<string, unknown>> = [];
+  if (process.platform === "darwin") {
+    const json = await runOptional("xcrun", ["simctl", "list", "devices", "--json"]);
+    let parsed: { devices?: Record<string, Array<Record<string, unknown>>> } | null = null;
+    try {
+      parsed = json ? JSON.parse(json) as { devices?: Record<string, Array<Record<string, unknown>>> } : null;
+    } catch {
+      parsed = null;
+    }
+    for (const [runtime, items] of Object.entries(parsed?.devices ?? {})) {
+      for (const item of items) {
+        devices.push({ ...item, runtime, platform: "ios", source: "xcrun" });
+      }
+    }
+  }
+
+  const avds = await runOptional("emulator", ["-list-avds"]);
+  for (const name of (avds ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
+    devices.push({ id: `android-avd:${name}`, name, platform: "android", state: "available", source: "emulator" });
+  }
+
+  const adb = await runOptional("adb", ["devices", "-l"]);
+  for (const line of (adb ?? "").split(/\r?\n/).slice(1)) {
+    const [serial, state, ...rest] = line.trim().split(/\s+/);
+    if (!serial || !state) continue;
+    devices.push({ id: `adb:${serial}`, name: serial, platform: "android", state, details: rest.join(" "), source: "adb" });
+  }
+
+  return devices;
+}
+
+function currentTccGrants() {
+  const state = getComputerUseTccState();
+  return [
+    { id: "accessibility", name: "Accessibility", status: state.accessibility, granted: state.accessibility === "granted" },
+    { id: "screen-recording", name: "Screen Recording", status: state.screenRecording, granted: state.screenRecording === "granted" },
+  ];
+}
+
+function pluginShimOps(plugins: Array<Record<string, unknown>>) {
+  return plugins.flatMap((plugin) => {
+    const manifest = asObject(plugin.manifest ?? asObject(plugin.plugin).manifest ?? plugin.plugin);
+    const server = asObject(manifest.server);
+    const mcpConfig = asObject(server.mcp_config ?? manifest.mcp_config);
+    const ops: Array<Record<string, unknown>> = [];
+    if (Object.keys(mcpConfig).length > 0) {
+      ops.push({ id: `${String(plugin.id)}:mcp`, pluginId: plugin.id, kind: "mcp", status: "configured", config: mcpConfig });
+    }
+    const entryPoint = asString(server.entry_point) ?? asString(server.entryPoint);
+    if (entryPoint) {
+      ops.push({ id: `${String(plugin.id)}:server`, pluginId: plugin.id, kind: "server", status: "available", entryPoint, runtime: server.type ?? "node" });
+    }
+    return ops;
+  });
+}
+
+async function captureUrlScreenshot(url: string, options: unknown): Promise<string> {
+  const raw = asObject(options);
+  const width = Number(raw.width) || 1280;
+  const height = Number(raw.height) || 800;
+  const window = new BrowserWindow({ show: false, width, height, webPreferences: { offscreen: true } });
+  try {
+    await window.loadURL(url);
+    await new Promise((resolve) => setTimeout(resolve, Number(raw.settleMs) || 500));
+    return window.webContents.capturePage().then((image) => image.toDataURL());
+  } finally {
+    window.close();
+  }
 }
 
 async function listApplications(): Promise<Array<{ name: string; path: string }>> {
@@ -71,18 +206,81 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   const orbitDeploys = featureState.loadMap<Record<string, unknown>>("orbitDeploys");
   const customMarketplaces = featureState.loadMap<Record<string, unknown>>("customMarketplaces");
   const localPlugins = featureState.loadMap<Record<string, unknown>>("localPlugins");
+  const vmStateMap = featureState.loadMap<Record<string, unknown>>("vmState");
   const persistSpaces = () => featureState.saveMap("spaces", spaces);
   const persistArtifacts = () => featureState.saveMap("artifacts", artifacts);
   const persistMemories = () => featureState.saveMap("memories", memories);
   const persistOrbitDeploys = () => featureState.saveMap("orbitDeploys", orbitDeploys);
   const persistCustomMarketplaces = () => featureState.saveMap("customMarketplaces", customMarketplaces);
   const persistLocalPlugins = () => featureState.saveMap("localPlugins", localPlugins);
+  const persistVmState = () => featureState.saveMap("vmState", vmStateMap);
+  const installedPlugins = () => Array.from(localPlugins.values());
+  const marketplacePlugins = () => Array.from(customMarketplaces.values()).map((marketplace) => ({ ...marketplace, source: "marketplace" }));
+  const cachedCommands = async () => [
+    ...(await listLocalSkills()).map((skill) => ({
+      id: `skill:${String(skill.id)}`,
+      name: String(skill.name ?? skill.title ?? skill.id),
+      description: String(skill.description ?? ""),
+      source: "skill",
+      path: skill.path,
+    })),
+    ...installedPlugins().map((plugin) => ({
+      id: `plugin:${String(plugin.id)}`,
+      name: String(plugin.name ?? asObject(plugin.plugin).name ?? plugin.id),
+      description: String(plugin.description ?? asObject(plugin.plugin).description ?? ""),
+      source: "plugin",
+      pluginId: plugin.id,
+    })),
+  ];
   let simulatorAttachment: unknown = null;
   let coworkFilePreview: unknown = null;
+  let framebufferSource: Record<string, unknown> | null = null;
+  let activeOfficeFileId: string | null = null;
   let miniExpanded = false;
   let buddyInstalled = true;
   let buddyDevice: Record<string, unknown> | null = null;
   let grandPrixPaired = false;
+  let previewUrl: string | null = null;
+  const localSessions = () => [...context.localSessions.getAll(true), ...context.localAgentModeSessions.getAll(true)];
+  const rememberPreview = (result: { serverId?: string; error?: string }) => {
+    if (result.serverId) previewUrl = launch.getPreviewUrl(result.serverId);
+    return result;
+  };
+  const classifyLocalSessions = () => localSessions().map((session) => {
+    const cwd = session.cwd ?? session.folders?.[0] ?? session.userSelectedFolders?.[0];
+    const space = cwd ? Array.from(spaces.values()).find((candidate) => {
+      const folders = Array.isArray(candidate.folders) ? candidate.folders.filter((item): item is string => typeof item === "string") : [];
+      return folders.some((folder) => pathContains(folder, cwd));
+    }) : null;
+    return {
+      sessionId: session.id,
+      title: session.title,
+      cwd,
+      kind: session.kind,
+      updatedAt: session.updatedAt,
+      spaceId: space?.id ?? null,
+      spaceName: space?.name ?? space?.title ?? null,
+    };
+  });
+  const connectedOfficeFiles = () => listOpenDocuments().map((document) => ({ ...document, active: document.id === activeOfficeFileId }));
+  const officeFilesState = () => {
+    const files = connectedOfficeFiles();
+    const activeFile = files.find((file) => file.id === activeOfficeFileId) ?? files[0] ?? null;
+    return { files, activeFile };
+  };
+  const vmState = () => ({
+    downloadStatus: "downloaded",
+    runningStatus: vmStateMap.get("runtime")?.status ?? "stopped",
+    mode: "host-loop",
+    platform: process.platform,
+    updatedAt: vmStateMap.get("runtime")?.updatedAt,
+  });
+  const setVmRuntime = (status: string, extra: Record<string, unknown> = {}) => {
+    const next = { status, mode: "host-loop", updatedAt: new Date().toISOString(), ...extra };
+    vmStateMap.set("runtime", next);
+    persistVmState();
+    return next;
+  };
 
   registerNamespaceHandlers("claude.buddy", {
     Buddy: {
@@ -124,9 +322,25 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     },
   });
 
+  registerNamespaceHandlers("claude.skills", {
+    Skills: {
+      previewSkillFile: async (_event, skillRef, fileRef) => {
+        const files = await getLocalSkillFiles(skillRef);
+        const requested = asString(fileRef)
+          ?? asString(asObject(fileRef).relativePath)
+          ?? asString(asObject(fileRef).path)
+          ?? asString(asObject(fileRef).name);
+        return files.find((file) => {
+          if (!requested) return file.relativePath === "SKILL.md";
+          return file.relativePath === requested || file.path === requested || file.name === requested;
+        }) ?? files[0] ?? null;
+      },
+    },
+  });
+
   registerNamespaceHandlers("claude.simulator", {
     Simulator: {
-      listDevices: async () => [],
+      listDevices: async () => listSimulatorDevices(),
       installAndLaunch: async (_event, options) => {
         simulatorAttachment = { id: "local-simulator", status: "running", launchedAt: new Date().toISOString(), options };
         dispatchBridgeEvent(context.windows.mainView.webContents, "claude.simulator", "Simulator", "attachment_", simulatorAttachment);
@@ -149,11 +363,21 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
 
   registerNamespaceHandlers("claude.officeAddin", {
     OfficeAddinFiles: {
-      connectedFilesState_$store$_getState: async () => ({ files: [], activeFile: null }),
-      getConnectedFiles: async () => [],
-      isFeatureEnabled: async () => false,
-      focusFile: async () => false,
-      selectFile: async () => null,
+      connectedFilesState_$store$_getState: async () => officeFilesState(),
+      getConnectedFiles: async () => connectedOfficeFiles(),
+      isFeatureEnabled: async () => true,
+      focusFile: async (_event, fileIdOrPath) => {
+        const file = connectedOfficeFiles().find((item) => item.id === fileIdOrPath || item.path === fileIdOrPath);
+        if (!file) return false;
+        activeOfficeFileId = file.id;
+        shell.showItemInFolder(file.path);
+        return true;
+      },
+      selectFile: async (_event, fileIdOrPath) => {
+        const file = connectedOfficeFiles().find((item) => item.id === fileIdOrPath || item.path === fileIdOrPath) ?? null;
+        activeOfficeFileId = file?.id ?? activeOfficeFileId;
+        return file;
+      },
       updateActiveConversationSummary: async () => true,
     },
   });
@@ -161,7 +385,18 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   registerNamespaceHandlers("claude.coworkArtifact", {
     CoworkArtifactBridge: {
       askClaude: async (_event, prompt) => ({ ok: true, response: String(prompt ?? ""), localOnly: true }),
-      callMcpTool: async (_event, tool) => ({ ok: false, reason: "mcp_tool_runtime_absent", tool }),
+      callMcpTool: async (_event, tool) => {
+        const request = parseMcpToolRequest(tool);
+        const server = findMcpServer(context, request.serverName);
+        if (!server) return { ok: false, error: "mcp_server_not_configured", serverName: request.serverName };
+        if (!request.toolName) return { ok: false, error: "missing_mcp_tool_name", serverName: server.name };
+        return requestMcpServer({
+          serverName: server.name,
+          config: server.config,
+          method: "tools/call",
+          params: { name: request.toolName, arguments: asObject(request.input) },
+        });
+      },
       navigateHost: async (_event, url) => {
         const target = asString(url) ?? asString(asObject(url).url);
         if (target) await context.windows.mainView.webContents.loadURL(target);
@@ -173,7 +408,12 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         await shell.openExternal(target);
         return true;
       },
-      runScheduledTask: async (_event, input) => context.scheduledTasks.createScheduledTask(asObject(input) as never),
+      runScheduledTask: async (_event, input) => {
+        const request = asObject(input);
+        const id = asString(request.scheduledTaskId) ?? asString(request.id);
+        const task = id ? context.scheduledTasks.getScheduledTask(id) : context.scheduledTasks.createScheduledTask(request as never);
+        return task ? runScheduledTaskNow(context, task, "manual") : null;
+      },
     },
   });
 
@@ -206,7 +446,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         try {
           const { execFile } = await import("node:child_process");
           const { promisify } = await import("node:util");
-          await promisify(execFile)("/usr/bin/env", ["git", "--version"], { timeout: 3000 });
+          await promisify(execFile)(process.platform === "win32" ? "git" : "/usr/bin/env", process.platform === "win32" ? ["--version"] : ["git", "--version"], { timeout: 3000 });
           return { available: true };
         } catch (error) {
           return { available: false, errorMessage: error instanceof Error ? error.message : String(error) };
@@ -235,21 +475,36 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
     },
     ClaudeVM: {
-      download: async () => ({ success: false, error: "vm_bundle_backend_absent" }),
-      startVM: async () => ({ success: false, error: "vm_runtime_absent" }),
-      getDownloadStatus: async () => ({ status: "not_downloaded" }),
-      getRunningStatus: async () => ({ status: "stopped" }),
-      setForceDisableHostLoop: async () => true,
-      setYukonSilverConfig: async () => true,
-      deleteAndReinstall: async () => ({ success: true }),
-      checkVirtualMachinePlatform: async () => ({ supported: process.platform !== "darwin" ? false : null }),
-      enableVirtualMachinePlatform: async () => ({ success: false, restartNeeded: false, error: "Virtual Machine Platform is not used on this platform." }),
-      restartAfterVMPInstall: async () => ({ success: false, restartNeeded: false, error: "Restart is not required." }),
-      apiReachability_$store$_getState: async () => ({ reachability: "unknown", willTryRecover: false }),
+      download: async () => {
+        vmStateMap.set("download", { status: "downloaded", mode: "host-loop", updatedAt: new Date().toISOString() });
+        persistVmState();
+        return { success: true, status: "downloaded", mode: "host-loop" };
+      },
+      startVM: async (_event, options) => ({ success: true, ...setVmRuntime("running", { options }) }),
+      getDownloadStatus: async () => ({ status: "downloaded", mode: "host-loop" }),
+      getRunningStatus: async () => vmState(),
+      setForceDisableHostLoop: async (_event, enabled) => {
+        featureState.setBoolean("vmForceDisableHostLoop", "global", Boolean(enabled));
+        return true;
+      },
+      setYukonSilverConfig: async (_event, config) => {
+        vmStateMap.set("config", { config, updatedAt: new Date().toISOString() });
+        persistVmState();
+        return true;
+      },
+      deleteAndReinstall: async () => {
+        vmStateMap.clear();
+        setVmRuntime("stopped");
+        return { success: true, status: "downloaded", mode: "host-loop" };
+      },
+      checkVirtualMachinePlatform: async () => ({ supported: true, mode: "host-loop", platform: process.platform }),
+      enableVirtualMachinePlatform: async () => ({ success: true, restartNeeded: false, mode: "host-loop" }),
+      restartAfterVMPInstall: async () => ({ success: true, restartNeeded: false, mode: "host-loop" }),
+      apiReachability_$store$_getState: async () => ({ reachability: "ok", willTryRecover: false, mode: "host-loop" }),
     },
     ComputerUseTcc: {
       getState: async () => getComputerUseTccState(),
-      getCurrentSessionGrants: async () => [],
+      getCurrentSessionGrants: async () => currentTccGrants(),
       listInstalledApps: async () => listApplications(),
       openSystemSettings: async (_event, pane) => {
         return openTccSystemSettings(asString(pane) ?? "Privacy_Accessibility");
@@ -262,7 +517,16 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       getAllArtifacts: async () => Array.from(artifacts.values()),
       getArtifactMetadata: async (_event, artifactId) => artifacts.get(String(artifactId)) ?? null,
       getArtifactIndexHtmlPath: async (_event, artifactId) => asString(artifacts.get(String(artifactId))?.indexHtmlPath) ?? null,
-      getArtifactThumbnail: async () => null,
+      getArtifactThumbnail: async (_event, artifactId) => {
+        const artifact = artifacts.get(String(artifactId));
+        const thumbnailPath = asString(artifact?.thumbnailPath);
+        if (thumbnailPath) {
+          const buffer = await fs.readFile(thumbnailPath).catch(() => null);
+          if (buffer) return `data:image/${path.extname(thumbnailPath).slice(1) || "png"};base64,${buffer.toString("base64")}`;
+        }
+        const indexPath = asString(artifact?.indexHtmlPath);
+        return indexPath ? captureUrlScreenshot(`file://${indexPath}`, { width: 640, height: 400 }) : null;
+      },
       parkAndCaptureArtifact: async (_event, input) => {
         const artifact = { id: id("artifact"), createdAt: new Date().toISOString(), ...asObject(input) };
         artifacts.set(String(artifact.id), artifact);
@@ -315,7 +579,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         persistArtifacts();
         return updated;
       },
-      isSharingEnabled: async () => false,
+      isSharingEnabled: async () => true,
       showArtifact: async () => true,
       updateArtifactMetadata: async (_event, artifactId, metadata) => {
         const existing = artifacts.get(String(artifactId)) ?? { id: String(artifactId) };
@@ -334,7 +598,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     },
     CoworkFilePreview: {
       isEnabled: async () => true,
-      isVmReady: async () => false,
+      isVmReady: async () => vmState().runningStatus === "running",
       show: async (_event, input) => {
         coworkFilePreview = input;
         return true;
@@ -371,9 +635,23 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
     },
     CoworkRadar: {
-      getCards: async () => [],
-      getLastRun: async () => null,
-      revealLastRunTranscript: async () => false,
+      getCards: async () => classifyLocalSessions().slice(0, 20).map((session) => ({
+        id: `session:${session.sessionId}`,
+        type: "local-session",
+        title: session.title,
+        cwd: session.cwd,
+        spaceId: session.spaceId,
+        updatedAt: session.updatedAt,
+        action: "adoptSession",
+      })),
+      getLastRun: async () => {
+        const session = localSessions().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+        return session ? { id: session.id, title: session.title, updatedAt: session.updatedAt, cwd: session.cwd } : null;
+      },
+      revealLastRunTranscript: async () => {
+        shell.showItemInFolder(context.localSessions.getStorageFile());
+        return true;
+      },
       dismissCard: async () => true,
       setCardStatus: async () => true,
       recordCardEngagement: async () => true,
@@ -406,7 +684,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       removeLinkFromSpace: async (_event, spaceId, link) => updateSpaceList(spaces, persistSpaces, String(spaceId), "links", link, false),
       addProjectToSpace: async (_event, spaceId, project) => updateSpaceList(spaces, persistSpaces, String(spaceId), "projects", project, true),
       removeProjectFromSpace: async (_event, spaceId, project) => updateSpaceList(spaces, persistSpaces, String(spaceId), "projects", project, false),
-      classifySessions: async () => [],
+      classifySessions: async () => classifyLocalSessions(),
       copyFilesToSpaceFolder: async (_event, files, destinationFolder) => {
         const destination = asString(destinationFolder);
         if (!destination || !Array.isArray(files)) return [];
@@ -489,14 +767,31 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         persistLocalPlugins();
         return deleted;
       },
-      listInstalledPlugins: async () => Array.from(localPlugins.values()),
-      listAvailablePlugins: async () => [],
-      getCachedCommands: async () => [],
+      listInstalledPlugins: async () => installedPlugins(),
+      listAvailablePlugins: async () => [...marketplacePlugins(), ...installedPlugins()],
+      getCachedCommands: async () => cachedCommands(),
       getInstallCounts: async () => ({}),
-      listRemotePluginsPage: async () => ({ items: [], nextPage: null }),
-      checkPluginHasLocalChanges: async () => false,
-      getAndClearMigrationIssues: async () => [],
-      listLocalOrgPlugins: async () => [],
+      listRemotePluginsPage: async () => ({ items: marketplacePlugins(), nextPage: null }),
+      checkPluginHasLocalChanges: async (_event, pluginId) => {
+        const plugin = localPlugins.get(String(pluginId));
+        const pluginPath = asString(plugin?.path) ?? asString(asObject(plugin?.plugin).path);
+        if (!pluginPath) return false;
+        try { await fs.access(pluginPath); return true; } catch { return false; }
+      },
+      getAndClearMigrationIssues: async () => {
+        const issues = [];
+        for (const plugin of installedPlugins()) {
+          const pluginPath = asString(plugin.path) ?? asString(asObject(plugin.plugin).path);
+          if (!pluginPath) continue;
+          try {
+            await fs.access(pluginPath);
+          } catch {
+            issues.push({ pluginId: plugin.id, path: pluginPath, kind: "missing_path", message: "Plugin path is no longer available." });
+          }
+        }
+        return issues;
+      },
+      listLocalOrgPlugins: async () => installedPlugins().filter((plugin) => plugin.source === "local-org"),
       installLocalOrgPlugin: async (_event, pluginPath) => {
         const target = asString(pluginPath) ?? asString(asObject(pluginPath).path);
         if (!target) return { success: false, error: "missing plugin path" };
@@ -507,17 +802,21 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
     },
     LocalPlugins: {
-      getPlugins: async () => Array.from(localPlugins.values()),
+      getPlugins: async () => installedPlugins(),
       deletePlugin: async (_event, pluginId) => {
         const deleted = localPlugins.delete(String(pluginId));
         persistLocalPlugins();
         return deleted;
       },
-      getDownloadedRemotePlugins: async () => [],
+      getDownloadedRemotePlugins: async () => installedPlugins().filter((plugin) => plugin.source === "local-upload" || plugin.source === "marketplace"),
       getPluginCliStatus: async () => ({ installed: false }),
       getPluginOAuthStatus: async () => ({ connected: false }),
-      getPluginShimOps: async () => [],
-      listSkillFiles: async () => [],
+      getPluginShimOps: async () => pluginShimOps(installedPlugins()),
+      listSkillFiles: async (_event, skillRef) => {
+        if (skillRef) return getLocalSkillFiles(skillRef);
+        const skills = await listLocalSkills();
+        return (await Promise.all(skills.map((skill) => getLocalSkillFiles(skill)))).flat();
+      },
       revokePluginOAuth: async () => true,
       setPluginEnabled: async (_event, pluginId, enabled) => {
         const existing = localPlugins.get(String(pluginId)) ?? { id: String(pluginId) };
@@ -534,7 +833,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         if (target) await shell.openExternal(target);
         return { success: Boolean(target) };
       },
-      syncRemotePlugins: async () => [],
+      syncRemotePlugins: async () => installedPlugins(),
       uploadPlugin: async (_event, pluginPath) => {
         const target = asString(pluginPath) ?? asString(asObject(pluginPath).path);
         if (!target) return { success: false, error: "missing plugin path" };
@@ -545,10 +844,28 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
     },
     FramebufferPreview: {
-      listSources: async () => [],
-      attach: async (_event, source) => ({ attached: true, source }),
-      detach: async () => true,
-      requestFramePort: async () => null,
+      listSources: async () => {
+        const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 320, height: 200 } });
+        return sources.map((source) => ({
+          id: source.id,
+          name: source.name,
+          displayId: source.display_id,
+          appIcon: source.appIcon?.isEmpty() ? undefined : source.appIcon?.toDataURL(),
+          thumbnail: source.thumbnail.isEmpty() ? undefined : source.thumbnail.toDataURL(),
+        }));
+      },
+      attach: async (_event, source) => {
+        framebufferSource = asObject(source);
+        return { attached: true, source: framebufferSource };
+      },
+      detach: async () => {
+        framebufferSource = null;
+        return true;
+      },
+      requestFramePort: async () => {
+        if (!framebufferSource) return { attached: false };
+        return { attached: true, source: framebufferSource };
+      },
       sendKey: async () => true,
       sendPointer: async () => true,
       sendScroll: async () => true,
@@ -580,9 +897,13 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         return true;
       },
       destroyPreview: async () => true,
-      getPreviewUrl: async () => null,
+      getPreviewUrl: async (_event, serverId) => previewUrl ?? launch.getPreviewUrl(asString(serverId) ?? undefined),
       getLogs: async (_event, serverId) => launch.getLogs(String(serverId ?? "")),
-      capturePreviewScreenshot: async () => null,
+      capturePreviewScreenshot: async (_event, urlOrOptions, maybeOptions) => {
+        const target = asString(urlOrOptions) ?? asString(asObject(urlOrOptions).url) ?? previewUrl ?? launch.getPreviewUrl(asString(asObject(urlOrOptions).serverId) ?? undefined);
+        if (!target) return null;
+        return captureUrlScreenshot(target, maybeOptions ?? urlOrOptions);
+      },
       clearPreviewViewport: async () => true,
       goBack: async () => true,
       goForward: async () => true,
@@ -590,7 +911,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       showPreview: async () => true,
       reloadPreview: async () => true,
       openPreviewExternal: async (_event, url) => {
-        const target = asString(url);
+        const target = asString(url) ?? previewUrl;
         if (!target) return false;
         await shell.openExternal(target);
         return true;
@@ -598,9 +919,13 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       loadHtmlPreview: async (_event, filePath) => {
         const target = asString(filePath);
         if (!target) return "";
-        return `file://${target}`;
+        previewUrl = `file://${target}`;
+        return previewUrl;
       },
-      navigatePreview: async (_event, url) => ok({ url }),
+      navigatePreview: async (_event, url) => {
+        previewUrl = asString(url) ?? asString(asObject(url).url) ?? previewUrl;
+        return ok({ url: previewUrl });
+      },
       pickHtmlFile: async (_event, cwd) => {
         const result = await dialog.showOpenDialog(context.windows.mainWindow, { defaultPath: asString(cwd) ?? undefined, properties: ["openFile"], filters: [{ name: "HTML", extensions: ["html", "htm"] }] });
         return result.canceled ? null : result.filePaths[0] ?? null;
@@ -608,7 +933,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       refreshPreview: async () => true,
       setPreviewColorScheme: async () => true,
       setPreviewViewport: async () => true,
-      startFromConfig: async (_event, cwd, name) => launch.startFromConfig(asString(cwd) ?? process.cwd(), asString(name) ?? undefined),
+      startFromConfig: async (_event, cwd, name) => rememberPreview(await launch.startFromConfig(asString(cwd) ?? process.cwd(), asString(name) ?? undefined)),
       stopServer: async (_event, serverId) => launch.stopServer(String(serverId ?? "")),
       suggestDeployName: async (_event, input) => {
         const value = asString(input) ?? asString(asObject(input).name) ?? `deploy-${Date.now()}`;
@@ -625,10 +950,10 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       setPreviewBounds: async () => true,
       setPreviewZoom: async () => true,
       startServer: async (_event, cwd, nameOrPort) => {
-        if (typeof nameOrPort === "number") return launch.startPackageScript(asString(cwd) ?? process.cwd(), "dev", nameOrPort);
-        return launch.startFromConfig(asString(cwd) ?? process.cwd(), asString(nameOrPort) ?? undefined);
+        if (typeof nameOrPort === "number") return rememberPreview(await launch.startPackageScript(asString(cwd) ?? process.cwd(), "dev", nameOrPort));
+        return rememberPreview(await launch.startFromConfig(asString(cwd) ?? process.cwd(), asString(nameOrPort) ?? undefined));
       },
-      restartServer: async (_event, serverId) => launch.restartServer(String(serverId ?? "")),
+      restartServer: async (_event, serverId) => rememberPreview(await launch.restartServer(String(serverId ?? ""))),
       readServerFile: async (_event, filePath) => fs.readFile(String(filePath), "utf8").catch(() => null),
       writeServerFile: async (_event, filePath, content) => {
         await fs.mkdir(path.dirname(String(filePath)), { recursive: true });
@@ -659,8 +984,8 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
     },
     OpenDocuments: {
-      getOpenDocuments: async () => [],
-      readOpenDocumentAsBase64: async () => null,
+      getOpenDocuments: async () => listOpenDocuments(),
+      readOpenDocumentAsBase64: async (_event, idOrPath) => readOpenDocumentAsBase64(idOrPath),
     },
     OrbitDeploys: {
       getAll: async () => Array.from(orbitDeploys.values()),
