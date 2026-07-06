@@ -1,7 +1,12 @@
 export { createDesktopWindow } from "./createDesktopWindow";
 export { createFindInPageView } from "./createFindInPageView";
 export { createMainView } from "./createMainView";
-export { createMainWindow } from "./createMainWindow";
+export {
+  applyOriginalTitleBarOverlay,
+  createMainWindow,
+  getOriginalWindowBackgroundColor,
+  setOriginalIncognitoTitleBarMode,
+} from "./createMainWindow";
 export { getFindInPageBounds } from "./findInPageBounds";
 export { layoutDesktopViews, layoutFindInPageView, layoutMainView } from "./layoutChildViews";
 export { defaultNavigationPolicy, handleNavigationUrl, installNavigationGuards, isInternalNavigationUrl } from "./navigationPolicy";

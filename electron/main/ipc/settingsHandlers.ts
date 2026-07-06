@@ -13,7 +13,9 @@ import {
   revealInstalledExtension,
   setInstalledExtensionEnabled,
   setInstalledExtensionSettings,
+  updateInstalledExtension,
 } from "../services/extensions/desktopExtensions";
+import { describeMcpServer, mcpConfigEntries } from "../services/mcp/mcpRuntime";
 import { handleSupportBundleAction } from "../services/support/supportBundle";
 import { openCustom3pSetupWindow } from "../windows/custom3pSetupWindow";
 import type { IpcHandlerContext } from "./context";
@@ -63,7 +65,11 @@ function configureGlobalShortcut(context: IpcHandlerContext, accelerator: unknow
   const value = typeof accelerator === "string" && accelerator.length > 0 ? accelerator : null;
   const previous = context.settings.getGlobalShortcut();
   if (previous) globalShortcut.unregister(previous);
-  if (!value) return context.settings.setGlobalShortcut(null);
+  if (!value) {
+    const result = context.settings.setGlobalShortcut(null);
+    dispatchBridgeEvent(context.windows.mainView.webContents, "claude.settings", "GlobalShortcut", "globalShortcutChange", null);
+    return result;
+  }
 
   const registered = globalShortcut.register(value, () => {
     context.windows.mainWindow.show();
@@ -248,7 +254,7 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       getMcpServersConfig: async () => settings.getMcpServersConfig(),
       getMcpServersConfigWithStatus: async () => {
         const config = settings.getMcpServersConfig();
-        return Object.fromEntries(Object.entries(config).map(([name, value]) => [name, { config: value, status: "configured" }]));
+        return Object.fromEntries(mcpConfigEntries(config).map(([name, value]) => [name, { config: value, ...describeMcpServer(name, value) }]));
       },
       revealConfig: async () => {
         shell.showItemInFolder(settings.getMcpConfigFile());
@@ -264,8 +270,11 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         return true;
       },
       mcpConfigChange: async () => settings.getMcpServersConfig(),
-      mcpStatusChanged: async () => null,
-      revealMcpServerSettingsRequested: async () => null,
+      mcpStatusChanged: async () => {
+        const config = settings.getMcpServersConfig();
+        return Object.fromEntries(mcpConfigEntries(config).map(([name, value]) => [name, describeMcpServer(name, value)]));
+      },
+      revealMcpServerSettingsRequested: async () => settings.getMcpConfigFile(),
     },
     FilePickers: {
       getDirectoryPath: async (_event, options) => choosePath(context, "directory", options),
@@ -413,7 +422,12 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         dispatchExtensionsChanged(context);
         return deleted;
       },
-      updateExtension: async () => false,
+      updateExtension: async (_event, extensionId) => {
+        if (typeof extensionId !== "string") return null;
+        const updated = await updateInstalledExtension(extensionUserDataDir(context), extensionId);
+        if (updated) dispatchExtensionsChanged(context);
+        return updated;
+      },
       openDirectory: async () => shell.openPath((await ensureExtensionFolders(extensionUserDataDir(context))).extensionsDir),
       openExtensionDirectory: async () => shell.openPath((await ensureExtensionFolders(extensionUserDataDir(context))).extensionsDir),
       openLogsDirectory: async () => shell.openPath(settings.getLogsDir()),
@@ -428,13 +442,13 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         dispatchExtensionsChanged(context);
         return true;
       },
-      extensionsChanged: async () => [],
+      extensionsChanged: async () => listInstalledExtensions(extensionUserDataDir(context)),
       extensionSettingsChanged: async () => ({}),
-      extensionDownloadProgress: async () => null,
+      extensionDownloadProgress: async () => ({ status: "idle", progress: 0 }),
     },
     SupportBundle: {
       submitAction: async (_event, action) => handleSupportBundleAction(context, action),
-      supportBundleState_: async () => null,
+      supportBundleState_: async () => ({ status: "idle" }),
     },
   });
 
@@ -446,7 +460,7 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         dispatchBridgeEvent(mainView, "claude.hybrid", "DesktopIntl", "localeChanged", locale);
         return true;
       },
-      localeChanged: async () => null,
+      localeChanged: async () => app.getLocale() || "en-US",
     },
   });
 

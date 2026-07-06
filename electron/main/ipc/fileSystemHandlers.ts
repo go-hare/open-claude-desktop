@@ -1,6 +1,7 @@
 import { app, dialog, nativeImage, shell } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { recordOpenDocument } from "../services/openDocuments/openDocumentsStore";
 import type { IpcHandlerContext } from "./context";
 import type { InterfaceHandlers } from "./registerIpc";
 
@@ -91,6 +92,7 @@ async function writeDownload(fileName: string, data: unknown, options: Record<st
   await fs.mkdir(targetDir, { recursive: true });
   const targetPath = path.join(targetDir, safeName(fileName));
   await fs.writeFile(targetPath, dataToBuffer(data, options));
+  await recordOpenDocument(targetPath);
   return targetPath;
 }
 
@@ -136,6 +138,7 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       const target = asPath(filePath);
       if (!target) return null;
       const stat = await fs.stat(target);
+      await recordOpenDocument(target);
       if (stat.size > TEXT_LIMIT_BYTES && asObject(options).encoding !== "base64") {
         return { path: target, name: path.basename(target), size: stat.size, tooLarge: true };
       }
@@ -147,6 +150,7 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       if (!target) return null;
       await fs.mkdir(path.dirname(target), { recursive: true });
       await fs.writeFile(target, dataToBuffer(data, asObject(options)));
+      await recordOpenDocument(target);
       return target;
     },
     writeFileDownload: async (_event, fileName, data, options) => writeDownload(asPath(fileName) ?? `download-${Date.now()}.txt`, data, asObject(options)),
@@ -158,6 +162,7 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
     openLocalFile: async (_event, filePath) => {
       const target = asPath(filePath);
       if (!target) return { ok: false, error: "missing path" };
+      await recordOpenDocument(target);
       const error = await shell.openPath(target);
       return { ok: error.length === 0, error: error || undefined };
     },
@@ -167,7 +172,15 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       shell.showItemInFolder(target);
       return true;
     },
-    whichApplication: async () => null,
+    whichApplication: async (_event, filePath) => {
+      const target = asPath(filePath);
+      return {
+        id: "system-default",
+        name: process.platform === "win32" ? "Windows default app" : process.platform === "darwin" ? "macOS default app" : "System default app",
+        path: target,
+        extension: target ? path.extname(target).slice(1).toLowerCase() : undefined,
+      };
+    },
     getSystemPath: async (_event, name) => (typeof name === "string" ? resolveSystemPath(name) : null),
     getLocalFileThumbnail: async (_event, filePath, width, height) => {
       const target = asPath(filePath);
@@ -183,6 +196,7 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       await fs.mkdir(targetDir, { recursive: true });
       const target = path.join(targetDir, path.basename(source));
       await fs.copyFile(source, target);
+      await recordOpenDocument(target);
       return target;
     },
     exportLocalFileToGoogleDrive: async (_event, filePath) => {
@@ -199,6 +213,7 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       const destination = path.join(destinationDir, path.basename(target));
       await fs.copyFile(target, destination);
       shell.showItemInFolder(destination);
+      await recordOpenDocument(destination);
       return { ok: true, exported: true, localPath: target, cloudPath: destination };
     },
   };

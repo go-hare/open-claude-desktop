@@ -10,6 +10,16 @@ type StoreStateDefinition = {
   getState: () => unknown;
 };
 
+function getBrowserNavigationState(context: IpcHandlerContext) {
+  const { mainView } = context.windows;
+  const history = mainView.webContents.navigationHistory;
+  return {
+    url: mainView.webContents.getURL(),
+    canGoBack: history.canGoBack(),
+    canGoForward: history.canGoForward(),
+  };
+}
+
 function registerStoreState(definition: StoreStateDefinition): void {
   const asyncHandlers: Record<string, IpcHandler> = {
     [`${definition.storeName}_$store$_getState`]: async () => definition.getState(),
@@ -56,7 +66,7 @@ export function registerStoreStateHandlers(context: IpcHandlerContext): void {
     namespace: "claude.web",
     iface: "BrowserNavigation",
     storeName: "navigationState",
-    getState: () => ({ url: context.windows.mainView.webContents.getURL() }),
+    getState: () => getBrowserNavigationState(context),
   });
   registerStoreState({
     namespace: "claude.web",

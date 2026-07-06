@@ -5,6 +5,7 @@ export type EventMethodName = string;
 
 export type InterfaceBridgeSpec = {
   invoke?: InvokeMethodName[];
+  sync?: InvokeMethodName[];
   events?: EventMethodName[];
 };
 

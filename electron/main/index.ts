@@ -7,7 +7,14 @@ import { configureOriginalRuntimeModules } from "./services/originalRuntime/orig
 import { createDefaultIpcContext, registerDesktopIpc } from "./ipc";
 import { getIpcHandlerRegistrySummary } from "./ipc/handlerRegistry";
 import { getApplicationMenuSummary, installApplicationMenu } from "./menu/applicationMenu";
-import { createDesktopWindow, type DesktopTelemetryConfig, type DesktopWindowParts, type SidebarMode } from "./windows";
+import {
+  applyOriginalTitleBarOverlay,
+  createDesktopWindow,
+  getOriginalWindowBackgroundColor,
+  type DesktopTelemetryConfig,
+  type DesktopWindowParts,
+  type SidebarMode,
+} from "./windows";
 import {
   createWindowStateKeeper,
   dispatchLaunchTarget,
@@ -146,7 +153,11 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
     app,
     getWindows: () => windows,
     createAndLoadWindow,
-    onNativeThemeUpdated: () => windows?.mainWindow.setBackgroundColor("#ffffff"),
+    onNativeThemeUpdated: () => {
+      if (!windows || windows.mainWindow.isDestroyed()) return;
+      windows.mainWindow.setBackgroundColor(getOriginalWindowBackgroundColor());
+      applyOriginalTitleBarOverlay(windows.mainWindow);
+    },
   });
 
   return {

@@ -16,8 +16,8 @@ import { registerWindowHandlers } from "./windowHandlers";
 export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandlerContext {
   return {
     windows,
-    localSessions: new LocalSessionStore("epitaxy"),
-    localAgentModeSessions: new LocalSessionStore("code"),
+    localSessions: new LocalSessionStore("code"),
+    localAgentModeSessions: new LocalSessionStore("epitaxy"),
     scheduledTasks: new ScheduledTaskStore(),
     settings: new SettingsStore(),
   };

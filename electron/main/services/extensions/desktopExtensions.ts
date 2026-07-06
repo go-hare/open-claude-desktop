@@ -267,6 +267,22 @@ export async function deleteInstalledExtension(userDataDir: string, extensionId:
   return true;
 }
 
+export async function updateInstalledExtension(userDataDir: string, extensionId: string): Promise<InstalledExtension | null> {
+  const metadata = await readMetadata(userDataDir);
+  const discovered = await discoverDirectoryRecords(userDataDir);
+  const record = metadata.extensions[extensionId] ?? discovered[extensionId];
+  if (!record || !(await exists(record.path))) return null;
+  const manifest = record.kind === "directory" ? await readManifestFromDirectory(record.path) : record.manifest;
+  const next: ExtensionMetadata = {
+    ...record,
+    manifest,
+    updatedAt: nowIso(),
+  };
+  metadata.extensions[extensionId] = next;
+  await writeMetadata(userDataDir, metadata);
+  return toInstalled(next, await readSettings(userDataDir, extensionId));
+}
+
 export async function revealInstalledExtension(userDataDir: string, extensionId: string): Promise<boolean> {
   const extension = await getInstalledExtension(userDataDir, extensionId);
   if (!extension) return false;

@@ -17,6 +17,7 @@ export default defineConfig({
         mainWindow: path.resolve(__dirname, "electron/preload/mainWindow.ts"),
         mainView: path.resolve(__dirname, "electron/preload/mainView.ts"),
         findInPage: path.resolve(__dirname, "electron/preload/findInPage.ts"),
+        coworkArtifact: path.resolve(__dirname, "electron/preload/coworkArtifact.ts"),
       },
       formats: ["cjs"],
       fileName: (_format, entryName) => `${entryName}.js`,

@@ -9,6 +9,7 @@ const entries = [
   ["mainWindow", "electron/preload/mainWindow.ts"],
   ["mainView", "electron/preload/mainView.ts"],
   ["findInPage", "electron/preload/findInPage.ts"],
+  ["coworkArtifact", "electron/preload/coworkArtifact.ts"],
 ];
 
 for (const [name, relativeEntry] of entries) {

@@ -2,12 +2,19 @@ import asar from "@electron/asar";
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const docsRoot = path.resolve(projectRoot, "../docs");
-const originalApp = path.resolve(projectRoot, "../../Claude-Deepseek.app");
+const originalAppCandidates = [
+  process.env.CLAUDE_ORIGINAL_APP,
+  process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.dirname(process.env.CLAUDE_ORIGINAL_APP_CONTENTS) : undefined,
+  path.resolve(projectRoot, "../../Claude-Deepseek.app"),
+  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app",
+].filter(Boolean);
+const originalApp = originalAppCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAppCandidates[0];
 const packagedApp = path.join(projectRoot, "out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app");
 
 async function exists(filePath) {
@@ -49,7 +56,16 @@ function plistPrint(infoPlist, key) {
   try {
     return execFileSync("/usr/libexec/PlistBuddy", ["-c", `Print :${key}`, infoPlist], { encoding: "utf8" }).trim();
   } catch {
-    return null;
+    try {
+      const source = fsSync.readFileSync(infoPlist, "utf8");
+      if (key === "ElectronAsarIntegrity:Resources/app.asar:hash") {
+        return source.match(/<key>ElectronAsarIntegrity<\/key>[\s\S]*?<key>Resources\/app\.asar<\/key>[\s\S]*?<key>hash<\/key>\s*<string>([^<]+)<\/string>/)?.[1] ?? null;
+      }
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return source.match(new RegExp(`<key>${escaped}</key>\\s*<string>([^<]+)</string>`))?.[1] ?? null;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -102,7 +118,9 @@ const info = Object.fromEntries(infoKeys.map((key) => [key, {
 
 const packagedAsarHeaderHash = (await exists(packagedAsar)) ? asarHeaderSha256(packagedAsar) : null;
 const plistAsarHash = plistPrint(packagedInfo, "ElectronAsarIntegrity:Resources/app.asar:hash");
-const asarEntries = (await exists(packagedAsar)) ? asar.listPackage(packagedAsar) : [];
+const asarEntries = (await exists(packagedAsar))
+  ? asar.listPackage(packagedAsar).map((entry) => `/${entry.replace(/\\/g, "/").replace(/^\/+/, "")}`)
+  : [];
 const asarEntrySet = new Set(asarEntries);
 const unpackedRoot = path.join(packagedApp, "Contents/Resources/app.asar.unpacked");
 const missingRuntimeAsarEntries = expectedRuntimeEntries.filter((entry) => !asarEntrySet.has(entry));

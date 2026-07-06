@@ -55,7 +55,15 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
   if (method === "getAppName") return app.getName();
   if (method === "getBuildProps") return { appVersion: app.getVersion(), platform: process.platform, arch: process.arch };
   if (method === "getSupport") return {};
-  if (method === "reportNavigationState" || method === "navigationState_") return { url: context.windows.mainView.webContents.getURL() };
+  if (method === "reportNavigationState" || method === "navigationState_") {
+    const { mainView } = context.windows;
+    const history = mainView.webContents.navigationHistory;
+    return {
+      url: mainView.webContents.getURL(),
+      canGoBack: history.canGoBack(),
+      canGoForward: history.canGoForward(),
+    };
+  }
   if (method === "status" && iface === "Buddy") return { status: "fallback" };
   if (method === "deviceStatus") return { status: "fallback" };
 

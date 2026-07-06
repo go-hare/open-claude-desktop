@@ -17,11 +17,18 @@ await assertExists("node-pty/lib/index.js");
 await assertExists("node-pty/build/Release/pty.node");
 const spawnHelper = await assertExists("node-pty/build/Release/spawn-helper");
 const mode = (await fs.stat(spawnHelper)).mode & 0o777;
-if ((mode & 0o111) === 0) throw new Error(`node-pty spawn-helper is not executable: ${mode.toString(8)}`);
+if (process.platform !== "win32" && (mode & 0o111) === 0) {
+  throw new Error(`node-pty spawn-helper is not executable: ${mode.toString(8)}`);
+}
 await assertExists("@ant/claude-native/claude-native-binding.node");
 await assertExists("@ant/claude-swift/build/Release/swift_addon.node");
 await assertExists("@ant/claude-swift/build/Release/computer_use.node");
 await assertExists("ws/index.js");
+
+if (process.platform !== "darwin") {
+  console.log(`original runtime modules present; native smoke skipped on ${process.platform}`);
+  process.exit(0);
+}
 
 const nodePty = require(path.join(runtimeNodeModules, "node-pty"));
 const output = await new Promise((resolve, reject) => {

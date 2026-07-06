@@ -2,11 +2,18 @@ import asar from "@electron/asar";
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const originalApp = path.resolve(projectRoot, "../../Claude-Deepseek.app");
+const originalAppCandidates = [
+  process.env.CLAUDE_ORIGINAL_APP,
+  process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.dirname(process.env.CLAUDE_ORIGINAL_APP_CONTENTS) : undefined,
+  path.resolve(projectRoot, "../../Claude-Deepseek.app"),
+  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app",
+].filter(Boolean);
+const originalApp = originalAppCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAppCandidates[0];
 const packagedApp = path.join(projectRoot, "out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app");
 
 async function exists(filePath) {

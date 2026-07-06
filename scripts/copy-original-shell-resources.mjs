@@ -13,7 +13,6 @@ const buildEntriesToCopy = [
   "aboutWindow.js",
   "buddy.js",
   "computerUseTeach.js",
-  "coworkArtifact.js",
   "quickWindow.js",
   "window-shared.css",
   "mcp-runtime",
@@ -25,7 +24,7 @@ const buildEntriesToCopy = [
 // The TypeScript preloads remain in the project as the in-progress "turned source" layer.
 const originalPreloadMode = process.env.CLAUDE_SHELL_PRELOAD_MODE !== "source";
 if (originalPreloadMode) {
-  buildEntriesToCopy.push("mainWindow.js", "mainView.js", "findInPage.js");
+  buildEntriesToCopy.push("mainWindow.js", "mainView.js", "findInPage.js", "coworkArtifact.js");
 }
 
 async function exists(filePath) {

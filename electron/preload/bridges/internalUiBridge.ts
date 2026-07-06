@@ -4,13 +4,11 @@ export const internalUiBridgeSpec: NamespaceBridgeSpec = {
   MainWindowTitleBar: {
     invoke: [
       "titleBarReady",
-      "updateTitleBar",
       "requestReloadMainView",
       "requestMainMenuPopup",
       "isClaudeCurrentlyHealthy",
-      "showLoadError",
-      "hideLoadError",
     ],
+    events: ["updateTitleBar", "showLoadError", "hideLoadError"],
   },
   AboutWindow: {
     invoke: ["getAppName", "getBuildProps", "getSupport", "openHelp"],

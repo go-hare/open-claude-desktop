@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -6,7 +7,13 @@ import { fileURLToPath } from "node:url";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = path.resolve(projectRoot, "..");
 const docsRoot = path.join(workspaceRoot, "docs");
-const originalAppResourcesRoot = path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources");
+const originalResourceCandidates = [
+  process.env.CLAUDE_ORIGINAL_RESOURCES,
+  process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources") : undefined,
+  path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources"),
+  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app\\Contents\\Resources",
+].filter(Boolean);
+const originalAppResourcesRoot = originalResourceCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalResourceCandidates[0];
 const originalIonDistRoot = path.join(originalAppResourcesRoot, "ion-dist");
 const currentIonDistRoot = path.join(projectRoot, "resources/ion-dist");
 const mirrorViteRoot = path.join(workspaceRoot, "electron-shell-source/app-asar/.vite");
