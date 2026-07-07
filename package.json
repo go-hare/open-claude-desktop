@@ -35,7 +35,6 @@
     "align:bundle": "node scripts/align-packaged-macos-bundle.mjs",
     "audit:bundle": "node scripts/audit-packaged-bundle.mjs"
   },
-  "dependencies": {},
   "devDependencies": {
     "@electron-forge/cli": "^7.8.3",
     "@electron-forge/maker-zip": "^7.8.3",
@@ -46,5 +45,8 @@
   },
   "config": {
     "forge": "./forge.config.cjs"
+  },
+  "optionalDependencies": {
+    "node-pty": "1.1.0-beta34"
   }
 }

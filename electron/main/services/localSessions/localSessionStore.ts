@@ -16,8 +16,10 @@ export type LocalSessionRuntime = {
 };
 
 export type LocalToolPermissionRequest = {
+  alwaysAllowScope?: string;
   decisionReason?: string;
   description?: string;
+  hasAlwaysAllow?: boolean;
   input?: unknown;
   requestId: string;
   sessionId: string;
@@ -59,6 +61,7 @@ export type LocalSession = {
   origin?: string;
   userSelectedFolders?: string[];
   cliSessionId?: string;
+  slashCommands?: string[];
   runtime?: LocalSessionRuntime;
   metadata?: Record<string, unknown>;
   pendingToolPermissions?: LocalToolPermissionRequest[];
@@ -359,6 +362,15 @@ export class LocalSessionStore {
     const session = this.sessions.get(id);
     if (!session) return null;
     session.cliSessionId = cliSessionId;
+    session.updatedAt = nowIso();
+    this.save();
+    return session;
+  }
+
+  setSlashCommands(id: string, slashCommands: string[]): LocalSession | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    session.slashCommands = [...new Set(slashCommands.filter((command) => typeof command === "string" && command.length > 0))];
     session.updatedAt = nowIso();
     this.save();
     return session;
