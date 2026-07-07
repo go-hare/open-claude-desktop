@@ -15,6 +15,7 @@ import {
   setLocalSkillEnabled,
 } from "../services/localSessions/localAgentAssets";
 import type { LocalSessionStore } from "../services/localSessions/localSessionStore";
+import { getSupportedCommands } from "../services/localSessions/supportedCommands";
 import { getTranscriptFeedback, submitTranscriptFeedback } from "../services/localSessions/transcriptFeedbackStore";
 import { loadOriginalNodePty } from "../services/originalRuntime/originalRuntimeModules";
 import type { IpcHandlerContext } from "./context";
@@ -886,52 +887,52 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
     return { success: true, localOnly: true, mode: "local-handoff", session: toBridgeSession(updated ?? session), readiness };
   };
 
-  const appendPtyData = (sessionId: string, data: Buffer) => {
+  const shellPtyBaseSessionId = (sessionId: string) => {
+    const separator = sessionId.indexOf("::");
+    return separator === -1 ? sessionId : sessionId.slice(0, separator);
+  };
+
+  const appendPtyData = (sessionId: string, data: Buffer | string) => {
     const entry = ptys.get(sessionId);
     if (!entry) return;
-    entry.buffer += data.toString("utf8");
+    const text = typeof data === "string" ? data : data.toString("utf8");
+    entry.buffer += text;
     if (entry.buffer.length > TEXT_LIMIT_BYTES) entry.buffer = entry.buffer.slice(-TEXT_LIMIT_BYTES);
-    dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "shell_pty_data", sessionId, data: data.toString("utf8") });
+    dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "shell_pty_data", sessionId, data: text });
   };
 
   const startShell = (sessionId: string, cols?: number, rows?: number) => {
-    const cwd = cwdFromSession(store, sessionId) ?? process.cwd();
-    ptys.get(sessionId)?.terminal.kill("SIGTERM");
+    const existing = ptys.get(sessionId);
+    if (existing) {
+      existing.terminal.resize?.(cols ?? 80, rows ?? 24);
+      return { ok: true, buffered: existing.buffer };
+    }
+
+    const cwd = cwdFromSession(store, shellPtyBaseSessionId(sessionId)) ?? process.cwd();
     const shell = defaultShell();
     const nodePty = loadOriginalNodePty();
-    if (nodePty) {
-      try {
-        const terminal = nodePty.spawn(shell.file, shell.args, {
-          name: "xterm-256color",
-          cols: cols ?? 80,
-          rows: rows ?? 24,
-          cwd,
-          env: { ...process.env, TERM: "xterm-256color" },
-        });
-        ptys.set(sessionId, { terminal, buffer: "" });
-        terminal.onData((data) => appendPtyData(sessionId, Buffer.from(data)));
-        terminal.onExit(({ exitCode, signal }) => {
-          dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "shell_pty_close", sessionId, code: exitCode, signal });
-          ptys.delete(sessionId);
-        });
-        return true;
-      } catch (error) {
-        console.warn("[local-sessions] node-pty spawn failed; falling back to child_process shell", error);
-      }
+    if (!nodePty) {
+      return { ok: false, error: "node-pty runtime unavailable" };
     }
-    const child = spawn(shell.file, shell.args, { cwd, env: { ...process.env, COLUMNS: String(cols ?? 80), LINES: String(rows ?? 24) } });
-    const terminal = {
-      write: (data: string) => { child.stdin.write(data); },
-      kill: (signal?: string) => { child.kill((signal as NodeJS.Signals | undefined) ?? "SIGTERM"); },
-    };
-    ptys.set(sessionId, { terminal, buffer: "" });
-    child.stdout.on("data", (data: Buffer) => appendPtyData(sessionId, data));
-    child.stderr.on("data", (data: Buffer) => appendPtyData(sessionId, data));
-    child.on("exit", (code, signal) => {
-      dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "shell_pty_close", sessionId, code, signal });
-      ptys.delete(sessionId);
-    });
-    return true;
+    try {
+      const terminal = nodePty.spawn(shell.file, shell.args, {
+        name: "xterm-256color",
+        cols: cols ?? 80,
+        rows: rows ?? 24,
+        cwd,
+        env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" },
+      });
+      ptys.set(sessionId, { terminal, buffer: "" });
+      terminal.onData((data) => appendPtyData(sessionId, data));
+      terminal.onExit(({ exitCode, signal }) => {
+        dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "shell_pty_close", sessionId, code: exitCode, signal });
+        ptys.delete(sessionId);
+      });
+      return { ok: true };
+    } catch (error) {
+      console.warn("[local-sessions] node-pty spawn failed", error);
+      return { ok: false, error: error instanceof Error ? error.message : "Failed to start shell" };
+    }
   };
 
   const realHandlers: InterfaceHandlers = {
@@ -1068,26 +1069,15 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
       const id = asString(scheduledTaskId) ?? asString(asObject(scheduledTaskId).scheduledTaskId);
       return id ? toBridgeSessions(store.getSessionsForScheduledTask(id)) : [];
     },
-    getSupportedCommands: async () => [
-      "start",
-      "sendMessage",
-      "stop",
-      "readFileAtCwd",
-      "writeSessionFile",
-      "getGitInfo",
-      "getGitDiff",
-      "getGitDiffStats",
-      "getDiffFileContent",
-      "startShellPty",
-      "stopShellPty",
-      "writeShellPty",
-      "resizeShellPty",
-      "getShellPtyBuffer",
-    ],
+    getSupportedCommands: async (_event, request) => getSupportedCommands(store, asObject(request)),
     getSessionsBridgeEnabled: async () => true,
     sessionsBridgeStatus_$store$_getState: async () => ({ enabled: true, status: "ready" }),
     interactiveAuth_$store$_getState: async () => ({ status: "idle" }),
-    getContextUsage: async (_event, id) => contextUsageFromTranscript(asString(id) ? store.getTranscript(asString(id)!) : []),
+    getContextUsage: async (_event, id) => {
+      const sessionId = asString(id);
+      if (!sessionId) return null;
+      return await sessionRunner.getContextUsage(sessionId);
+    },
     getCodeStats: async (_event, cwdOrSession) => (cwdOrSession ? getWorkspaceCodeStats(cwdFromSession(store, cwdOrSession)) : getSessionUsageCodeStats(store)),
     getDefaultEffort: async () => "medium",
     getEffort: async (_event, id) => (asString(id) ? store.getSession(asString(id)!)?.effort ?? "medium" : "medium"),

@@ -12,12 +12,20 @@ type RunnerCallbacks = {
 
 type ActiveTurn = {
   child: ChildProcessWithoutNullStreams;
+  pendingControlResponses: Map<string, PendingControlResponse>;
   pendingPermissions: Map<string, LocalToolPermissionRequest>;
   stderr: string[];
   sawAssistantText: boolean;
 };
 
+type PendingControlResponse = {
+  resolve: (value: unknown | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 type ToolPermissionDecision = "always" | "deny" | "once";
+const CONTROL_REQUEST_TIMEOUT_MS = 15_000;
+const contextWindowPattern = /\[(\d+(?:\.\d+)?)\s*([km])\]/i;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -29,6 +37,14 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function uniqueStrings(values: unknown[]): string[] {
@@ -72,7 +88,7 @@ function pushJsonOption(args: string[], flag: string, value: unknown): void {
   if (text) args.push(flag, text);
 }
 
-function defaultClaudeExecutable(): string {
+export function defaultClaudeExecutable(): string {
   if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE;
   if (process.platform !== "win32") return "claude";
   const candidates = [
@@ -83,7 +99,7 @@ function defaultClaudeExecutable(): string {
   return candidates.find((candidate): candidate is string => Boolean(candidate && fs.existsSync(candidate))) ?? "claude.cmd";
 }
 
-function spawnClaude(executable: string, args: string[], cwd: string): ChildProcessWithoutNullStreams {
+export function spawnClaude(executable: string, args: string[], cwd: string): ChildProcessWithoutNullStreams {
   const env = { ...process.env, CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT ?? "sdk-ts" };
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(executable)) {
     return spawn("cmd.exe", ["/d", "/s", "/c", executable, ...args], { cwd, env, windowsHide: true });
@@ -206,10 +222,114 @@ function writeJsonLine(child: ChildProcessWithoutNullStreams, value: Record<stri
   return true;
 }
 
+function parseJsonLine(line: string): Record<string, unknown> | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    return asRecord(JSON.parse(trimmed));
+  } catch {
+    return null;
+  }
+}
+
+function controlResponsePayload(event: Record<string, unknown> | null, requestId: string): unknown | undefined {
+  if (!event || stringValue(event.type) !== "control_response") return undefined;
+  const response = asRecord(event.response);
+  const responseRequestId = stringValue(response.request_id) ?? stringValue(event.request_id);
+  if (responseRequestId !== requestId) return undefined;
+  return stringValue(response.subtype) === "success" ? response.response ?? null : null;
+}
+
+function usageFromEvent(event: unknown) {
+  const raw = asRecord(event);
+  const message = asRecord(raw.message);
+  const usage = asRecord(message.usage ?? raw.usage);
+  const cacheCreationInputTokens = numberValue(usage.cache_creation_input_tokens ?? usage.cacheCreationInputTokens);
+  const cacheReadInputTokens = numberValue(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens);
+  const inputTokens = numberValue(usage.input_tokens ?? usage.inputTokens);
+  const outputTokens = numberValue(usage.output_tokens ?? usage.outputTokens);
+  const totalTokens = cacheCreationInputTokens + cacheReadInputTokens + inputTokens;
+  if (totalTokens <= 0 && outputTokens <= 0) return null;
+  return { cacheCreationInputTokens, cacheReadInputTokens, inputTokens, outputTokens, totalTokens };
+}
+
+function contextWindowTokensFromText(value: unknown): number | null {
+  const text = stringValue(value);
+  if (!text) return null;
+  const match = contextWindowPattern.exec(text);
+  if (!match?.[1]) return null;
+  const amount = Number.parseFloat(match[1]);
+  const multiplier = match[2]?.toLowerCase() === "m" ? 1_000_000 : 1_000;
+  return Number.isFinite(amount) ? Math.round(amount * multiplier) : null;
+}
+
+function latestInitEvent(session: LocalSession) {
+  const transcript = session.transcript ?? [];
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const event = asRecord(transcript[index]);
+    if (event.type === "system" && event.subtype === "init") return event;
+  }
+  return null;
+}
+
+function contextUsageFromStoredSession(session: LocalSession): Record<string, unknown> | null {
+  const messages = session.messages ?? [];
+  let latestUsage: ReturnType<typeof usageFromEvent> = null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    latestUsage = usageFromEvent(messages[index]?.raw);
+    if (latestUsage) break;
+  }
+  if (!latestUsage) {
+    const transcript = session.transcript ?? [];
+    for (let index = transcript.length - 1; index >= 0; index -= 1) {
+      latestUsage = usageFromEvent(transcript[index]);
+      if (latestUsage) break;
+    }
+  }
+  if (!latestUsage) return null;
+
+  const init = latestInitEvent(session);
+  const rawMaxTokens = contextWindowTokensFromText(init?.model) ?? contextWindowTokensFromText(session.model);
+  const percentage = rawMaxTokens ? Math.round(Math.max(0, Math.min(1, latestUsage.totalTokens / rawMaxTokens)) * 100) : undefined;
+  const categories = [
+    { name: "Input", tokens: latestUsage.inputTokens },
+    { name: "Prompt cache read", tokens: latestUsage.cacheReadInputTokens },
+    { name: "Prompt cache write", tokens: latestUsage.cacheCreationInputTokens },
+  ].filter((row) => row.tokens > 0);
+
+  return {
+    agents: [],
+    cacheCreationInputTokens: latestUsage.cacheCreationInputTokens,
+    cacheReadInputTokens: latestUsage.cacheReadInputTokens,
+    categories,
+    inputTokens: latestUsage.inputTokens,
+    mcpTools: [],
+    memoryFiles: [],
+    outputTokens: latestUsage.outputTokens,
+    percentage,
+    rawMaxTokens,
+    toolCallCount: 0,
+    totalTokens: latestUsage.totalTokens,
+  };
+}
+
 export class ClaudeCliRunner {
   private readonly active = new Map<string, ActiveTurn>();
 
   constructor(private readonly store: LocalSessionStore, private readonly callbacks: RunnerCallbacks) {}
+
+  async getContextUsage(sessionId: string): Promise<unknown | null> {
+    const activeTurn = this.active.get(sessionId);
+    const session = this.store.getSession(sessionId);
+    const storedUsage = session ? contextUsageFromStoredSession(session) : null;
+    if (activeTurn) {
+      const liveUsage = await this.sendControlRequest(activeTurn, { subtype: "get_context_usage" });
+      return liveUsage ?? storedUsage;
+    }
+
+    if (!session?.cliSessionId) return storedUsage;
+    return storedUsage ?? await this.runControlRequestProbe(session, { subtype: "get_context_usage" });
+  }
 
   runTurn(sessionId: string, prompt: string, request: Record<string, unknown> = {}): boolean {
     const session = this.store.getSession(sessionId);
@@ -240,7 +360,7 @@ export class ClaudeCliRunner {
       return false;
     }
 
-    const turn: ActiveTurn = { child, pendingPermissions: new Map(), stderr: [], sawAssistantText: false };
+    const turn: ActiveTurn = { child, pendingControlResponses: new Map(), pendingPermissions: new Map(), stderr: [], sawAssistantText: false };
     this.active.set(sessionId, turn);
 
     const stdout = readline.createInterface({ input: child.stdout });
@@ -254,6 +374,7 @@ export class ClaudeCliRunner {
       stdout.close();
       const current = this.active.get(sessionId);
       this.active.delete(sessionId);
+      this.clearPendingControlResponses(current);
       this.clearPendingPermissions(sessionId, current);
       const stderr = current?.stderr.join("").trim();
       if (code && code !== 0) this.emitError(sessionId, stderr || `claude exited with code ${code}`);
@@ -316,10 +437,14 @@ export class ClaudeCliRunner {
     }
 
     if (this.handleControlEvent(sessionId, event)) return;
+    if (this.handleControlResponse(sessionId, event)) return;
 
     const cliSessionId = stringValue(event.session_id);
     const session = this.store.getSession(sessionId);
     if (cliSessionId && session && session.cliSessionId !== cliSessionId) this.store.setCliSessionId(sessionId, cliSessionId);
+    if (event.type === "system" && stringValue(event.subtype) === "init" && Array.isArray(event.slash_commands)) {
+      this.store.setSlashCommands(sessionId, event.slash_commands.filter((command): command is string => typeof command === "string" && command.length > 0));
+    }
 
     this.store.appendTranscriptEvent(sessionId, event);
     this.callbacks.onEvent({ type: "message", sessionId, message: event });
@@ -332,6 +457,92 @@ export class ClaudeCliRunner {
     }
     if (event.type === "result" && turn && !turn.child.stdin.destroyed && !turn.child.stdin.writableEnded) turn.child.stdin.end();
     if (event.type !== "stream_event") this.callbacks.onSessionUpdated(sessionId);
+  }
+
+  private sendControlRequest(turn: ActiveTurn, request: Record<string, unknown>): Promise<unknown | null> {
+    const requestId = randomUUID();
+    return new Promise((resolve) => {
+      const cleanup = () => {
+        const pending = turn.pendingControlResponses.get(requestId);
+        if (pending) clearTimeout(pending.timer);
+        turn.pendingControlResponses.delete(requestId);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve(null);
+      }, CONTROL_REQUEST_TIMEOUT_MS);
+      turn.pendingControlResponses.set(requestId, { resolve, timer });
+      const ok = writeJsonLine(turn.child, { type: "control_request", request_id: requestId, request });
+      if (!ok) {
+        cleanup();
+        resolve(null);
+      }
+    });
+  }
+
+  private runControlRequestProbe(session: LocalSession, request: Record<string, unknown>): Promise<unknown | null> {
+    const cliSessionId = session.cliSessionId;
+    if (!cliSessionId) return Promise.resolve(null);
+    const executable = defaultClaudeExecutable();
+    const args = ["--print", ...buildClaudeArgs(session, {}, cliSessionId, true)];
+    const cwd = resolveCwd(session);
+    const requestId = randomUUID();
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let result: unknown | null = null;
+      let child: ChildProcessWithoutNullStreams | null = null;
+      const finish = (value: unknown | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        try {
+          child?.kill("SIGTERM");
+        } catch {
+          // The probe may already have exited.
+        }
+        finish(result);
+      }, CONTROL_REQUEST_TIMEOUT_MS);
+
+      try {
+        child = spawnClaude(executable, args, cwd);
+      } catch {
+        finish(null);
+        return;
+      }
+
+      const stdout = readline.createInterface({ input: child.stdout });
+      stdout.on("line", (line) => {
+        const event = parseJsonLine(line);
+        const response = controlResponsePayload(event, requestId);
+        if (response !== undefined) result = response;
+      });
+      child.on("error", () => finish(result));
+      child.on("close", () => {
+        stdout.close();
+        finish(result);
+      });
+
+      writeJsonLine(child, { type: "control_request", request_id: requestId, request });
+      child.stdin.end();
+    });
+  }
+
+  private handleControlResponse(sessionId: string, event: Record<string, unknown>): boolean {
+    const turn = this.active.get(sessionId);
+    if (!turn || stringValue(event.type) !== "control_response") return false;
+    const response = asRecord(event.response);
+    const requestId = stringValue(response.request_id) ?? stringValue(event.request_id);
+    if (!requestId) return true;
+    const pending = turn.pendingControlResponses.get(requestId);
+    if (!pending) return true;
+    turn.pendingControlResponses.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(stringValue(response.subtype) === "success" ? response.response ?? null : null);
+    return true;
   }
 
   private handleControlEvent(sessionId: string, event: Record<string, unknown>): boolean {
@@ -357,8 +568,10 @@ export class ClaudeCliRunner {
     const turn = this.active.get(sessionId);
     if (!turn) return;
     const pending: LocalToolPermissionRequest = {
+      alwaysAllowScope: stringValue(request.always_allow_scope) ?? stringValue(request.alwaysAllowScope) ?? stringValue(request.permission_scope),
       decisionReason: stringValue(request.decision_reason),
       description: stringValue(request.description) ?? stringValue(request.title) ?? stringValue(request.display_name),
+      hasAlwaysAllow: booleanValue(request.has_always_allow) ?? booleanValue(request.hasAlwaysAllow),
       input: request.input,
       requestId,
       sessionId,
@@ -428,6 +641,14 @@ export class ClaudeCliRunner {
     for (const request of pending) this.callbacks.onEvent({ type: "tool_permission_resolved", sessionId, request });
   }
 
+  private clearPendingControlResponses(turn?: ActiveTurn): void {
+    for (const pending of turn?.pendingControlResponses.values() ?? []) {
+      clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+    turn?.pendingControlResponses.clear();
+  }
+
   private emitError(sessionId: string, message: string): void {
     const event = { type: "error", sessionId, error: message, timestamp: nowIso() };
     this.store.appendTranscriptEvent(sessionId, event);
@@ -438,6 +659,7 @@ export class ClaudeCliRunner {
   private finishWithError(sessionId: string, executable: string, error: unknown): void {
     const current = this.active.get(sessionId);
     this.active.delete(sessionId);
+    this.clearPendingControlResponses(current);
     this.clearPendingPermissions(sessionId, current);
     const message = error instanceof Error ? error.message : String(error);
     this.emitError(sessionId, message);

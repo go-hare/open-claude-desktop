@@ -23,8 +23,16 @@ let configured = false;
 let nodePty: NodePtyModule | null | undefined;
 
 export function getOriginalRuntimeNodeModulesPath(): string {
-  if (app.isPackaged) return path.join(app.getAppPath(), "node_modules");
-  return path.join(app.getAppPath(), "resources", "original-runtime-node_modules", "node_modules");
+  const candidates = app.isPackaged
+    ? [
+      path.join(process.resourcesPath, "original-runtime-node_modules", "node_modules"),
+      path.join(app.getAppPath(), "node_modules"),
+    ]
+    : [
+      path.join(app.getAppPath(), "resources", "original-runtime-node_modules", "node_modules"),
+      path.join(app.getAppPath(), "node_modules"),
+    ];
+  return candidates.find((candidate) => fs.existsSync(path.join(candidate, "node-pty", "package.json"))) ?? candidates[0];
 }
 
 export function configureOriginalRuntimeModules(): string | null {
