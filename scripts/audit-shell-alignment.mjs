@@ -15,7 +15,9 @@ const originalAsarCandidates = [
   process.env.CLAUDE_ORIGINAL_ASAR,
   process.env.CLAUDE_ORIGINAL_RESOURCES ? path.join(process.env.CLAUDE_ORIGINAL_RESOURCES, "app.asar") : undefined,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources/app.asar") : undefined,
+  path.resolve(projectRoot, "../Claude-Deepseek.app/Contents/Resources/app.asar"),
   path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources/app.asar"),
+  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app/Contents/Resources/app.asar",
   "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app\\Contents\\Resources\\app.asar",
 ].filter(Boolean);
 const originalAsarPath = originalAsarCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAsarCandidates[0];

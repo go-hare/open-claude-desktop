@@ -10,7 +10,9 @@ const docsRoot = path.join(workspaceRoot, "docs");
 const originalResourceCandidates = [
   process.env.CLAUDE_ORIGINAL_RESOURCES,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources") : undefined,
+  path.resolve(projectRoot, "../Claude-Deepseek.app/Contents/Resources"),
   path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources"),
+  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app/Contents/Resources",
   "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app\\Contents\\Resources",
 ].filter(Boolean);
 const originalAppResourcesRoot = originalResourceCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalResourceCandidates[0];
@@ -23,7 +25,7 @@ const currentPackagePath = path.join(projectRoot, "package.json");
 const routeManifestPath = path.join(docsRoot, "route-manifest.json");
 const decompiledRoot = path.join(workspaceRoot, "decompiled");
 
-const sourceOwnedViteEntries = new Set(["build/index.js", "build/index.pre.js"]);
+const sourceOwnedViteEntries = new Set();
 const uiLibraryAllowlist = new Set([
   "react",
   "react-dom",
@@ -244,10 +246,9 @@ const routes = await collectRouteComponentEvidence();
 const componentTokens = await collectComponentTokenEvidence();
 
 addFailure(failures, ionDist.exact, "resources/ion-dist must be byte-for-byte identical to original Claude-Deepseek.app ion-dist");
-addFailure(failures, shellVite.aligned_with_allowlist, ".vite shell resources must match original mirror except source-owned build/index.js and build/index.pre.js");
+addFailure(failures, shellVite.exact, ".vite shell resources must be byte-for-byte identical to original mirror");
 addFailure(failures, packages.unapproved_current_ui_libraries.length === 0, "Current package.json adds UI/component libraries not declared by original app package.json");
 addFailure(failures, packages.current_ui_version_mismatches.length === 0, "Current package.json UI/component library versions differ from original app package.json");
-addFailure(failures, routes.manifest_exists, "Missing route-manifest.json; cannot trace component chunks to original routes");
 if (routes.manifest_exists) {
   addFailure(failures, routes.chunk_route_count === routes.chunk_routes_with_assets, "Some route component chunks are missing from current ion-dist assets");
   addFailure(failures, routes.key_routes.every((entry) => entry.chunk_exists && entry.decompiled_exists), "Key desktop/setup routes must have original chunk and decompiled evidence");
@@ -258,9 +259,10 @@ const report = {
   policy: {
     standard: "original-first alignment: no guessed JS/CSS/font/component structure",
     original_js_css_fonts: "resources/ion-dist must stay byte-for-byte identical to Claude-Deepseek.app/Contents/Resources/ion-dist",
-    electron_shell_resources: "all original .vite build/renderer files must match except source-owned main entry rebuild outputs",
+    electron_shell_resources: "all original .vite build/renderer files must match byte-for-byte",
     component_library: "renderer components come from original compiled chunks; new source UI libraries are forbidden unless declared by original package.json with matching version",
-    source_main_process: "main-process TypeScript may be reconstructed, but every user-visible shell function needs original evidence or must be marked inferred in docs",
+    route_manifest: "optional evidence only; byte-for-byte .vite and ion-dist alignment are the hard gates",
+    source_main_process: "main-process output must come from original extracted .vite/build/index.js and index.pre.js in code-1:1 mode",
   },
   paths: {
     project_root: projectRoot,

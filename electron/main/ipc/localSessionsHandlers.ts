@@ -17,6 +17,7 @@ import {
 import type { LocalSessionStore } from "../services/localSessions/localSessionStore";
 import { getSupportedCommands } from "../services/localSessions/supportedCommands";
 import { getTranscriptFeedback, submitTranscriptFeedback } from "../services/localSessions/transcriptFeedbackStore";
+import { getLocalSessionEnvironment, saveLocalSessionEnvironment } from "../services/localSessions/localSessionEnvironmentStore";
 import { loadOriginalNodePty } from "../services/originalRuntime/originalRuntimeModules";
 import type { IpcHandlerContext } from "./context";
 import { getSessionRunner } from "./localSessionRunner";
@@ -1057,8 +1058,8 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
     },
     getTrustedFolders: async () => store.getTrustedFolders(),
     isFolderTrusted: async (_event, folder) => Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)),
-    checkTrust: async (_event, folder) => ({ trusted: Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)) }),
-    checkRemoteTrust: async () => ({ trusted: false, remote: true }),
+    checkTrust: async (_event, folder) => ({ trusted: Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)), sources: [] }),
+    checkRemoteTrust: async () => ({ trusted: false, remote: true, sources: [] }),
     saveTrust: async (_event, folder) => {
       const target = asString(folder);
       if (!target) return false;
@@ -1545,7 +1546,7 @@ export function registerLocalSessionsHandlers(context: IpcHandlerContext): void 
   registerInterfaceHandlers("claude.web", "LocalSessions", createSessionHandlers(context.localSessions, context, LOCAL_SESSIONS_METHODS, "LocalSessions"), "claude.web.LocalSessions");
   registerInterfaceHandlers("claude.web", "LocalAgentModeSessions", createSessionHandlers(context.localAgentModeSessions, context, LOCAL_AGENT_METHODS, "LocalAgentModeSessions"), "claude.web.LocalAgentModeSessions");
   registerInterfaceHandlers("claude.web", "LocalSessionEnvironment", {
-    get: async () => ({ env: {}, userData: app.getPath("userData") }),
-    save: async () => true,
+    get: async () => ({ env: await getLocalSessionEnvironment(), userData: app.getPath("userData") }),
+    save: async (env: unknown) => ({ env: await saveLocalSessionEnvironment(env), userData: app.getPath("userData") }),
   }, "claude.web.LocalSessionEnvironment");
 }

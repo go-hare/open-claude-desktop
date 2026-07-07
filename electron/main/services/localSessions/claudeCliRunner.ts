@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { getLocalSessionEnvironmentSync } from "./localSessionEnvironmentStore";
 import type { LocalSession, LocalSessionStore, LocalToolPermissionRequest } from "./localSessionStore";
 
 type RunnerCallbacks = {
@@ -100,7 +101,11 @@ export function defaultClaudeExecutable(): string {
 }
 
 export function spawnClaude(executable: string, args: string[], cwd: string): ChildProcessWithoutNullStreams {
-  const env = { ...process.env, CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT ?? "sdk-ts" };
+  const env = {
+    ...process.env,
+    ...getLocalSessionEnvironmentSync(),
+    CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT ?? "sdk-ts",
+  };
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(executable)) {
     return spawn("cmd.exe", ["/d", "/s", "/c", executable, ...args], { cwd, env, windowsHide: true });
   }

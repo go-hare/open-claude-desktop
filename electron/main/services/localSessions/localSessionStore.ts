@@ -41,6 +41,9 @@ export type LocalSession = {
   model?: string;
   effort?: string;
   permissionMode?: string;
+  sourceBranch?: string;
+  useWorktree?: boolean;
+  worktreeName?: string;
   visibility?: string;
   agent?: string;
   agents?: unknown;
@@ -77,6 +80,9 @@ export type StartLocalSessionInput = {
   model?: string;
   effort?: string;
   permissionMode?: string;
+  sourceBranch?: string;
+  useWorktree?: boolean;
+  worktreeName?: string;
   agent?: string;
   agents?: unknown;
   enabledMcpTools?: unknown[];
@@ -263,6 +269,9 @@ export class LocalSessionStore {
       model: input.model,
       effort: input.effort,
       permissionMode: input.permissionMode,
+      sourceBranch: input.sourceBranch,
+      useWorktree: input.useWorktree,
+      worktreeName: input.worktreeName,
       agent: input.agent,
       agents: input.agents,
       enabledMcpTools: input.enabledMcpTools,

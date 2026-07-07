@@ -10,7 +10,9 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const originalAppCandidates = [
   process.env.CLAUDE_ORIGINAL_APP,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.dirname(process.env.CLAUDE_ORIGINAL_APP_CONTENTS) : undefined,
+  path.resolve(projectRoot, "../Claude-Deepseek.app"),
   path.resolve(projectRoot, "../../Claude-Deepseek.app"),
+  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app",
   "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app",
 ].filter(Boolean);
 const originalApp = originalAppCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAppCandidates[0];

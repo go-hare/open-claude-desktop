@@ -14,6 +14,8 @@ const buildEntriesToCopy = [
   "buddy.js",
   "computerUseTeach.js",
   "quickWindow.js",
+  "index.js",
+  "index.pre.js",
   "window-shared.css",
   "mcp-runtime",
   "shell-path-worker",
