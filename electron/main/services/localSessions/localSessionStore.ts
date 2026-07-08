@@ -63,6 +63,7 @@ export type LocalSession = {
   isRunning?: boolean;
   origin?: string;
   userSelectedFolders?: string[];
+  userSelectedFiles?: string[];
   cliSessionId?: string;
   slashCommands?: string[];
   runtime?: LocalSessionRuntime;
@@ -77,6 +78,7 @@ export type StartLocalSessionInput = {
   kind?: LocalSessionKind;
   title?: string;
   folders?: string[];
+  messageUuid?: string;
   model?: string;
   effort?: string;
   permissionMode?: string;
@@ -94,6 +96,7 @@ export type StartLocalSessionInput = {
   tools?: unknown[];
   origin?: string;
   userSelectedFolders?: string[];
+  userSelectedFiles?: string[];
 };
 
 function nowIso(): string {
@@ -113,11 +116,18 @@ function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
+function messageIdFromRaw(raw: unknown): string | undefined {
+  const messageUuid = asRecord(raw).messageUuid;
+  return typeof messageUuid === "string" && messageUuid.length > 0 ? messageUuid : undefined;
+}
+
 function createMessage(role: LocalSessionMessage["role"], text: string, createdAt = nowIso(), raw?: unknown): LocalSessionMessage {
-  return { id: `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`, role, text, createdAt, raw };
+  return { id: messageIdFromRaw(raw) ?? `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`, role, text, createdAt, raw };
 }
 
 function transcriptMessage(sessionId: string, message: LocalSessionMessage): Record<string, unknown> {
+  const raw = asRecord(message.raw);
+  const userSelectedFiles = uniqueStrings(raw.userSelectedFiles);
   return {
     type: message.role,
     sessionId,
@@ -125,6 +135,7 @@ function transcriptMessage(sessionId: string, message: LocalSessionMessage): Rec
     timestamp: message.createdAt,
     message: { role: message.role, content: message.text },
     text: message.text,
+    ...(userSelectedFiles.length > 0 ? { userSelectedFiles } : {}),
   };
 }
 
@@ -252,6 +263,11 @@ export class LocalSessionStore {
     const timestamp = nowIso();
     const prompt = input.prompt ?? input.message ?? "";
     const folders = uniqueStrings(input.folders).length > 0 ? uniqueStrings(input.folders) : uniqueStrings(input.userSelectedFolders);
+    const userSelectedFiles = uniqueStrings(input.userSelectedFiles);
+    const messageRaw = input.messageUuid || userSelectedFiles.length > 0 ? {
+      ...(input.messageUuid ? { messageUuid: input.messageUuid } : {}),
+      ...(userSelectedFiles.length > 0 ? { userSelectedFiles } : {}),
+    } : undefined;
     const cwd = input.cwd ?? folders[0];
     const id = `${input.kind ?? this.defaultKind}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
     const session: LocalSession = {
@@ -282,8 +298,9 @@ export class LocalSessionStore {
       tools: input.tools,
       scheduledTaskId: input.scheduledTaskId,
       origin: input.origin,
+      userSelectedFiles,
       isRunning: false,
-      messages: prompt ? [createMessage("user", prompt, timestamp)] : [],
+      messages: prompt ? [createMessage("user", prompt, timestamp, messageRaw)] : [],
       transcript: [],
     };
     if (session.messages[0]) session.transcript = [transcriptMessage(session.id, session.messages[0])];
@@ -312,11 +329,11 @@ export class LocalSessionStore {
     return updated;
   }
 
-  sendMessage(id: string, text: string, role: LocalSessionMessage["role"] = "user"): LocalSession | null {
+  sendMessage(id: string, text: string, role: LocalSessionMessage["role"] = "user", raw?: unknown): LocalSession | null {
     const session = this.sessions.get(id);
     if (!session) return null;
     const timestamp = nowIso();
-    const message = createMessage(role, text, timestamp);
+    const message = createMessage(role, text, timestamp, raw);
     session.messages.push(message);
     session.transcript ??= [];
     session.transcript.push(transcriptMessage(session.id, message));

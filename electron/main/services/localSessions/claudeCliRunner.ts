@@ -221,6 +221,19 @@ function userInputLine(prompt: string): string {
   })}\n`;
 }
 
+function promptWithSelectedFiles(prompt: string, userSelectedFiles: unknown): string {
+  const files = stringList(userSelectedFiles);
+  if (files.length === 0) return prompt;
+  return [
+    prompt,
+    "",
+    "User selected local files for this turn:",
+    ...files.map((file) => `- ${file}`),
+    "",
+    "Use these local file paths as attached context when relevant.",
+  ].join("\n");
+}
+
 function writeJsonLine(child: ChildProcessWithoutNullStreams, value: Record<string, unknown>): boolean {
   if (child.stdin.destroyed || child.stdin.writableEnded) return false;
   child.stdin.write(`${JSON.stringify(value)}\n`);
@@ -359,7 +372,7 @@ export class ClaudeCliRunner {
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawnClaude(executable, args, resolveCwd(session));
-      child.stdin.write(userInputLine(text));
+      child.stdin.write(userInputLine(promptWithSelectedFiles(text, request.userSelectedFiles)));
     } catch (error) {
       this.finishWithError(sessionId, executable, error);
       return false;

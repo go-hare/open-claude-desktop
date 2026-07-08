@@ -44,6 +44,10 @@ function asObject(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? [...new Set(value.filter((item): item is string => typeof item === "string" && item.length > 0))] : [];
+}
+
 function textFromTranscriptItem(value: unknown): string {
   const raw = asObject(value);
   const direct = asString(raw.text) ?? asString(raw.content) ?? asString(raw.result) ?? asString(raw.error);
@@ -966,11 +970,23 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
       return toBridgeSession(session);
     },
-    sendMessage: async (_event, id, text) => {
+    sendMessage: async (_event, id, text, images, permissionMode, messageUuid, options) => {
       const sessionId = asString(id);
-      const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text) : null;
+      const request = asObject(options);
+      const userSelectedFiles = stringArray(request.userSelectedFiles);
+      const rawMessageUuid = asString(messageUuid);
+      const messageRaw = userSelectedFiles.length > 0 || rawMessageUuid ? {
+        ...(rawMessageUuid ? { messageUuid: rawMessageUuid } : {}),
+        ...(userSelectedFiles.length > 0 ? { userSelectedFiles } : {}),
+      } : undefined;
+      const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text, "user", messageRaw) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      if (sessionId && session && typeof text === "string") sessionRunner.runTurn(sessionId, text);
+      if (sessionId && session && typeof text === "string") sessionRunner.runTurn(sessionId, text, {
+        images,
+        messageUuid: asString(messageUuid),
+        permissionMode: asString(permissionMode),
+        userSelectedFiles,
+      });
       return toBridgeSession(sessionId ? store.getSession(sessionId) ?? session : session);
     },
     sendSideChatMessage: async (_event, id, text) => {
