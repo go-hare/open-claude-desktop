@@ -15,6 +15,12 @@ export type LocalSessionRuntime = {
   finishedAt?: string;
 };
 
+export type LocalMountedProject = {
+  uuid: string;
+  name: string;
+  hostPath: string;
+};
+
 export type LocalToolPermissionRequest = {
   alwaysAllowScope?: string;
   decisionReason?: string;
@@ -64,6 +70,7 @@ export type LocalSession = {
   origin?: string;
   userSelectedFolders?: string[];
   userSelectedFiles?: string[];
+  mountedProjects?: LocalMountedProject[];
   cliSessionId?: string;
   slashCommands?: string[];
   runtime?: LocalSessionRuntime;
@@ -98,6 +105,7 @@ export type StartLocalSessionInput = {
   origin?: string;
   userSelectedFolders?: string[];
   userSelectedFiles?: string[];
+  mountedProjects?: LocalMountedProject[];
 };
 
 function nowIso(): string {
@@ -307,6 +315,7 @@ export class LocalSessionStore {
       scheduledTaskId: input.scheduledTaskId,
       origin: input.origin,
       userSelectedFiles,
+      mountedProjects: input.mountedProjects,
       isRunning: false,
       messages: prompt || userSelectedFiles.length > 0 ? [createMessage("user", prompt, timestamp, messageRaw)] : [],
       transcript: [],

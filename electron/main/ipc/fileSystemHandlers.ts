@@ -60,6 +60,17 @@ async function listFilesRecursive(root: string, limit: number, output: string[] 
   return output;
 }
 
+async function listDirectoryEntries(directory: string) {
+  const entries = await fs.readdir(directory);
+  return Promise.all(entries.filter((entry) => !entry.startsWith(".")).map((entry) => statEntry(path.join(directory, entry))));
+}
+
+function normalizeListFilesInFolderArgs(directory: unknown, options: unknown): { directory: string | null; officialSignature: boolean; options: Record<string, unknown> } {
+  const officialFolderPath = asPath(options);
+  if (officialFolderPath) return { directory: officialFolderPath, officialSignature: true, options: {} };
+  return { directory: asPath(directory), officialSignature: false, options: asObject(options) };
+}
+
 function resolveSystemPath(name: string): string | null {
   const aliases: Record<string, Parameters<typeof app.getPath>[0]> = {
     home: "home",
@@ -127,9 +138,9 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       return Promise.all(entries.map((entry) => statEntry(path.join(dir, entry))));
     },
     listFilesInFolder: async (_event, directory, options) => {
-      const dir = asPath(directory);
+      const { directory: dir, officialSignature, options: optionObj } = normalizeListFilesInFolderArgs(directory, options);
       if (!dir) return [];
-      const optionObj = asObject(options);
+      if (officialSignature || optionObj.entries === true) return listDirectoryEntries(dir);
       if (optionObj.recursive) return listFilesRecursive(dir, Number(optionObj.limit ?? 500));
       const entries = await fs.readdir(dir, { withFileTypes: true });
       return entries.filter((entry) => entry.isFile()).map((entry) => path.join(dir, entry.name));
