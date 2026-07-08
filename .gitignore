@@ -5,7 +5,7 @@ node_modules/
 .smoke-user-data-packaged/
 .vite/
 out/
-dist/
+/dist/
 resources/ion-dist/
 .DS_Store
 *.log
