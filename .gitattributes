@@ -1,0 +1,2 @@
+resources/claude-code-bin/claude filter=lfs diff=lfs merge=lfs -text
+resources/claude-code-bin/claude.exe filter=lfs diff=lfs merge=lfs -text

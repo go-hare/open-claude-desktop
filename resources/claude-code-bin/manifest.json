@@ -1,6 +1,22 @@
 {
-  "binary": "claude.exe",
-  "size": 128822272,
-  "sha256": "2132b711a49b0c618e7aca08f131fd5595504f370e4a806b44454feff660a301",
-  "version": "2.6.18 (Claude Code)"
+  "binary": "claude",
+  "platform": "darwin",
+  "arch": "arm64",
+  "size": 91665952,
+  "sha256": "ded131d9b45e0d0ab9a2a423363aaf10e246f0f1f0e8afb1cf4087852c48ad24",
+  "version": "2.6.21 (Claude Code)",
+  "binaries": {
+    "win32": {
+      "binary": "claude.exe",
+      "size": 128822272,
+      "sha256": "2132b711a49b0c618e7aca08f131fd5595504f370e4a806b44454feff660a301",
+      "version": "2.6.18 (Claude Code)"
+    },
+    "darwin-arm64": {
+      "binary": "claude",
+      "size": 91665952,
+      "sha256": "ded131d9b45e0d0ab9a2a423363aaf10e246f0f1f0e8afb1cf4087852c48ad24",
+      "version": "2.6.21 (Claude Code)"
+    }
+  }
 }
