@@ -948,8 +948,9 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
       const request = asObject(input);
       const session = store.start(request as never);
       dispatchSessionEvent("start", session.id, session);
-      const prompt = asString(request.prompt) ?? asString(request.message);
-      if (prompt) sessionRunner.runTurn(session.id, prompt, request);
+      const prompt = asString(request.prompt) ?? asString(request.message) ?? "";
+      const userSelectedFiles = stringArray(request.userSelectedFiles);
+      if (prompt || userSelectedFiles.length > 0) sessionRunner.runTurn(session.id, prompt, request);
       const scheduledTaskId = asString(request.scheduledTaskId);
       if (scheduledTaskId) {
         const task = context.scheduledTasks.recordRun(scheduledTaskId);

@@ -104,7 +104,8 @@ function nowIso(): string {
 }
 
 function titleFromPrompt(prompt?: string): string {
-  const first = prompt?.trim().split("\n")[0] ?? "New session";
+  const visiblePrompt = prompt?.replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>\s*/g, "").trim();
+  const first = visiblePrompt?.split("\n")[0] ?? "New session";
   return first.length > 40 ? `${first.slice(0, 40)}…` : first || "New session";
 }
 
@@ -300,7 +301,7 @@ export class LocalSessionStore {
       origin: input.origin,
       userSelectedFiles,
       isRunning: false,
-      messages: prompt ? [createMessage("user", prompt, timestamp, messageRaw)] : [],
+      messages: prompt || userSelectedFiles.length > 0 ? [createMessage("user", prompt, timestamp, messageRaw)] : [],
       transcript: [],
     };
     if (session.messages[0]) session.transcript = [transcriptMessage(session.id, session.messages[0])];
