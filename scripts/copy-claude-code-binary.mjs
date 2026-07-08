@@ -60,8 +60,6 @@ await fs.copyFile(sourceBinary, targetBinary);
 if (process.platform !== "win32") await fs.chmod(targetBinary, 0o755);
 
 const manifest = {
-  generated_at: new Date().toISOString(),
-  source: sourceBinary,
   binary: binaryName,
   size: fsSync.statSync(targetBinary).size,
   sha256: sha256(targetBinary),
