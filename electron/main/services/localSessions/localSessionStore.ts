@@ -270,13 +270,16 @@ export class LocalSessionStore {
       ...(userSelectedFiles.length > 0 ? { userSelectedFiles } : {}),
     } : undefined;
     const cwd = input.cwd ?? folders[0];
-    const id = `${input.kind ?? this.defaultKind}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+    const kind = input.kind ?? this.defaultKind;
+    const sessionKind = kind === "code" ? "code" : "cowork";
+    const idPrefix = sessionKind === "cowork" ? "local" : kind;
+    const id = `${idPrefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
     const session: LocalSession = {
       id,
       sessionId: id,
       title: input.title ?? titleFromPrompt(prompt),
-      kind: input.kind ?? this.defaultKind,
-      sessionKind: (input.kind ?? this.defaultKind) === "code" ? "code" : "cowork",
+      kind,
+      sessionKind,
       createdAt: timestamp,
       updatedAt: timestamp,
       lastActivityAt: timestamp,

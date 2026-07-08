@@ -224,14 +224,9 @@ function userInputLine(prompt: string): string {
 function promptWithSelectedFiles(prompt: string, userSelectedFiles: unknown): string {
   const files = stringList(userSelectedFiles);
   if (files.length === 0) return prompt;
-  return [
-    prompt,
-    "",
-    "User selected local files for this turn:",
-    ...files.map((file) => `- ${file}`),
-    "",
-    "Use these local file paths as attached context when relevant.",
-  ].join("\n");
+  if (/<uploaded_files>[\s\S]*?<\/uploaded_files>/.test(prompt)) return prompt;
+  const uploadedFiles = files.map((file) => `<file><file_path>${file}</file_path></file>`).join("\n");
+  return `<uploaded_files>\n${uploadedFiles}\n</uploaded_files>\n\n${prompt}`;
 }
 
 function writeJsonLine(child: ChildProcessWithoutNullStreams, value: Record<string, unknown>): boolean {
