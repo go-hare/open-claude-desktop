@@ -8,8 +8,16 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const docsRoot = path.resolve(projectRoot, "../docs");
-const mirrorRoot = path.resolve(projectRoot, "../electron-shell-source/app-asar");
+const docsRoot = path.resolve(projectRoot, "docs");
+const mirrorRootCandidates = [
+  process.env.CLAUDE_ELECTRON_SHELL_MIRROR,
+  path.resolve(projectRoot, "../electron-shell-source/app-asar"),
+  path.resolve(projectRoot, "../claude-ion-react-workbench/electron-shell-source/app-asar"),
+  path.resolve(projectRoot, "../claude-ion-react-workbench/claude-ion-react-workbench/electron-shell-source/app-asar"),
+  String.raw`D:\work\py\claude\claude-ion-react-workbench\electron-shell-source\app-asar`,
+  String.raw`D:\BaiduNetdiskDownload\claude-ion-react-workbench\claude-ion-react-workbench\electron-shell-source\app-asar`,
+].filter(Boolean);
+const mirrorRoot = mirrorRootCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? mirrorRootCandidates[0];
 const buildRoot = path.join(projectRoot, ".vite");
 const originalAsarCandidates = [
   process.env.CLAUDE_ORIGINAL_ASAR,
@@ -64,10 +72,21 @@ const preloadFiles = [
   "build/coworkArtifact.js",
 ];
 
+const expectedNodePtyRuntimeEntries = process.platform === "win32"
+  ? [
+      "node-pty/lib/index.js",
+      "node-pty/build/Release/conpty.node",
+      "node-pty/build/Release/conpty_console_list.node",
+      "node-pty/build/Release/pty.node",
+    ]
+  : [
+      "node-pty/lib/index.js",
+      "node-pty/build/Release/pty.node",
+      "node-pty/build/Release/spawn-helper",
+    ];
+
 const expectedRuntimeModuleEntries = [
-  "node-pty/lib/index.js",
-  "node-pty/build/Release/pty.node",
-  "node-pty/build/Release/spawn-helper",
+  ...expectedNodePtyRuntimeEntries,
   "ws/index.js",
   "@ant/claude-native/index.js",
   "@ant/claude-native/claude-native-binding.node",
@@ -265,13 +284,15 @@ if (await exists(runtimeCoveragePath)) {
 
 const originalInvokeSet = new Set(report.original_preload_ipc.invoke_channels);
 const currentInvokeSet = new Set(report.current_build_preload_ipc.invoke_channels);
+const packagedAsarExists = await exists(packagedAsarPath);
 report.coverage = {
   mirror_resource_complete: report.resources.expected_build_entries.every((entry) => entry.exists) && report.resources.expected_renderer_entries.every((entry) => entry.exists),
   current_resource_complete: report.resources.current_build_entries.every((entry) => entry.exists) && report.resources.current_renderer_entries.every((entry) => entry.exists),
   current_runtime_modules_complete: report.resources.current_runtime_module_entries.every((entry) => entry.exists),
-  packaged_runtime_modules_complete:
-    report.resources.packaged_runtime_module_entries.every((entry) => entry.exists) &&
-    report.resources.packaged_runtime_unpacked_entries.every((entry) => entry.exists),
+  packaged_runtime_modules_complete: packagedAsarExists
+    ? report.resources.packaged_runtime_module_entries.every((entry) => entry.exists) &&
+      report.resources.packaged_runtime_unpacked_entries.every((entry) => entry.exists)
+    : null,
   current_preload_invoke_matches_original:
     originalInvokeSet.size > 0 && originalInvokeSet.size === currentInvokeSet.size && [...originalInvokeSet].every((channel) => currentInvokeSet.has(channel)),
   missing_current_invoke_channels: [...originalInvokeSet].filter((channel) => !currentInvokeSet.has(channel)),

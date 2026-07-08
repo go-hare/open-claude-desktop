@@ -7,6 +7,7 @@ import { registerAppBindingsHandlers } from "./appBindingsHandlers";
 import { registerFeatureHandlers } from "./featureHandlers";
 import { registerFindInPageHandlers } from "./findInPageHandlers";
 import { registerLocalSessionsHandlers } from "./localSessionsHandlers";
+import { registerOriginalEventSurface } from "./originalEventSurface";
 import { registerScheduledTasksHandlers } from "./scheduledTasksHandlers";
 import { registerSettingsHandlers } from "./settingsHandlers";
 import { registerStoreStateHandlers } from "./storeStateHandlers";
@@ -24,6 +25,7 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
 }
 
 export function registerDesktopIpc(context: IpcHandlerContext): void {
+  registerOriginalEventSurface(context);
   registerWindowHandlers(context);
   registerAppBindingsHandlers(context);
   registerFindInPageHandlers(context);

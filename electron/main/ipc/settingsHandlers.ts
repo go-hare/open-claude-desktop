@@ -19,6 +19,7 @@ import { describeMcpServer, mcpConfigEntries } from "../services/mcp/mcpRuntime"
 import { handleSupportBundleAction } from "../services/support/supportBundle";
 import { openCustom3pSetupWindow } from "../windows/custom3pSetupWindow";
 import type { IpcHandlerContext } from "./context";
+import { originalEventSurface } from "./originalEventSurface";
 import { dispatchBridgeEvent, registerInterfaceSyncHandlers, registerNamespaceHandlers } from "./registerIpc";
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -213,6 +214,7 @@ async function probeMcpServerConfig(config: unknown) {
 export function registerSettingsHandlers(context: IpcHandlerContext): void {
   const settings = context.settings;
   const mainView = context.windows.mainView.webContents;
+  const events = originalEventSurface(context);
 
   registerNamespaceHandlers("claude.settings", {
     AppConfig: {
@@ -232,7 +234,6 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         dispatchBridgeEvent(mainView, "claude.settings", "AppPreferences", "preferencesChanged", settings.getPreferences());
         return result;
       },
-      preferencesChanged: async () => settings.getPreferences(),
     },
     Startup: {
       isStartupOnLoginEnabled: async () => app.getLoginItemSettings().openAtLogin,
@@ -246,7 +247,6 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
     GlobalShortcut: {
       setGlobalShortcut: async (_event, accelerator) => configureGlobalShortcut(context, accelerator),
       getGlobalShortcut: async () => settings.getGlobalShortcut(),
-      globalShortcutChange: async () => settings.getGlobalShortcut(),
     },
     MCP: {
       isLocalDevMcpEnabled: async () => Boolean(settings.getAppConfig().isLocalDevMcpEnabled),
@@ -269,12 +269,6 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         shell.showItemInFolder(logFile);
         return true;
       },
-      mcpConfigChange: async () => settings.getMcpServersConfig(),
-      mcpStatusChanged: async () => {
-        const config = settings.getMcpServersConfig();
-        return Object.fromEntries(mcpConfigEntries(config).map(([name, value]) => [name, describeMcpServer(name, value)]));
-      },
-      revealMcpServerSettingsRequested: async () => settings.getMcpConfigFile(),
     },
     FilePickers: {
       getDirectoryPath: async (_event, options) => choosePath(context, "directory", options),
@@ -326,9 +320,14 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       writeConfig: async (_event, id, config) => {
         if (typeof id !== "string") return { ok: false, error: "invalid id" };
         const record = settings.writeCustom3pConfig(id, custom3pConfigInput(config));
+        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
         return record ? { ok: true } : { ok: false, error: "config not found" };
       },
-      createConfig: async (_event, input) => settings.createCustom3pConfig(configNameFromInput(input), custom3pConfigInput(input)),
+      createConfig: async (_event, input) => {
+        const record = settings.createCustom3pConfig(configNameFromInput(input), custom3pConfigInput(input));
+        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
+        return record;
+      },
       duplicateConfig: async (_event, id, name) => (typeof id === "string" ? settings.duplicateCustom3pConfig(id, asString(name) ?? undefined) : null),
       renameConfig: async (_event, id, name) => (typeof id === "string" && typeof name === "string" ? settings.renameCustom3pConfig(id, name) : null),
       deleteConfig: async (_event, id) => {
@@ -336,8 +335,11 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         return custom3pConfigList(settings);
       },
       exportConfig: async (_event, id, format) => exportCustom3pConfig(context, id, format),
-      setAppliedConfig: async (_event, id) => (typeof id === "string" ? settings.setAppliedCustom3pConfig(id) : false),
-      unsetAppliedConfig: async () => settings.setAppliedCustom3pConfig(null),
+      setAppliedConfig: async (_event, id) => {
+        const ok = typeof id === "string" ? settings.setAppliedCustom3pConfig(id) : false;
+        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
+        return ok;
+      },
       revealConfig: async () => {
         shell.showItemInFolder(settings.getSettingsFile());
         return true;
@@ -348,7 +350,10 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       probeMcpServer: async (_event, config) => probeMcpServerConfig(config),
       authorizeAndProbeMcpServer: async (_event, config) => probeMcpServerConfig(config),
       forgetMcpOAuth: async () => true,
-      triggerBootstrapAuth: async () => ({ ok: true }),
+      triggerBootstrapAuth: async () => {
+        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
+        return { ok: true };
+      },
       openSetupWindow: async () => {
         await openCustom3pSetupWindow(context.windows.mainWindow);
         return true;
@@ -360,7 +365,6 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         app.exit(0);
         return true;
       },
-      bootstrapState_: async () => custom3pBootstrapState(),
     },
     Extensions: {
       getInstalledExtensionsWithState: async () => listInstalledExtensions(extensionUserDataDir(context)),
@@ -385,7 +389,10 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       getManifestCompatibilityResult: async () => ({ compatible: true, requirements: [] }),
       installDxt: async (_event, extensionId, dxtPath) => {
         if (typeof dxtPath !== "string") return null;
+        const id = typeof extensionId === "string" ? extensionId : path.basename(dxtPath, path.extname(dxtPath));
+        events.extensionDownloadProgress(id, 0, 0, 0, null, "installing");
         const installed = await installDxtArchive(extensionUserDataDir(context), dxtPath, typeof extensionId === "string" ? extensionId : null);
+        events.extensionDownloadProgress(installed.id, 1, 1, 1, installed.manifest, "installed");
         dispatchExtensionsChanged(context);
         return installed.id;
       },
@@ -395,18 +402,25 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       },
       installDxtUnpacked: async (_event, folderPath) => {
         if (typeof folderPath !== "string") return null;
+        events.previewExtensionInstallation({ name: path.basename(folderPath) }, folderPath, path.basename(folderPath), null);
         const installed = await installUnpackedExtension(extensionUserDataDir(context), folderPath);
+        events.extensionDownloadProgress(installed.id, 1, 1, 1, installed.manifest, "installed");
         dispatchExtensionsChanged(context);
         return installed.id;
       },
       installExtensionFromPreview: async (_event, extensionId, dxtPath) => {
         if (typeof dxtPath !== "string") return null;
+        const id = typeof extensionId === "string" ? extensionId : path.basename(dxtPath, path.extname(dxtPath));
+        events.extensionDownloadProgress(id, 0, 0, 0, null, "installing");
         const installed = await installDxtArchive(extensionUserDataDir(context), dxtPath, typeof extensionId === "string" ? extensionId : null);
+        events.extensionDownloadProgress(installed.id, 1, 1, 1, installed.manifest, "installed");
         dispatchExtensionsChanged(context);
         return installed.id;
       },
       handleDxtFile: async (_event, dxtPath) => {
         if (typeof dxtPath !== "string") return;
+        const id = path.basename(dxtPath, path.extname(dxtPath));
+        events.previewExtensionInstallation({ name: id }, dxtPath, id, null);
         await installDxtArchive(extensionUserDataDir(context), dxtPath);
         dispatchExtensionsChanged(context);
       },
@@ -416,51 +430,20 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         dispatchExtensionsChanged(context);
         return deleted;
       },
-      uninstallExtension: async (_event, extensionId) => {
-        if (typeof extensionId !== "string") return false;
-        const deleted = await deleteInstalledExtension(extensionUserDataDir(context), extensionId);
-        dispatchExtensionsChanged(context);
-        return deleted;
-      },
-      updateExtension: async (_event, extensionId) => {
-        if (typeof extensionId !== "string") return null;
-        const updated = await updateInstalledExtension(extensionUserDataDir(context), extensionId);
-        if (updated) dispatchExtensionsChanged(context);
-        return updated;
-      },
-      openDirectory: async () => shell.openPath((await ensureExtensionFolders(extensionUserDataDir(context))).extensionsDir),
-      openExtensionDirectory: async () => shell.openPath((await ensureExtensionFolders(extensionUserDataDir(context))).extensionsDir),
-      openLogsDirectory: async () => shell.openPath(settings.getLogsDir()),
-      revealExtension: async (_event, extensionId) => (typeof extensionId === "string" ? revealInstalledExtension(extensionUserDataDir(context), extensionId) : false),
-      reloadExtension: async () => true,
       isDesktopExtensionDirectoryEnabled: async () => true,
-      setDesktopExtensionDirectoryEnabled: async (_event, enabled) => settings.setAppFeature("isDxtDirectoryEnabled", Boolean(enabled)),
-      setExtensionEnabled: async (_event, extensionId, enabled) => {
-        if (typeof extensionId !== "string") return false;
-        const next = await setInstalledExtensionEnabled(extensionUserDataDir(context), extensionId, Boolean(enabled));
-        dispatchExtensionSettingsChanged(context, extensionId, next);
-        dispatchExtensionsChanged(context);
-        return true;
-      },
-      extensionsChanged: async () => listInstalledExtensions(extensionUserDataDir(context)),
-      extensionSettingsChanged: async () => ({}),
-      extensionDownloadProgress: async () => ({ status: "idle", progress: 0 }),
     },
     SupportBundle: {
       submitAction: async (_event, action) => handleSupportBundleAction(context, action),
-      supportBundleState_: async () => ({ status: "idle" }),
     },
   });
 
   registerNamespaceHandlers("claude.hybrid", {
     DesktopIntl: {
-      getInitialLocale: async () => ({ messages: {}, locale: app.getLocale() || "en-US" }),
       requestLocaleChange: async (_event, locale) => {
         settings.setPreference("locale", locale);
         dispatchBridgeEvent(mainView, "claude.hybrid", "DesktopIntl", "localeChanged", locale);
         return true;
       },
-      localeChanged: async () => app.getLocale() || "en-US",
     },
   });
 

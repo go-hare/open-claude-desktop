@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const docsRoot = path.resolve(projectRoot, "../docs");
+const docsRoot = path.join(projectRoot, "docs");
 const originalAppCandidates = [
   process.env.CLAUDE_ORIGINAL_APP,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.dirname(process.env.CLAUDE_ORIGINAL_APP_CONTENTS) : undefined,
@@ -95,6 +95,123 @@ const expectedUnpackedRuntimeEntries = [
   "node_modules/node-pty/build/Release/pty.node",
   "node_modules/node-pty/build/Release/spawn-helper",
 ];
+
+const packagedWinRoot = path.join(projectRoot, `out/Claude-Deepseek-win32-${process.arch}`);
+if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
+  const winResources = path.join(packagedWinRoot, "resources");
+  const winAsar = path.join(winResources, "app.asar");
+  const winExe = path.join(packagedWinRoot, "Claude-Deepseek.exe");
+  const winRuntimeRoot = path.join(winResources, "original-runtime-node_modules", "node_modules");
+  const winClaudeCodeBinary = path.join(winResources, "claude-code-bin", "claude.exe");
+  const winClaudeCodeManifest = path.join(winResources, "claude-code-bin", "manifest.json");
+  const winRuntimeEntries = [
+    "node-pty/package.json",
+    "node-pty/build/Release/conpty.node",
+    "node-pty/build/Release/conpty_console_list.node",
+    "node-pty/build/Release/pty.node",
+    "ws/index.js",
+    "@ant/chrome-native-host/index.js",
+    "@ant/claude-for-chrome-mcp/dist/index.js",
+    "@ant/claude-native/index.js",
+    "@ant/claude-native/claude-native-binding.node",
+    "@ant/claude-screen-app/index.js",
+    "@ant/claude-ssh/index.js",
+    "@ant/claude-swift/js/index.js",
+    "@ant/claude-swift/build/Release/swift_addon.node",
+    "@ant/claude-swift/build/Release/computer_use.node",
+    "@ant/claude-swift-ant/index.js",
+    "@ant/computer-use-mcp/dist/index.js",
+    "@ant/cowork-win32-service/index.js",
+    "@ant/disclaimer/index.js",
+    "@ant/dxt-registry/index.js",
+    "@ant/imagine-server/index.js",
+    "@ant/ipc-codegen/index.js",
+    "@ant/rfb-client/index.js",
+    "@ant/utils/index.js",
+    "@anthropic-ai/claude-agent-sdk-future/index.js",
+    "@anthropic-ai/conway-client/index.js",
+    "@anthropic-ai/electron-devtools-mcp/index.js",
+  ];
+  const winAsarEntries = (await exists(winAsar))
+    ? asar.listPackage(winAsar).map((entry) => `/${entry.replace(/\\/g, "/").replace(/^\/+/, "")}`)
+    : [];
+  const winAsarSet = new Set(winAsarEntries);
+  const report = {
+    generated_at: new Date().toISOString(),
+    project_root: projectRoot,
+    platform: "win32",
+    packaged_root: packagedWinRoot,
+    executable: {
+      exists: await exists(winExe),
+      sha256: (await exists(winExe)) ? await sha256(winExe) : null,
+    },
+    resources: {
+      app_asar_exists: await exists(winAsar),
+      ion_dist_exists: await exists(path.join(winResources, "ion-dist")),
+      original_runtime_exists: await exists(path.join(winResources, "original-runtime-node_modules")),
+      claude_code_binary_exists: await exists(winClaudeCodeBinary),
+      claude_code_binary_size: (await exists(winClaudeCodeBinary)) ? fsSync.statSync(winClaudeCodeBinary).size : 0,
+      claude_code_binary_sha256: (await exists(winClaudeCodeBinary)) ? await sha256(winClaudeCodeBinary) : null,
+      claude_code_manifest_exists: await exists(winClaudeCodeManifest),
+      missing_original_runtime_entries: winRuntimeEntries.filter((entry) => !fsSync.existsSync(path.join(winRuntimeRoot, entry))),
+    },
+    asar: {
+      entry_count: winAsarEntries.length,
+      contains_vite_index: winAsarSet.has("/.vite/build/index.js"),
+      contains_vite_preload: winAsarSet.has("/.vite/build/mainView.js") && winAsarSet.has("/.vite/build/mainWindow.js"),
+      contains_package_json: winAsarSet.has("/package.json"),
+      contains_smoke_user_data: winAsarEntries.some((entry) => entry.startsWith("/.smoke-user-data")),
+    },
+  };
+  report.ok =
+    report.executable.exists &&
+    report.resources.app_asar_exists &&
+    report.resources.ion_dist_exists &&
+    report.resources.original_runtime_exists &&
+    report.resources.claude_code_binary_exists &&
+    report.resources.claude_code_binary_size > 0 &&
+    report.resources.claude_code_manifest_exists &&
+    report.resources.missing_original_runtime_entries.length === 0 &&
+    report.asar.contains_vite_index &&
+    report.asar.contains_vite_preload &&
+    report.asar.contains_package_json &&
+    !report.asar.contains_smoke_user_data;
+
+  await fs.mkdir(docsRoot, { recursive: true });
+  const jsonPath = path.join(docsRoot, "electron-packaged-bundle-alignment.json");
+  await fs.writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
+  const markdown = `# Electron packaged bundle 对齐审计\n\n` +
+    `生成时间：${report.generated_at}\n\n` +
+    `## Windows packaged 结论\n\n` +
+    `- exe 存在：${report.executable.exists ? "是" : "否"}\n` +
+    `- app.asar 存在：${report.resources.app_asar_exists ? "是" : "否"}\n` +
+    `- ion-dist 资源存在：${report.resources.ion_dist_exists ? "是" : "否"}\n` +
+    `- original-runtime-node_modules 存在：${report.resources.original_runtime_exists ? "是" : "否"}\n` +
+    `- Claude Code binary 存在：${report.resources.claude_code_binary_exists ? "是" : "否"}\n` +
+    `- Claude Code binary 大小：${report.resources.claude_code_binary_size}\n` +
+    `- Claude Code manifest 存在：${report.resources.claude_code_manifest_exists ? "是" : "否"}\n` +
+    `- runtime 缺失条目数：${report.resources.missing_original_runtime_entries.length}\n` +
+    `- app.asar 含 .vite 主入口：${report.asar.contains_vite_index ? "是" : "否"}\n` +
+    `- app.asar 含 preload：${report.asar.contains_vite_preload ? "是" : "否"}\n` +
+    `- app.asar 是否误打入 smoke user data：${report.asar.contains_smoke_user_data ? "是" : "否"}\n` +
+    `- 是否通过：${report.ok ? "是" : "否"}\n\n` +
+    `说明：当前主机生成的是 Windows package；macOS 外层 bundle 对齐仅在 darwin .app 产物存在时审计。\n`;
+  const markdownPath = path.join(docsRoot, "electron-packaged-bundle-alignment.md");
+  await fs.writeFile(markdownPath, markdown);
+  console.log(path.relative(projectRoot, jsonPath));
+  console.log(path.relative(projectRoot, markdownPath));
+  console.log(JSON.stringify({
+    ok: report.ok,
+    platform: report.platform,
+    runtime_missing: report.resources.missing_original_runtime_entries.length,
+    claude_code_binary_exists: report.resources.claude_code_binary_exists,
+    claude_code_binary_size: report.resources.claude_code_binary_size,
+    contains_vite_index: report.asar.contains_vite_index,
+    contains_vite_preload: report.asar.contains_vite_preload,
+  }, null, 2));
+  if (!report.ok) process.exit(1);
+  process.exit(0);
+}
 
 const originalInfo = path.join(originalApp, "Contents/Info.plist");
 const packagedInfo = path.join(packagedApp, "Contents/Info.plist");

@@ -1,0 +1,16 @@
+{
+  "name": "@ant/claude-swift",
+  "version": "0.0.0-builtin",
+  "private": true,
+  "description": "Local built-in package for @ant/claude-swift",
+  "main": "js/index.js",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "js/index.js",
+    "js/index.d.ts",
+    "README.md"
+  ],
+  "types": "js/index.d.ts"
+}

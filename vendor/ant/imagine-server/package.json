@@ -1,0 +1,15 @@
+{
+  "name": "@ant/imagine-server",
+  "version": "0.0.0-builtin",
+  "private": true,
+  "description": "Bundle-derived Imagine MCP/widget server adapter for official @ant/imagine-server desktop private package",
+  "main": "index.js",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "types": "index.d.ts",
+  "xParityKind": "bundle-derived"
+}

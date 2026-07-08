@@ -18,6 +18,16 @@ const originalAppCandidates = [
 const originalApp = originalAppCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAppCandidates[0];
 const packagedApp = path.join(projectRoot, "out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app");
 
+if (process.platform !== "darwin" && !fsSync.existsSync(packagedApp)) {
+  console.log(JSON.stringify({
+    ok: true,
+    skipped: true,
+    reason: "macOS bundle alignment requires a darwin .app package",
+    packagedApp: path.relative(projectRoot, packagedApp),
+  }, null, 2));
+  process.exit(0);
+}
+
 async function exists(filePath) {
   try {
     await fs.access(filePath);

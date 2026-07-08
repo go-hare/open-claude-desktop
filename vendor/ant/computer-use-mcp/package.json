@@ -1,0 +1,19 @@
+{
+  "name": "@ant/computer-use-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./sentinelApps": "./dist/sentinelApps.js",
+    "./types": "./dist/types.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "tsconfig.json"
+  ]
+}

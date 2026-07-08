@@ -89,8 +89,28 @@ function pushJsonOption(args: string[], flag: string, value: unknown): void {
   if (text) args.push(flag, text);
 }
 
+function claudeBinaryName(): string {
+  return process.platform === "win32" ? "claude.exe" : "claude";
+}
+
+export function bundledClaudeExecutableCandidates(): string[] {
+  const binaryName = claudeBinaryName();
+  const candidates = [
+    process.env.CLAUDE_DESKTOP_RESOURCES_ROOT ? path.join(process.env.CLAUDE_DESKTOP_RESOURCES_ROOT, "claude-code-bin", binaryName) : undefined,
+    process.resourcesPath ? path.join(process.resourcesPath, "claude-code-bin", binaryName) : undefined,
+    path.resolve(process.cwd(), "resources", "claude-code-bin", binaryName),
+  ];
+  return [...new Set(candidates.filter((candidate): candidate is string => Boolean(candidate)))];
+}
+
+export function bundledClaudeExecutable(): string | undefined {
+  return bundledClaudeExecutableCandidates().find((candidate) => fs.existsSync(candidate));
+}
+
 export function defaultClaudeExecutable(): string {
   if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE;
+  const bundled = bundledClaudeExecutable();
+  if (bundled) return bundled;
   if (process.platform !== "win32") return "claude";
   const candidates = [
     process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "node_modules", "@go-hare", "claude-code", "bin", "claude.exe") : undefined,

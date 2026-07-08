@@ -16,6 +16,7 @@ import { mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
 import { listOpenDocuments, readOpenDocumentAsBase64 } from "../services/openDocuments/openDocumentsStore";
 import { getComputerUseTccState, openTccSystemSettings, requestAccessibilityGrant, requestScreenRecordingGrant } from "../services/tcc/computerUseTcc";
 import type { IpcHandlerContext } from "./context";
+import { originalEventSurface } from "./originalEventSurface";
 import { dispatchBridgeEvent, registerInterfaceSyncHandlers, registerNamespaceHandlers } from "./registerIpc";
 import { runScheduledTaskNow } from "./scheduledTasksHandlers";
 
@@ -198,6 +199,7 @@ async function updateSpaceList(
 }
 
 export function registerFeatureHandlers(context: IpcHandlerContext): void {
+  const events = originalEventSurface(context);
   const featureState = new FeatureStateStore();
   const launch = new LocalLaunchManager();
   const spaces = featureState.loadMap<Record<string, unknown>>("spaces");
@@ -243,7 +245,11 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   let previewUrl: string | null = null;
   const localSessions = () => [...context.localSessions.getAll(true), ...context.localAgentModeSessions.getAll(true)];
   const rememberPreview = (result: { serverId?: string; error?: string }) => {
-    if (result.serverId) previewUrl = launch.getPreviewUrl(result.serverId);
+    if (result.serverId) {
+      previewUrl = launch.getPreviewUrl(result.serverId);
+      if (previewUrl) events.launchPreviewUrlChanged(result.serverId, previewUrl);
+      events.launchActiveServersUpdated(launch.getActiveServers());
+    }
     return result;
   };
   const classifyLocalSessions = () => localSessions().map((session) => {
@@ -292,9 +298,14 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
       pairDevice: async (_event, device) => {
         buddyDevice = { id: id("buddy"), name: "Local Buddy", pairedAt: new Date().toISOString(), ...asObject(device) };
+        events.buddyPairingPrompt(String(buddyDevice.name ?? "Local Buddy"));
+        events.buddyProgress("paired");
         return { paired: true, device: buddyDevice };
       },
-      scanDevices: async () => buddyDevice ? [buddyDevice] : [{ id: "local-buddy", name: "Local Buddy", transport: "local" }],
+      scanDevices: async () => {
+        events.buddyProgress("scanning");
+        return buddyDevice ? [buddyDevice] : [{ id: "local-buddy", name: "Local Buddy", transport: "local" }];
+      },
       pickDevice: async (_event, device) => device ?? null,
       cancelScan: async () => true,
       submitPin: async () => ({ paired: Boolean(buddyDevice), device: buddyDevice }),
@@ -314,26 +325,13 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     },
     BuddyBleTransport: {
       rx: async (_event, payload) => ok({ received: payload }),
-      reportState: async (_event, state, details) => ok({ state, details }),
+      reportState: async (_event, state, details) => {
+        events.buddyBleTx(String(state ?? ""));
+        return ok({ state, details });
+      },
       log: async (_event, message) => {
         console.log(`[buddy] ${String(message ?? "")}`);
         return true;
-      },
-    },
-  });
-
-  registerNamespaceHandlers("claude.skills", {
-    Skills: {
-      previewSkillFile: async (_event, skillRef, fileRef) => {
-        const files = await getLocalSkillFiles(skillRef);
-        const requested = asString(fileRef)
-          ?? asString(asObject(fileRef).relativePath)
-          ?? asString(asObject(fileRef).path)
-          ?? asString(asObject(fileRef).name);
-        return files.find((file) => {
-          if (!requested) return file.relativePath === "SKILL.md";
-          return file.relativePath === requested || file.path === requested || file.name === requested;
-        }) ?? files[0] ?? null;
       },
     },
   });
@@ -343,17 +341,17 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       listDevices: async () => listSimulatorDevices(),
       installAndLaunch: async (_event, options) => {
         simulatorAttachment = { id: "local-simulator", status: "running", launchedAt: new Date().toISOString(), options };
-        dispatchBridgeEvent(context.windows.mainView.webContents, "claude.simulator", "Simulator", "attachment_", simulatorAttachment);
+        events.simulatorAttachmentUpdated(simulatorAttachment);
         return simulatorAttachment;
       },
       attach: async (_event, device) => {
         simulatorAttachment = device ?? { attachedAt: new Date().toISOString() };
-        dispatchBridgeEvent(context.windows.mainView.webContents, "claude.simulator", "Simulator", "attachment_", simulatorAttachment);
+        events.simulatorAttachmentUpdated(simulatorAttachment);
         return simulatorAttachment;
       },
       detach: async () => {
         simulatorAttachment = null;
-        dispatchBridgeEvent(context.windows.mainView.webContents, "claude.simulator", "Simulator", "attachment_", simulatorAttachment);
+        events.simulatorAttachmentUpdated(simulatorAttachment);
         return true;
       },
       gesture: async (_event, gesture) => ok({ gesture }),
@@ -370,12 +368,16 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         const file = connectedOfficeFiles().find((item) => item.id === fileIdOrPath || item.path === fileIdOrPath);
         if (!file) return false;
         activeOfficeFileId = file.id;
+        events.officeFileStateChanged({ ...file, active: true });
+        events.officeConnectedFilesStateUpdated(officeFilesState());
         shell.showItemInFolder(file.path);
         return true;
       },
       selectFile: async (_event, fileIdOrPath) => {
         const file = connectedOfficeFiles().find((item) => item.id === fileIdOrPath || item.path === fileIdOrPath) ?? null;
         activeOfficeFileId = file?.id ?? activeOfficeFileId;
+        if (file) events.officeFileStateChanged({ ...file, active: true });
+        events.officeConnectedFilesStateUpdated(officeFilesState());
         return file;
       },
       updateActiveConversationSummary: async () => true,
@@ -476,11 +478,20 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     },
     ClaudeVM: {
       download: async () => {
-        vmStateMap.set("download", { status: "downloaded", mode: "host-loop", updatedAt: new Date().toISOString() });
+        const status = { status: "downloaded", mode: "host-loop", updatedAt: new Date().toISOString() };
+        vmStateMap.set("download", status);
         persistVmState();
+        events.claudeVmDownloadProgress(100);
+        events.claudeVmDownloadStatusChanged(status);
+        events.claudeVmApiReachabilityUpdated({ reachability: "ok", willTryRecover: false, mode: "host-loop" });
         return { success: true, status: "downloaded", mode: "host-loop" };
       },
-      startVM: async (_event, options) => ({ success: true, ...setVmRuntime("running", { options }) }),
+      startVM: async (_event, options) => {
+        const runtime = setVmRuntime("running", { options });
+        events.claudeVmRunningStatusChanged(runtime);
+        events.claudeVmApiReachabilityUpdated({ reachability: "ok", willTryRecover: false, mode: "host-loop" });
+        return { success: true, ...runtime };
+      },
       getDownloadStatus: async () => ({ status: "downloaded", mode: "host-loop" }),
       getRunningStatus: async () => vmState(),
       setForceDisableHostLoop: async (_event, enabled) => {
@@ -494,7 +505,9 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
       deleteAndReinstall: async () => {
         vmStateMap.clear();
-        setVmRuntime("stopped");
+        const runtime = setVmRuntime("stopped");
+        events.claudeVmRunningStatusChanged(runtime);
+        events.claudeVmDownloadStatusChanged({ status: "downloaded", mode: "host-loop" });
         return { success: true, status: "downloaded", mode: "host-loop" };
       },
       checkVirtualMachinePlatform: async () => ({ supported: true, mode: "host-loop", platform: process.platform }),
@@ -531,17 +544,20 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         const artifact = { id: id("artifact"), createdAt: new Date().toISOString(), ...asObject(input) };
         artifacts.set(String(artifact.id), artifact);
         persistArtifacts();
+        events.coworkArtifactsChanged();
         return artifact;
       },
       importArtifact: async (_event, input) => {
         const artifact = { id: id("artifact"), imported: true, createdAt: new Date().toISOString(), ...asObject(input) };
         artifacts.set(String(artifact.id), artifact);
         persistArtifacts();
+        events.coworkArtifactsChanged();
         return artifact;
       },
       deleteArtifact: async (_event, artifactId) => {
         const deleted = artifacts.delete(String(artifactId));
         persistArtifacts();
+        if (deleted) events.coworkArtifactsChanged();
         return deleted;
       },
       hideArtifact: async () => true,
@@ -555,18 +571,12 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         await fs.writeFile(filePath, pdf);
         return filePath;
       },
-      saveArtifactFile: async (_event, artifactId, fileName, content) => {
-        const dir = path.join(app.getPath("userData"), "artifacts", String(artifactId));
-        await fs.mkdir(dir, { recursive: true });
-        const filePath = path.join(dir, asString(fileName) ?? "artifact.txt");
-        await fs.writeFile(filePath, typeof content === "string" ? content : JSON.stringify(content ?? {}, null, 2));
-        return filePath;
-      },
       shareArtifact: async (_event, artifactId) => {
         const existing = artifacts.get(String(artifactId)) ?? { id: String(artifactId) };
         const updated = { ...existing, shared: true, shareUrl: `cowork-artifact://${String(artifactId)}` };
         artifacts.set(String(artifactId), updated);
         persistArtifacts();
+        events.coworkArtifactsChanged();
         return updated;
       },
       unshareArtifact: async () => true,
@@ -577,24 +587,11 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         const updated = { ...existing, starred: Boolean(starred) };
         artifacts.set(String(artifactId), updated);
         persistArtifacts();
+        events.coworkArtifactsChanged();
         return updated;
       },
       isSharingEnabled: async () => true,
       showArtifact: async () => true,
-      updateArtifactMetadata: async (_event, artifactId, metadata) => {
-        const existing = artifacts.get(String(artifactId)) ?? { id: String(artifactId) };
-        const updated = { ...existing, ...asObject(metadata), updatedAt: new Date().toISOString() };
-        artifacts.set(String(artifactId), updated);
-        persistArtifacts();
-        return updated;
-      },
-      writeArtifactFile: async (_event, artifactId, fileName, content) => {
-        const dir = path.join(app.getPath("userData"), "artifacts", String(artifactId));
-        await fs.mkdir(dir, { recursive: true });
-        const filePath = path.join(dir, asString(fileName) ?? "artifact.txt");
-        await fs.writeFile(filePath, typeof content === "string" ? content : JSON.stringify(content ?? {}, null, 2));
-        return filePath;
-      },
     },
     CoworkFilePreview: {
       isEnabled: async () => true,
@@ -709,12 +706,6 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         try { return await fs.readdir(String(folderPath)); } catch { return []; }
       },
       getAutoMemoryDir: async () => path.join(app.getPath("userData"), "cowork-memory"),
-      readSpaceFile: async (_event, filePath) => fs.readFile(String(filePath), "utf8").catch(() => null),
-      writeSpaceFile: async (_event, filePath, content) => {
-        await fs.mkdir(path.dirname(String(filePath)), { recursive: true });
-        await fs.writeFile(String(filePath), String(content ?? ""));
-        return true;
-      },
       openFile: async (_event, filePath) => {
         const target = asString(filePath);
         if (!target) return false;
@@ -729,11 +720,6 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         return updated;
       },
       summarizeSpace: async (_event, spaceId) => JSON.stringify(spaces.get(String(spaceId)) ?? {}).slice(0, 1000),
-      revealSpaceFolder: async (_event, folderPath) => {
-        shell.showItemInFolder(String(folderPath));
-        return true;
-      },
-      searchSpaces: async (_event, query) => Array.from(spaces.values()).filter((space) => JSON.stringify(space).toLowerCase().includes(String(query ?? "").toLowerCase())),
     },
     CustomPlugins: {
       addMarketplace: async (_event, name, url, meta) => {
@@ -753,6 +739,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         const record = { id: id("plugin"), installedAt: new Date().toISOString(), plugin };
         localPlugins.set(String(record.id), record);
         persistLocalPlugins();
+        events.customPluginsInstallProgress(String(record.id), "installed");
         return record;
       },
       updatePlugin: async (_event, pluginId, update) => {
@@ -760,6 +747,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         const updated = { ...existing, update, updatedAt: new Date().toISOString() };
         localPlugins.set(String(pluginId), updated);
         persistLocalPlugins();
+        events.customPluginsInstallProgress(String(pluginId), "updated");
         return updated;
       },
       uninstallPlugin: async (_event, pluginId) => {
@@ -798,6 +786,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         const record = { id: id("plugin"), installedAt: new Date().toISOString(), source: "local-org", path: target };
         localPlugins.set(String(record.id), record);
         persistLocalPlugins();
+        events.customPluginsInstallProgress(String(record.id), "installed");
         return { success: true, pluginId: record.id };
       },
     },
@@ -840,6 +829,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         const record = { id: id("plugin"), uploadedAt: new Date().toISOString(), source: "local-upload", path: target };
         localPlugins.set(String(record.id), record);
         persistLocalPlugins();
+        events.localPluginsCliOpAlwaysAllowed([String(record.id)]);
         return { success: true, pluginId: record.id };
       },
     },
@@ -856,9 +846,11 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
       attach: async (_event, source) => {
         framebufferSource = asObject(source);
+        events.framebufferSessionResized(String(framebufferSource.id ?? "default"), Number(framebufferSource.width ?? 0), Number(framebufferSource.height ?? 0));
         return { attached: true, source: framebufferSource };
       },
       detach: async () => {
+        if (framebufferSource?.id) events.framebufferSessionFatal(String(framebufferSource.id), "detached");
         framebufferSource = null;
         return true;
       },
@@ -874,10 +866,12 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     GrandPrix: {
       pair: async (_event, device) => {
         grandPrixPaired = true;
+        events.grandPrixStatusUpdated({ paired: true, status: "connected" });
         return { paired: true, device };
       },
       disconnect: async () => {
         grandPrixPaired = false;
+        events.grandPrixStatusUpdated({ paired: false, status: "disconnected" });
         return true;
       },
       grandPrixStatus_$store$_getState: async () => ({ paired: grandPrixPaired, status: grandPrixPaired ? "connected" : "disconnected" }),
@@ -909,13 +903,6 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       goForward: async () => true,
       hidePreview: async () => true,
       showPreview: async () => true,
-      reloadPreview: async () => true,
-      openPreviewExternal: async (_event, url) => {
-        const target = asString(url) ?? previewUrl;
-        if (!target) return false;
-        await shell.openExternal(target);
-        return true;
-      },
       loadHtmlPreview: async (_event, filePath) => {
         const target = asString(filePath);
         if (!target) return "";
@@ -934,7 +921,11 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       setPreviewColorScheme: async () => true,
       setPreviewViewport: async () => true,
       startFromConfig: async (_event, cwd, name) => rememberPreview(await launch.startFromConfig(asString(cwd) ?? process.cwd(), asString(name) ?? undefined)),
-      stopServer: async (_event, serverId) => launch.stopServer(String(serverId ?? "")),
+      stopServer: async (_event, serverId) => {
+        const stopped = await launch.stopServer(String(serverId ?? ""));
+        events.launchActiveServersUpdated(launch.getActiveServers());
+        return stopped;
+      },
       suggestDeployName: async (_event, input) => {
         const value = asString(input) ?? asString(asObject(input).name) ?? `deploy-${Date.now()}`;
         return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || `deploy-${Date.now()}`;
@@ -947,32 +938,16 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         persistOrbitDeploys();
         return null;
       },
-      setPreviewBounds: async () => true,
-      setPreviewZoom: async () => true,
-      startServer: async (_event, cwd, nameOrPort) => {
-        if (typeof nameOrPort === "number") return rememberPreview(await launch.startPackageScript(asString(cwd) ?? process.cwd(), "dev", nameOrPort));
-        return rememberPreview(await launch.startFromConfig(asString(cwd) ?? process.cwd(), asString(nameOrPort) ?? undefined));
-      },
-      restartServer: async (_event, serverId) => rememberPreview(await launch.restartServer(String(serverId ?? ""))),
-      readServerFile: async (_event, filePath) => fs.readFile(String(filePath), "utf8").catch(() => null),
-      writeServerFile: async (_event, filePath, content) => {
-        await fs.mkdir(path.dirname(String(filePath)), { recursive: true });
-        await fs.writeFile(String(filePath), String(content ?? ""));
-        return true;
-      },
-      validateService: async (_event, cwd, name) => {
-        const services = await launch.getConfiguredServices(asString(cwd) ?? process.cwd());
-        return { valid: services.some((service) => !name || service.name === name), services };
-      },
-      waitForServer: async (_event, serverId, timeoutMs) => launch.waitForServer(String(serverId ?? ""), Number(timeoutMs) || 15000),
     },
     FloatingPenguinMini: {
       requestToggleMini: async () => {
         miniExpanded = !miniExpanded;
+        events.floatingPenguinMiniStateChanged({ expanded: miniExpanded });
         return miniExpanded;
       },
       requestSetMiniExpanded: async (_event, expanded) => {
         miniExpanded = Boolean(expanded);
+        events.floatingPenguinMiniStateChanged({ expanded: miniExpanded });
         return miniExpanded;
       },
     },
@@ -1045,7 +1020,10 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         });
         const source = result.filePaths[0];
         if (result.canceled || !source) return;
+        const extensionId = path.basename(source, path.extname(source));
+        events.extensionDownloadProgress(extensionId, 0, 0, 0, null, "installing");
         await installDxtArchive(context.settings.getUserDataDir(), source);
+        events.extensionDownloadProgress(extensionId, 1, 1, 1, null, "installed");
         dispatchBridgeEvent(context.windows.mainView.webContents, "claude.settings", "Extensions", "extensionsChanged");
       },
       showExtensionInFolder: async (_event, extensionId) => {

@@ -21,6 +21,7 @@ import { getLocalSessionEnvironment, saveLocalSessionEnvironment } from "../serv
 import { loadOriginalNodePty } from "../services/originalRuntime/originalRuntimeModules";
 import type { IpcHandlerContext } from "./context";
 import { getSessionRunner } from "./localSessionRunner";
+import { originalEventSurface } from "./originalEventSurface";
 import { describeMcpServer, mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
 import type { InterfaceHandlers } from "./registerIpc";
 import { dispatchBridgeEvent, registerInterfaceHandlers } from "./registerIpc";
@@ -801,9 +802,15 @@ function planFromTranscript(transcript: unknown[]): { content?: string; path?: s
 function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerContext, allMethods: readonly string[], bridgeInterface: "LocalSessions" | "LocalAgentModeSessions"): InterfaceHandlers {
   const ptys = new Map<string, { terminal: { write: (data: string) => void; kill: (signal?: string) => void; resize?: (cols: number, rows: number) => void }; buffer: string }>();
   const handlers: InterfaceHandlers = {};
+  const events = originalEventSurface(context);
+
+  const dispatchBridgeSessionEvent = (event: Record<string, unknown>) => {
+    if (bridgeInterface === "LocalSessions") events.localSessionEvent(event);
+    else events.localAgentModeEvent(event);
+  };
 
   const dispatchSessionEvent = (type: string, sessionId?: string, session?: unknown) => {
-    dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type, sessionId, session: toBridgeSession(session) });
+    dispatchBridgeSessionEvent({ type, sessionId, session: toBridgeSession(session) });
   };
 
   const sessionRunner = getSessionRunner(context, bridgeInterface);
@@ -903,7 +910,7 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
     const text = typeof data === "string" ? data : data.toString("utf8");
     entry.buffer += text;
     if (entry.buffer.length > TEXT_LIMIT_BYTES) entry.buffer = entry.buffer.slice(-TEXT_LIMIT_BYTES);
-    dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "shell_pty_data", sessionId, data: text });
+    dispatchBridgeSessionEvent({ type: "shell_pty_data", sessionId, data: text });
   };
 
   const startShell = (sessionId: string, cols?: number, rows?: number) => {
@@ -930,7 +937,7 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
       ptys.set(sessionId, { terminal, buffer: "" });
       terminal.onData((data) => appendPtyData(sessionId, data));
       terminal.onExit(({ exitCode, signal }) => {
-        dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", { type: "shell_pty_close", sessionId, code: exitCode, signal });
+        dispatchBridgeSessionEvent({ type: "shell_pty_close", sessionId, code: exitCode, signal });
         ptys.delete(sessionId);
       });
       return { ok: true };
@@ -1148,7 +1155,7 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
         return { ok: false, error: "invalid_tool_permission_response", requestId: request, decision: mode };
       }
       const result = sessionRunner.respondToToolPermission(id, request, mode as "always" | "deny" | "once", updatedInput);
-      dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", bridgeInterface, "onEvent", {
+      dispatchBridgeSessionEvent({
         type: result.ok === false ? "tool_permission_response_failed" : "tool_permission_resolved",
         sessionId: id,
         requestId: request,
