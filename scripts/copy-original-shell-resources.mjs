@@ -1,9 +1,18 @@
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const mirrorRoot = path.resolve(projectRoot, "../electron-shell-source/app-asar");
+const mirrorRootCandidates = [
+  process.env.CLAUDE_ELECTRON_SHELL_MIRROR,
+  path.resolve(projectRoot, "../electron-shell-source/app-asar"),
+  path.resolve(projectRoot, "../claude-ion-react-workbench/electron-shell-source/app-asar"),
+  path.resolve(projectRoot, "../claude-ion-react-workbench/claude-ion-react-workbench/electron-shell-source/app-asar"),
+  String.raw`D:\work\py\claude\claude-ion-react-workbench\electron-shell-source\app-asar`,
+  String.raw`D:\BaiduNetdiskDownload\claude-ion-react-workbench\claude-ion-react-workbench\electron-shell-source\app-asar`,
+].filter(Boolean);
+const mirrorRoot = mirrorRootCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? mirrorRootCandidates[0];
 const buildMirror = path.join(mirrorRoot, ".vite/build");
 const rendererMirror = path.join(mirrorRoot, ".vite/renderer");
 const buildTarget = path.join(projectRoot, ".vite/build");

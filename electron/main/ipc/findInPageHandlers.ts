@@ -26,14 +26,6 @@ export function registerFindInPageHandlers(context: IpcHandlerContext): void {
 
   registerNamespaceHandlers("claude.web", {
     FindInPageProvider: {
-      findRequest: async () => {
-        findInPageView.setVisible(true);
-        return true;
-      },
-      findClear: async () => {
-        mainView.webContents.stopFindInPage("clearSelection");
-        return true;
-      },
       reportFindResult: async () => true,
       setProviderActive: async () => true,
     },

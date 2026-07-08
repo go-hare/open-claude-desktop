@@ -113,55 +113,20 @@ async function searchFileContents(context: IpcHandlerContext, focusedCwd: string
 }
 
 export function registerWebMiscHandlers(context: IpcHandlerContext): void {
-  const { mainWindow, mainView } = context.windows;
+  const { mainView } = context.windows;
   let focusedCwd: string | null = null;
   let recentChats: unknown[] = [];
-  let accountDetails: unknown = null;
-  let lastNotificationClick: unknown = null;
-  let findInPageClaimed = false;
   const fileSystemHandlers = createFileSystemHandlers(context);
 
   registerNamespaceHandlers("claude.web", {
-    Toast: {
-      showToast: async (_event, input) => {
-        const opts = asObject(input);
-        const title = asString(opts.title) ?? "Claude-Deepseek";
-        const body = asString(opts.body) ?? asString(opts.message) ?? "";
-        if (Notification.isSupported()) new Notification({ title, body }).show();
-        return true;
-      },
-    },
-    Navigation: {
-      navigate: async (_event, target) => {
-        const url = asString(target) ?? asString(asObject(target).url);
-        if (!url) return false;
-        if (url.startsWith("app://") || url.startsWith("http://") || url.startsWith("https://")) await mainView.webContents.loadURL(url);
-        return true;
-      },
-    },
-    MenuEvents: {
-      closeWindow: async () => {
-        mainWindow.close();
-        return true;
-      },
-      openFile: async (_event, filePath) => {
-        const target = asString(filePath);
-        if (!target) return false;
-        return (await shell.openPath(target)).length === 0;
-      },
-    },
     QuickEntry: {
       setRecentChats: async (_event, chats) => {
         recentChats = Array.isArray(chats) ? chats : [];
         return true;
       },
-      onQuickEntrySubmit: async () => ({ recentChats }),
     },
     Account: {
-      setAccountDetails: async (_event, details) => {
-        accountDetails = details;
-        return true;
-      },
+      setAccountDetails: async () => true,
     },
     Auth: {
       doAuthInBrowser: async (_event, url) => {
@@ -186,7 +151,6 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
       },
       cancelPendingRestart: async () => true,
       getRunningLocalSessionCount: async () => context.localSessions.getAll().length + context.localAgentModeSessions.getAll().length,
-      updaterState_: async () => ({ status: "disabled", updateAvailable: false }),
     },
     DesktopNotifications: {
       getAuthorizationStatus: async () => notificationStatus(),
@@ -203,13 +167,11 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
           body: asString(opts.body) ?? asString(opts.message) ?? "",
         });
         notification.on("click", () => {
-          lastNotificationClick = { input, clickedAt: new Date().toISOString() };
-          dispatchBridgeEvent(mainView.webContents, "claude.web", "DesktopNotifications", "onNotificationClicked", lastNotificationClick);
+          dispatchBridgeEvent(mainView.webContents, "claude.web", "DesktopNotifications", "onNotificationClicked", { input, clickedAt: new Date().toISOString() });
         });
         notification.show();
         return true;
       },
-      onNotificationClicked: async () => lastNotificationClick,
     },
     FileSystem: fileSystemHandlers,
     Resources: {
@@ -222,10 +184,8 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
         return Boolean(focusedCwd);
       },
       setFindInPageClaimed: async (_event, claimed) => {
-        findInPageClaimed = claimed !== false;
-        return true;
+        return claimed !== false;
       },
-      findRequested: async () => ({ claimed: findInPageClaimed, cwd: focusedCwd }),
     },
   });
 }

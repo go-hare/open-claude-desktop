@@ -6,7 +6,14 @@ export const CLAUDE_APP_BINDING_CHANNELS = {
   listMcpServers: "list-mcp-servers",
   connectToMcpServer: "connect-to-mcp-server",
   requestOpenMcpSettings: "request-open-mcp-settings",
+  mcpServerConnected: "mcp-server-connected",
+  mcpServerAutoReconnect: "mcp-server-auto-reconnect",
 } as const;
+
+export function dispatchMcpServerAutoReconnect(context: IpcHandlerContext, serverName: string): void {
+  if (context.windows.mainView.webContents.isDestroyed()) return;
+  context.windows.mainView.webContents.send(CLAUDE_APP_BINDING_CHANNELS.mcpServerAutoReconnect, serverName);
+}
 
 export function registerAppBindingsHandlers(context: IpcHandlerContext): void {
   registerDirectInvokeHandler(
@@ -25,6 +32,7 @@ export function registerAppBindingsHandlers(context: IpcHandlerContext): void {
         : { ok: false, serverName: name, error: "missing_mcp_server_config" };
       const status = "status" in payload && typeof payload.status === "string" ? payload.status : "missing";
       dispatchBridgeEvent(context.windows.mainView.webContents, "claude.settings", "MCP", "mcpStatusChanged", name, status, payload);
+      if (payload.ok) context.windows.mainView.webContents.send(CLAUDE_APP_BINDING_CHANNELS.mcpServerConnected, payload);
       return payload;
     },
     "claudeAppBindings",

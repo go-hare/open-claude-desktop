@@ -1,0 +1,13 @@
+export const DEFAULT_SERVICE_NAME: string;
+export function isSupported(platform?: NodeJS.Platform): boolean;
+export function runSc(args: string[], options?: Record<string, unknown>): Promise<Record<string, unknown>>;
+export function parseServiceStatus(output?: string): { state: string; running: boolean; raw: string };
+export function queryServiceStatus(name?: string): Promise<Record<string, unknown>>;
+export function startService(name?: string): Promise<Record<string, unknown>>;
+export function stopService(name?: string): Promise<Record<string, unknown>>;
+export function restartService(name?: string): Promise<Record<string, unknown>>;
+export function installService(options: { name?: string; binPath: string; displayName?: string; start?: string }): Promise<Record<string, unknown>>;
+export function uninstallService(name?: string): Promise<Record<string, unknown>>;
+export function createServiceController(options?: Record<string, unknown>): Record<string, unknown>;
+declare const service: typeof import("./index");
+export default service;

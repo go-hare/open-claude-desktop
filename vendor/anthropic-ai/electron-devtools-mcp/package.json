@@ -1,0 +1,15 @@
+{
+  "name": "@anthropic-ai/electron-devtools-mcp",
+  "version": "0.0.0-builtin",
+  "private": true,
+  "description": "Local Electron DevTools MCP adapter for official @anthropic-ai/electron-devtools-mcp workspace package",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "xParityKind": "protocol-adapter"
+}

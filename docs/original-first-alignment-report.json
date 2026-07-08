@@ -1,0 +1,233 @@
+{
+  "generated_at": "2026-07-08T09:27:59.805Z",
+  "policy": {
+    "standard": "original-first alignment: no guessed JS/CSS/font/component structure",
+    "original_js_css_fonts": "resources/ion-dist must stay byte-for-byte identical to Claude-Deepseek.app/Contents/Resources/ion-dist",
+    "electron_shell_resources": "all original .vite build/renderer files must match except source-owned main entry rebuild outputs",
+    "component_library": "renderer components come from original compiled chunks; new source UI libraries are forbidden unless declared by original package.json with matching version",
+    "source_main_process": "main-process TypeScript may be reconstructed, but every user-visible shell function needs original evidence or must be marked inferred in docs"
+  },
+  "paths": {
+    "project_root": "D:\\work\\py\\claude\\open-claude-desktop-worktree",
+    "original_ion_dist": "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app\\Contents\\Resources\\ion-dist",
+    "current_ion_dist": "D:\\work\\py\\claude\\open-claude-desktop-worktree\\resources\\ion-dist",
+    "original_vite_mirror": "D:\\work\\py\\claude\\claude-ion-react-workbench\\electron-shell-source\\app-asar\\.vite",
+    "current_vite": "D:\\work\\py\\claude\\open-claude-desktop-worktree\\.vite",
+    "route_manifest": "D:\\work\\py\\claude\\claude-ion-react-workbench\\docs\\route-manifest.json",
+    "decompiled_root": "D:\\work\\py\\claude\\claude-ion-react-workbench\\decompiled"
+  },
+  "checks": {
+    "ion_dist": {
+      "source_file_count": 1555,
+      "target_file_count": 1555,
+      "missing": [],
+      "extra": [],
+      "changed": [],
+      "allowed_changed": [],
+      "exact": true,
+      "aligned_with_allowlist": true
+    },
+    "shell_vite": {
+      "source_file_count": 58,
+      "target_file_count": 58,
+      "missing": [],
+      "extra": [],
+      "changed": [],
+      "allowed_changed": [
+        "build/index.js",
+        "build/index.pre.js"
+      ],
+      "exact": false,
+      "aligned_with_allowlist": true
+    },
+    "fonts": {
+      "font_file_count": 72,
+      "font_files_sample": [
+        "assets/v1/c0346f996-C5JkGWo-.ttf",
+        "assets/v1/c0346f996-D3wIWfF6.woff2",
+        "assets/v1/c0346f996-D5yQViql.woff",
+        "assets/v1/c0f671921-B1q0oG0E.woff2",
+        "assets/v1/c2f08283e-DHGc3er-.woff2",
+        "assets/v1/c37c7c0f1-Cx986IdX.woff2",
+        "assets/v1/c37c7c0f1-Jm3AIy58.woff",
+        "assets/v1/c37c7c0f1-waoOVXN0.ttf",
+        "assets/v1/c3a5c82a2-3WenGoN9.ttf",
+        "assets/v1/c3a5c82a2-BMLOBm91.woff",
+        "assets/v1/c3a5c82a2-NWA7e6Wa.woff2",
+        "assets/v1/c3dd54df2-BF-4gkZK.woff",
+        "assets/v1/c3dd54df2-DWFBv043.ttf",
+        "assets/v1/c3dd54df2-Dl5lxZxV.woff2",
+        "assets/v1/c41a3c357-B7gKUWhC.ttf",
+        "assets/v1/c41a3c357-Dy4dx90m.woff2",
+        "assets/v1/c41a3c357-oD1tc_U0.woff",
+        "assets/v1/c57377647-C0xS9mPB.woff",
+        "assets/v1/c57377647-CO6r4hn1.woff2",
+        "assets/v1/c57377647-D3Ib7_Hf.ttf"
+      ],
+      "css_file_count": 21,
+      "font_face_css_files": [
+        "assets/v1/c43c5949a-CBkXKfji.css",
+        "assets/v1/c5f4e1303-2SC4Q2zq.css",
+        "assets/v1/c6a992d55-CgNGFRYw.css",
+        "assets/v1/c72812e30-X3ENwO7k.css"
+      ],
+      "font_families_sample": [
+        "-apple-system",
+        "Anthropic Mono",
+        "Anthropic Sans",
+        "Anthropic Serif",
+        "Anthropicons-Variable",
+        "Arial",
+        "KaTeX_AMS",
+        "KaTeX_Caligraphic",
+        "KaTeX_Fraktur",
+        "KaTeX_Main",
+        "KaTeX_Math",
+        "KaTeX_SansSerif",
+        "KaTeX_Script",
+        "KaTeX_Size1",
+        "KaTeX_Size2",
+        "KaTeX_Size3",
+        "KaTeX_Size4",
+        "KaTeX_Typewriter",
+        "OpenDyslexic",
+        "codicon",
+        "inherit",
+        "inherit!important",
+        "monospace",
+        "ui-monospace",
+        "var(--cds-font-mono)",
+        "var(--family-monospace)",
+        "var(--family-ui",
+        "var(--family-ui)",
+        "var(--font-claude-response)",
+        "var(--font-mono)",
+        "var(--font-system)",
+        "var(--font-ui)",
+        "var(--font-ui)!important",
+        "var(--font-ui-serif)",
+        "var(--font-user-message)",
+        "var(--font-user-message)!important",
+        "var(--monaco-monospace-font)",
+        "var(--vscode-editorCodeLens-fontFamily)",
+        "var(--vscode-icon-x-font-family)",
+        "var(--vscode-parameterHintsWidget-editorFontFamily)"
+      ]
+    },
+    "packages": {
+      "original_package": {
+        "name": "@ant/desktop",
+        "version": "1.6608.2",
+        "ui_libraries": {
+          "@phosphor-icons/react": "2.1.4",
+          "@tailwindcss/forms": "^0.5.3",
+          "@tailwindcss/typography": "^0.5.13",
+          "clsx": "^2.1.1",
+          "lit": "^3.2.0",
+          "react": "^18.3.1",
+          "react-dom": "^18.3.1",
+          "react-intl": "^6.7.2",
+          "tailwindcss": "^3.4.14"
+        }
+      },
+      "current_package": {
+        "name": "claude-deepseek-desktop",
+        "version": "1.6608.2-deepseek.0",
+        "ui_libraries": {
+          "@phosphor-icons/react": "2.1.4",
+          "@tailwindcss/forms": "^0.5.3",
+          "@tailwindcss/typography": "^0.5.13",
+          "clsx": "^2.1.1",
+          "lit": "^3.2.0",
+          "react": "^18.3.1",
+          "react-dom": "^18.3.1",
+          "react-intl": "^6.7.2",
+          "tailwindcss": "^3.4.14"
+        }
+      },
+      "unapproved_current_ui_libraries": [],
+      "current_ui_version_mismatches": []
+    },
+    "routes": {
+      "manifest_exists": true,
+      "route_count": 176,
+      "chunk_route_count": 152,
+      "chunk_routes_with_assets": 152,
+      "chunk_routes_with_decompiled_source": 152,
+      "key_routes": [
+        {
+          "path": "desktop_landing",
+          "chunk": "assets/v1/c71860c77-o4uW2kNW.js",
+          "chunk_exists": true,
+          "decompiled": "claude-ion-react-workbench\\decompiled\\c71860c77-o4uW2kNW\\deobfuscated.js",
+          "decompiled_exists": true
+        },
+        {
+          "path": "setup-desktop-3p",
+          "chunk": "assets/v1/c71860c77-BOaDa5w5.js",
+          "chunk_exists": true,
+          "decompiled": "claude-ion-react-workbench\\decompiled\\c71860c77-BOaDa5w5\\deobfuscated.js",
+          "decompiled_exists": true
+        },
+        {
+          "path": "device-code-verify",
+          "chunk": "assets/v1/c2ab4f27a-BT9l0ItR.js",
+          "chunk_exists": true,
+          "decompiled": "claude-ion-react-workbench\\decompiled\\c2ab4f27a-BT9l0ItR\\deobfuscated.js",
+          "decompiled_exists": true
+        }
+      ],
+      "missing_chunk_assets": []
+    },
+    "component_token_evidence": {
+      "React": [
+        "assets/v1/c1a1184fb-D3W5hOMJ.js",
+        "assets/v1/c30db9bec-DHKJ3QLM.js",
+        "assets/v1/c43c5949a-vQe16vbD.js",
+        "assets/v1/c5da08b62-CJhbL6NF.js",
+        "assets/v1/c5f4e1303-CSqThUeQ.js",
+        "assets/v1/c5f7e6b1f-1xJNnwe2.js",
+        "assets/v1/c6a992d55-BEDTEp7Y.js",
+        "assets/v1/c70085683-wStwpNIp.js"
+      ],
+      "react-intl": [
+        "assets/v1/a0911e9fb5d7528b1ca8bdcada4f28a453120e6d34255e29-JmXwavG5.js",
+        "assets/v1/c009a87a0-BppDfQ-y.js",
+        "assets/v1/c0243d234-BHUzHV1X.js",
+        "assets/v1/c029a409d-B0o81d6z.js",
+        "assets/v1/c0659e756-Cip3IoDf.js",
+        "assets/v1/c08ac968d-s8ZDe3Mn.js",
+        "assets/v1/c0c640f9e-DRyQ1nVp.js",
+        "assets/v1/c0d061424-CwKa6YZ3.js"
+      ],
+      "Tailwind utility CSS": [
+        "assets/v1/a0911e9fb5d7528b1ca8bdcada4f28a453120e6d34255e29-JmXwavG5.js",
+        "assets/v1/c009a87a0-BppDfQ-y.js",
+        "assets/v1/c029a409d-B0o81d6z.js",
+        "assets/v1/c0659e756-Cip3IoDf.js",
+        "assets/v1/c08ac968d-s8ZDe3Mn.js",
+        "assets/v1/c0d9175fe-B-mi5mWu.js",
+        "assets/v1/c0db37792-BgL3mH5J.js",
+        "assets/v1/c0f290978-cEb12PRk.js"
+      ],
+      "Radix-style primitives": [
+        "assets/v1/c0e33db81-BcpYGiHp.js",
+        "assets/v1/c1a1184fb-D3W5hOMJ.js",
+        "assets/v1/c32c0d97f-BjI0Knrv.js",
+        "assets/v1/c5f4e1303-CSqThUeQ.js",
+        "assets/v1/c6b2cc37d-B3nElewZ.js",
+        "assets/v1/c76c45088-DOi1njVG.js",
+        "assets/v1/c8c8d357b-iG1FnIvR.js",
+        "assets/v1/c90945bf1-CKvddXL8.js"
+      ],
+      "Headless UI traces": [
+        "assets/v1/c5f4e1303-CSqThUeQ.js",
+        "assets/v1/ca30e9e0c-C3yPj1FH.js",
+        "assets/v1/ca768caa9-D20-r2DS.js"
+      ],
+      "Phosphor/icon layer": []
+    }
+  },
+  "failures": [],
+  "ok": true
+}
