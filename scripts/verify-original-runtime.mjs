@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeNodeModules = path.join(projectRoot, "resources/original-runtime-node_modules/node_modules");
+const plainNodeMacNativeLoadSkips = new Map([
+  [
+    "@ant/claude-swift-ant",
+    "skipped in plain Node on macOS because @ant/claude-swift initializes UserNotifications and requires the Electron app bundle host",
+  ],
+]);
 const localBuiltinRuntimeEntries = [
   "@ant/chrome-native-host/package.json",
   "@ant/chrome-native-host/index.js",
@@ -70,6 +76,13 @@ async function collectNativeAddons(root) {
   return output;
 }
 
+function plainNodeNativeSkipReason(moduleName) {
+  if (process.platform !== "darwin") return null;
+  if (process.versions.electron) return null;
+  if (process.env.CLAUDE_DESKTOP_VERIFY_LOAD_SWIFT_NATIVE === "1") return null;
+  return plainNodeMacNativeLoadSkips.get(moduleName) ?? null;
+}
+
 function nodePtySmokeCommand() {
   if (process.platform === "win32") {
     const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
@@ -119,7 +132,13 @@ const builtinSmokeModules = [
   "@anthropic-ai/conway-client",
   "@anthropic-ai/electron-devtools-mcp",
 ];
+const skippedSmokeModules = [];
 for (const moduleName of builtinSmokeModules) {
+  const skipReason = plainNodeNativeSkipReason(moduleName);
+  if (skipReason) {
+    skippedSmokeModules.push(`${moduleName} (${skipReason})`);
+    continue;
+  }
   const loaded = require(path.join(runtimeNodeModules, moduleName));
   if (loaded == null) throw new Error(`builtin runtime module loaded null: ${moduleName}`);
 }
@@ -148,7 +167,8 @@ const output = await new Promise((resolve, reject) => {
 });
 
 if (!String(output).includes("runtime-pty-ok")) throw new Error(`node-pty smoke output mismatch: ${JSON.stringify(output)}`);
-console.log(`original runtime modules ok; builtin modules=${localBuiltinRuntimeEntries.length}; node-pty native smoke passed on ${process.platform}; native_addons=${nativeAddons.map((file) => path.relative(runtimeNodeModules, file)).join(",")}`);
+const skipSuffix = skippedSmokeModules.length > 0 ? `; skipped_smoke=${skippedSmokeModules.join(", ")}` : "";
+console.log(`original runtime modules ok; builtin modules=${localBuiltinRuntimeEntries.length}; node-pty native smoke passed on ${process.platform}; native_addons=${nativeAddons.map((file) => path.relative(runtimeNodeModules, file)).join(",")}${skipSuffix}`);
 // node-pty can leave native ConPTY handles alive briefly on Windows after the child
 // exits. The smoke has already observed onExit + expected output, so exit
 // explicitly to keep verification from hanging on those native handles.

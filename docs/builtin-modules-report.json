@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-08T09:28:49.553Z",
+  "generated_at": "2026-07-08T14:29:29.800Z",
   "summary": {
     "real_npm_count": 3,
     "builtin_count": 18,
@@ -12,6 +12,7 @@
     "placeholder_count": 0,
     "implemented_builtin_count": 18,
     "import_failures": 0,
+    "import_skips": 2,
     "smoke_failures": 0
   },
   "realPackages": [
@@ -80,7 +81,7 @@
     {
       "name": "@ant/chrome-native-host",
       "kind": "protocol-adapter",
-      "dir": "vendor\\ant\\chrome-native-host",
+      "dir": "vendor/ant/chrome-native-host",
       "require": {
         "ok": true,
         "type": "object",
@@ -106,7 +107,7 @@
     {
       "name": "@ant/claude-for-chrome-mcp",
       "kind": "source-built",
-      "dir": "vendor\\ant\\claude-for-chrome-mcp",
+      "dir": "vendor/ant/claude-for-chrome-mcp",
       "require": {
         "ok": true,
         "type": "object",
@@ -126,22 +127,40 @@
     {
       "name": "@ant/claude-native",
       "kind": "runtime-proxy",
-      "dir": "vendor\\ant\\claude-native",
+      "dir": "vendor/ant/claude-native",
       "require": {
         "ok": true,
-        "type": "function",
-        "keys": [],
-        "load_error": {
-          "code": "ERR_DLOPEN_FAILED",
-          "message": "\\\\?\\D:\\work\\py\\claude\\open-claude-desktop-worktree\\resources\\original-runtime-node_modules\\node_modules\\@ant\\claude-native\\claude-native-binding.node is not a valid Win32 application.\r\n\\\\?\\D:\\work\\py\\claude\\open-claude-desktop-worktree\\resources\\original-runtime-node_modules\\node_modules\\@ant\\claude-native\\claude-native-binding.node"
-        }
+        "type": "object",
+        "keys": [
+          "focusWindow",
+          "getHcsStatus",
+          "getWindowAbove",
+          "readPlistValue",
+          "isProcessRunning",
+          "moveWindowBehind",
+          "readCfPrefValue",
+          "deleteRegistryKey",
+          "readRegistryValues",
+          "writeRegistryDword",
+          "writeRegistryValue",
+          "attestedMachRequest",
+          "closeOfficeDocument",
+          "focusOfficeDocument",
+          "getAppInfoForFile",
+          "getFrontmostAppInfo",
+          "isOtherAppFullscreen",
+          "getActiveWindowHandle",
+          "getWindowsElevationType",
+          "enableWindowsOptionalFeature"
+        ],
+        "load_error": null
       },
       "smoke": null
     },
     {
       "name": "@ant/claude-screen-app",
       "kind": "protocol-adapter",
-      "dir": "vendor\\ant\\claude-screen-app",
+      "dir": "vendor/ant/claude-screen-app",
       "require": {
         "ok": true,
         "type": "object",
@@ -161,7 +180,7 @@
     {
       "name": "@ant/claude-ssh",
       "kind": "bundle-derived",
-      "dir": "vendor\\ant\\claude-ssh",
+      "dir": "vendor/ant/claude-ssh",
       "require": {
         "ok": true,
         "type": "object",
@@ -194,10 +213,12 @@
     {
       "name": "@ant/claude-swift",
       "kind": "runtime-proxy",
-      "dir": "vendor\\ant\\claude-swift",
+      "dir": "vendor/ant/claude-swift",
       "require": {
         "ok": true,
-        "type": "object",
+        "skipped": true,
+        "reason": "macOS Swift native addon initializes UserNotifications and requires the Electron app bundle host",
+        "type": "native-app-bundle-only",
         "keys": [],
         "load_error": null
       },
@@ -206,19 +227,13 @@
     {
       "name": "@ant/claude-swift-ant",
       "kind": "runtime-proxy",
-      "dir": "vendor\\ant\\claude-swift-ant",
+      "dir": "vendor/ant/claude-swift-ant",
       "require": {
         "ok": true,
-        "type": "object",
-        "keys": [
-          "__loadError",
-          "isAvailable",
-          "getNativeModule",
-          "loadSwiftAddon",
-          "loadComputerUseAddon",
-          "createComputerUseClient",
-          "default"
-        ],
+        "skipped": true,
+        "reason": "depends on @ant/claude-swift, which requires the Electron app bundle host on macOS",
+        "type": "native-app-bundle-only",
+        "keys": [],
         "load_error": null
       },
       "smoke": null
@@ -226,7 +241,7 @@
     {
       "name": "@ant/computer-use-mcp",
       "kind": "source-built",
-      "dir": "vendor\\ant\\computer-use-mcp",
+      "dir": "vendor/ant/computer-use-mcp",
       "require": {
         "ok": true,
         "type": "object",
@@ -259,7 +274,7 @@
     {
       "name": "@ant/cowork-win32-service",
       "kind": "protocol-adapter",
-      "dir": "vendor\\ant\\cowork-win32-service",
+      "dir": "vendor/ant/cowork-win32-service",
       "require": {
         "ok": true,
         "type": "object",
@@ -284,7 +299,7 @@
     {
       "name": "@ant/disclaimer",
       "kind": "bundle-derived",
-      "dir": "vendor\\ant\\disclaimer",
+      "dir": "vendor/ant/disclaimer",
       "require": {
         "ok": true,
         "type": "object",
@@ -305,7 +320,7 @@
     {
       "name": "@ant/dxt-registry",
       "kind": "protocol-adapter",
-      "dir": "vendor\\ant\\dxt-registry",
+      "dir": "vendor/ant/dxt-registry",
       "require": {
         "ok": true,
         "type": "object",
@@ -330,7 +345,7 @@
     {
       "name": "@ant/imagine-server",
       "kind": "bundle-derived",
-      "dir": "vendor\\ant\\imagine-server",
+      "dir": "vendor/ant/imagine-server",
       "require": {
         "ok": true,
         "type": "object",
@@ -349,7 +364,7 @@
     {
       "name": "@ant/ipc-codegen",
       "kind": "protocol-adapter",
-      "dir": "vendor\\ant\\ipc-codegen",
+      "dir": "vendor/ant/ipc-codegen",
       "require": {
         "ok": true,
         "type": "object",
@@ -374,7 +389,7 @@
     {
       "name": "@ant/rfb-client",
       "kind": "protocol-adapter",
-      "dir": "vendor\\ant\\rfb-client",
+      "dir": "vendor/ant/rfb-client",
       "require": {
         "ok": true,
         "type": "object",
@@ -393,7 +408,7 @@
     {
       "name": "@ant/utils",
       "kind": "compat-shim",
-      "dir": "vendor\\ant\\utils",
+      "dir": "vendor/ant/utils",
       "require": {
         "ok": true,
         "type": "object",
@@ -426,7 +441,7 @@
     {
       "name": "@anthropic-ai/claude-agent-sdk-future",
       "kind": "sdk-alias",
-      "dir": "vendor\\anthropic-ai\\claude-agent-sdk-future",
+      "dir": "vendor/anthropic-ai/claude-agent-sdk-future",
       "require": {
         "ok": true,
         "type": "object",
@@ -462,7 +477,7 @@
     {
       "name": "@anthropic-ai/conway-client",
       "kind": "compat-shim",
-      "dir": "vendor\\anthropic-ai\\conway-client",
+      "dir": "vendor/anthropic-ai/conway-client",
       "require": {
         "ok": true,
         "type": "object",
@@ -479,7 +494,7 @@
     {
       "name": "@anthropic-ai/electron-devtools-mcp",
       "kind": "protocol-adapter",
-      "dir": "vendor\\anthropic-ai\\electron-devtools-mcp",
+      "dir": "vendor/anthropic-ai/electron-devtools-mcp",
       "require": {
         "ok": true,
         "type": "object",
