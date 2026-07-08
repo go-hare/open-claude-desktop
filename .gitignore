@@ -9,3 +9,4 @@ out/
 resources/ion-dist/
 .DS_Store
 *.log
+.codex-user-data-*/
