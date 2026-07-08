@@ -1,0 +1,15 @@
+{
+  "name": "@anthropic-ai/conway-client",
+  "version": "0.2.0-dev.20260422-builtin",
+  "private": true,
+  "description": "Local Conway API client shim for official @anthropic-ai/conway-client desktop dev package",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "xParityKind": "compat-shim"
+}

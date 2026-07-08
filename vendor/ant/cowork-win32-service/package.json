@@ -1,0 +1,15 @@
+{
+  "name": "@ant/cowork-win32-service",
+  "version": "0.0.0-builtin",
+  "private": true,
+  "description": "Local Windows service adapter for official @ant/cowork-win32-service desktop private package",
+  "main": "index.js",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "types": "index.d.ts",
+  "xParityKind": "protocol-adapter"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@ant/claude-screen-app",
+  "version": "0.0.0-builtin",
+  "private": true,
+  "description": "Local screen session adapter for official @ant/claude-screen-app desktop private package",
+  "main": "index.js",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "types": "index.d.ts",
+  "xParityKind": "protocol-adapter"
+}

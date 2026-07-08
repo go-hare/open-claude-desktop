@@ -1,0 +1,17 @@
+{
+  "name": "@ant/claude-for-chrome-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "tsconfig.json"
+  ],
+  "exports": {
+    ".": "./dist/index.js"
+  }
+}

@@ -6,7 +6,30 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = path.resolve(projectRoot, "..");
-const docsRoot = path.join(workspaceRoot, "docs");
+const docsRoot = path.join(projectRoot, "docs");
+const mirrorRootCandidates = [
+  process.env.CLAUDE_ELECTRON_SHELL_MIRROR,
+  path.join(workspaceRoot, "electron-shell-source/app-asar"),
+  path.join(workspaceRoot, "claude-ion-react-workbench/electron-shell-source/app-asar"),
+  path.join(workspaceRoot, "claude-ion-react-workbench/claude-ion-react-workbench/electron-shell-source/app-asar"),
+  String.raw`D:\work\py\claude\claude-ion-react-workbench\electron-shell-source\app-asar`,
+  String.raw`D:\BaiduNetdiskDownload\claude-ion-react-workbench\claude-ion-react-workbench\electron-shell-source\app-asar`,
+].filter(Boolean);
+const mirrorRoot = mirrorRootCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? mirrorRootCandidates[0];
+const routeManifestCandidates = [
+  process.env.CLAUDE_ROUTE_MANIFEST,
+  path.join(workspaceRoot, "docs/route-manifest.json"),
+  path.join(workspaceRoot, "claude-ion-react-workbench/docs/route-manifest.json"),
+  path.join(workspaceRoot, "claude-ion-react-workbench/claude-ion-react-workbench/docs/route-manifest.json"),
+].filter(Boolean);
+const routeManifestPath = routeManifestCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? routeManifestCandidates[0];
+const decompiledRootCandidates = [
+  process.env.CLAUDE_DECOMPILED_ROOT,
+  path.join(workspaceRoot, "decompiled"),
+  path.join(workspaceRoot, "claude-ion-react-workbench/decompiled"),
+  path.join(workspaceRoot, "claude-ion-react-workbench/claude-ion-react-workbench/decompiled"),
+].filter(Boolean);
+const decompiledRoot = decompiledRootCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? decompiledRootCandidates[0];
 const originalResourceCandidates = [
   process.env.CLAUDE_ORIGINAL_RESOURCES,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources") : undefined,
@@ -16,12 +39,10 @@ const originalResourceCandidates = [
 const originalAppResourcesRoot = originalResourceCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalResourceCandidates[0];
 const originalIonDistRoot = path.join(originalAppResourcesRoot, "ion-dist");
 const currentIonDistRoot = path.join(projectRoot, "resources/ion-dist");
-const mirrorViteRoot = path.join(workspaceRoot, "electron-shell-source/app-asar/.vite");
+const mirrorViteRoot = path.join(mirrorRoot, ".vite");
 const currentViteRoot = path.join(projectRoot, ".vite");
-const originalPackagePath = path.join(workspaceRoot, "electron-shell-source/app-asar/package.json");
+const originalPackagePath = path.join(mirrorRoot, "package.json");
 const currentPackagePath = path.join(projectRoot, "package.json");
-const routeManifestPath = path.join(docsRoot, "route-manifest.json");
-const decompiledRoot = path.join(workspaceRoot, "decompiled");
 
 const sourceOwnedViteEntries = new Set(["build/index.js", "build/index.pre.js"]);
 const uiLibraryAllowlist = new Set([

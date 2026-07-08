@@ -1,0 +1,14 @@
+{
+  "name": "@ant/claude-native",
+  "version": "0.0.0-builtin",
+  "private": true,
+  "description": "Local built-in package for @ant/claude-native",
+  "main": "index.js",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "types": "index.d.ts"
+}

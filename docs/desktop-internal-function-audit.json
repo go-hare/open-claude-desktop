@@ -1,0 +1,1812 @@
+{
+  "generated_at": "2026-07-08T09:28:33.272Z",
+  "mirror_root": "D:\\work\\py\\claude\\claude-ion-react-workbench\\electron-shell-source\\app-asar",
+  "official": {
+    "total_channels": 634,
+    "direct_channel_count": 5,
+    "invoke_count": 544,
+    "send_sync_count": 15,
+    "renderer_event_count": 75,
+    "direct_invoke_count": 3,
+    "direct_event_count": 2,
+    "invoke_tree": {
+      "claude.buddy": {
+        "Buddy": [
+          "cancelScan",
+          "deviceStatus",
+          "forgetDevice",
+          "install",
+          "pairDevice",
+          "pickDevice",
+          "pickFolder",
+          "preview",
+          "scanDevices",
+          "setName",
+          "status",
+          "submitPin"
+        ],
+        "BuddyBleTransport": [
+          "log",
+          "reportState",
+          "rx"
+        ]
+      },
+      "claude.coworkArtifact": {
+        "CoworkArtifactBridge": [
+          "askClaude",
+          "callMcpTool",
+          "navigateHost",
+          "openExternalUrl",
+          "runScheduledTask"
+        ]
+      },
+      "claude.hybrid": {
+        "DesktopIntl": [
+          "requestLocaleChange"
+        ]
+      },
+      "claude.internal.findInPage": {
+        "FindInPage": [
+          "endFindSession",
+          "findInPage",
+          "stopFindInPage"
+        ]
+      },
+      "claude.internal.ui": {
+        "AboutWindow": [
+          "getAppName",
+          "getBuildProps",
+          "getSupport",
+          "openHelp"
+        ],
+        "MainWindowTitleBar": [
+          "isClaudeCurrentlyHealthy",
+          "requestMainMenuPopup",
+          "requestReloadMainView",
+          "titleBarReady"
+        ],
+        "QuickWindow": [
+          "requestDismiss",
+          "requestDismissWithPayload",
+          "requestSkooch"
+        ]
+      },
+      "claude.officeAddin": {
+        "OfficeAddinFiles": [
+          "connectedFilesState_$store$_getState",
+          "focusFile",
+          "getConnectedFiles",
+          "isFeatureEnabled",
+          "selectFile",
+          "updateActiveConversationSummary"
+        ]
+      },
+      "claude.settings": {
+        "AppConfig": [
+          "getAppConfig",
+          "setAppFeature",
+          "setIsDxtAutoUpdatesEnabled",
+          "setIsUsingBuiltInNodeForMcp"
+        ],
+        "AppFeatures": [
+          "getSupportedFeatures"
+        ],
+        "AppPreferences": [
+          "getPreferences",
+          "setPreference"
+        ],
+        "Custom3pHelperRun": [
+          "getCredentialHelperLastRun",
+          "runCredentialHelper"
+        ],
+        "Custom3pSetup": [
+          "authorizeAndProbeMcpServer",
+          "bootstrapState_$store$_getState",
+          "createConfig",
+          "deleteConfig",
+          "duplicateConfig",
+          "exportConfig",
+          "forgetMcpOAuth",
+          "getConfigHealth",
+          "getLoginDesktop3pStatus",
+          "listConfigs",
+          "openDeviceCodeWindowForE2e",
+          "openSetupWindow",
+          "probeEgressHosts",
+          "probeMcpServer",
+          "readConfig",
+          "recheckConfigHealth",
+          "relaunchApp",
+          "renameConfig",
+          "revealConfig",
+          "setAppliedConfig",
+          "setDeploymentMode",
+          "triggerBootstrapAuth",
+          "writeConfig"
+        ],
+        "DesktopInfo": [
+          "getSystemInfo",
+          "showLogsInFileManager"
+        ],
+        "Extensions": [
+          "deleteExtension",
+          "getAvailableExtensionRuntimes",
+          "getDirectoryUrl",
+          "getExtension",
+          "getExtensionSettings",
+          "getExtensionVersion",
+          "getExtensionVersions",
+          "getExtensions",
+          "getInstalledExtensionsWithState",
+          "getIsUpdateAvailable",
+          "getManifestCompatibilityResult",
+          "handleDxtFile",
+          "installDxt",
+          "installDxtFromDirectory",
+          "installDxtUnpacked",
+          "installExtensionFromPreview",
+          "isDesktopExtensionDirectoryEnabled",
+          "isDesktopExtensionSignatureRequired",
+          "isDirectoryEnabled",
+          "isExtensionsEnabled",
+          "openExtensionSettingsFolder",
+          "openExtensionsFolder",
+          "refreshAllowlistCheck",
+          "setExtensionSettings",
+          "showExtensionInFolder",
+          "showInstallDxtDialog"
+        ],
+        "FilePickers": [
+          "getDirectoryPath",
+          "getFilePath"
+        ],
+        "GlobalShortcut": [
+          "getGlobalShortcut",
+          "setGlobalShortcut"
+        ],
+        "MCP": [
+          "getMcpServersConfig",
+          "getMcpServersConfigWithStatus",
+          "isLocalDevMcpEnabled",
+          "revealConfig",
+          "revealLogs",
+          "revealServerLog",
+          "setMcpServerConfigs"
+        ],
+        "Startup": [
+          "isMenuBarEnabled",
+          "isStartupOnLoginEnabled",
+          "setMenuBarEnabled",
+          "setStartupOnLoginEnabled"
+        ],
+        "SupportBundle": [
+          "submitAction",
+          "supportBundleState_$store$_getState"
+        ],
+        "WakeScheduler": [
+          "getStatus",
+          "openSettings"
+        ]
+      },
+      "claude.simulator": {
+        "Simulator": [
+          "attach",
+          "attachment_$store$_getState",
+          "detach",
+          "gesture",
+          "installAndLaunch",
+          "listDevices"
+        ]
+      },
+      "claude.web": {
+        "Account": [
+          "setAccountDetails"
+        ],
+        "AgentModeFeedback": [
+          "openFeedbackAndConfirmReinstall",
+          "openFeedbackWindow",
+          "reportErrorToSlack"
+        ],
+        "Auth": [
+          "doAuthInBrowser"
+        ],
+        "AutoUpdater": [
+          "cancelPendingRestart",
+          "checkForUpdates",
+          "getRunningLocalSessionCount",
+          "restartToUpdate",
+          "restartToUpdateWhenIdle",
+          "updaterState_$store$_getState"
+        ],
+        "BrowserNavigation": [
+          "goBack",
+          "goForward",
+          "navigationState_$store$_getState",
+          "reportNavigationState",
+          "requestMainMenuPopup"
+        ],
+        "BuddyRemoteFeed": [
+          "sync"
+        ],
+        "CCDScheduledTasks": [
+          "createScheduledTask",
+          "getAllScheduledTasks",
+          "getScheduledTaskFileContent",
+          "removeApprovedPermission",
+          "updateScheduledTask",
+          "updateScheduledTaskFileContent",
+          "updateScheduledTaskStatus"
+        ],
+        "ChromeExtension": [
+          "installExtension",
+          "isInstalled",
+          "restartChrome"
+        ],
+        "ClaudeCode": [
+          "checkGitAvailable",
+          "getStatus",
+          "prepare",
+          "resolveLocalSettings"
+        ],
+        "ClaudeVM": [
+          "apiReachability_$store$_getState",
+          "checkVirtualMachinePlatform",
+          "deleteAndReinstall",
+          "download",
+          "enableVirtualMachinePlatform",
+          "getDownloadStatus",
+          "getRunningStatus",
+          "restartAfterVMPInstall",
+          "setForceDisableHostLoop",
+          "setYukonSilverConfig",
+          "startVM"
+        ],
+        "ComputerUseTcc": [
+          "getCurrentSessionGrants",
+          "getState",
+          "listInstalledApps",
+          "openSystemSettings",
+          "requestAccessibility",
+          "requestScreenRecording",
+          "revokeGrant"
+        ],
+        "CoworkArtifacts": [
+          "deleteArtifact",
+          "getAllArtifacts",
+          "getArtifactIndexHtmlPath",
+          "getArtifactMetadata",
+          "getArtifactThumbnail",
+          "hideArtifact",
+          "importArtifact",
+          "isSharingEnabled",
+          "parkAndCaptureArtifact",
+          "printArtifactToPdf",
+          "refreshImportedArtifact",
+          "reloadArtifactView",
+          "restoreArtifactVersion",
+          "setArtifactMcpTools",
+          "setArtifactStarred",
+          "shareArtifact",
+          "showArtifact",
+          "unshareArtifact"
+        ],
+        "CoworkFilePreview": [
+          "hide",
+          "isEnabled",
+          "isVmReady",
+          "parkAndCapture",
+          "show"
+        ],
+        "CoworkMemory": [
+          "deleteAccountMemory",
+          "listAccountMemories",
+          "readAccountMemory",
+          "readGlobalMemory",
+          "resetMemories",
+          "writeAccountMemory",
+          "writeGlobalMemory"
+        ],
+        "CoworkRadar": [
+          "adoptSession",
+          "dismissCard",
+          "getCards",
+          "getLastRun",
+          "recordCardEngagement",
+          "revealLastRunTranscript",
+          "setCardStatus"
+        ],
+        "CoworkScheduledTasks": [
+          "clearChromePermissions",
+          "createScheduledTask",
+          "getAllScheduledTasks",
+          "getScheduledTaskFileContent",
+          "removeApprovedPermission",
+          "updateScheduledTask",
+          "updateScheduledTaskFileContent",
+          "updateScheduledTaskStatus"
+        ],
+        "CoworkSpaces": [
+          "addFolderToSpace",
+          "addLinkToSpace",
+          "addProjectToSpace",
+          "classifySessions",
+          "copyFilesToSpaceFolder",
+          "createSpace",
+          "createSpaceFolder",
+          "deleteSpace",
+          "getAllSpaces",
+          "getAutoMemoryDir",
+          "getSpace",
+          "listFolderContents",
+          "openFile",
+          "readFileContents",
+          "removeFolderFromSpace",
+          "removeLinkFromSpace",
+          "removeProjectFromSpace",
+          "setAutoDescription",
+          "summarizeSpace",
+          "updateSpace"
+        ],
+        "CustomPlugins": [
+          "addMarketplace",
+          "checkPluginHasLocalChanges",
+          "getAndClearMigrationIssues",
+          "getCachedCommands",
+          "getInstallCounts",
+          "installLocalOrgPlugin",
+          "installPlugin",
+          "listAvailablePlugins",
+          "listInstalledPlugins",
+          "listLocalOrgPlugins",
+          "listMarketplaces",
+          "listRemotePluginsPage",
+          "refreshMarketplace",
+          "removeMarketplace",
+          "uninstallPlugin",
+          "updatePlugin"
+        ],
+        "DesktopNotifications": [
+          "getAuthorizationStatus",
+          "openNotificationSettings",
+          "requestAuthorization",
+          "showNotification"
+        ],
+        "FileSystem": [
+          "browseFiles",
+          "browseFolder",
+          "browseFolders",
+          "exportLocalFileToGoogleDrive",
+          "getLocalFileThumbnail",
+          "getSystemPath",
+          "listDirectory",
+          "listFilesInFolder",
+          "openLocalFile",
+          "promoteScratchpadFile",
+          "readLocalFile",
+          "savePastedFile",
+          "showInFolder",
+          "whichApplication",
+          "writeFileDownload",
+          "writeFileDownloadAndOpen",
+          "writeLocalFile"
+        ],
+        "FindInPageProvider": [
+          "reportFindResult",
+          "setProviderActive"
+        ],
+        "FloatingPenguinMini": [
+          "requestSetMiniExpanded",
+          "requestToggleMini"
+        ],
+        "FramebufferPreview": [
+          "attach",
+          "detach",
+          "listSources",
+          "requestFramePort",
+          "sendKey",
+          "sendPointer",
+          "sendScroll",
+          "setStreamHints"
+        ],
+        "GrandPrix": [
+          "disconnect",
+          "grandPrixStatus_$store$_getState",
+          "pair"
+        ],
+        "Launch": [
+          "activeServers_$store$_getState",
+          "capturePreviewScreenshot",
+          "clearPreviewViewport",
+          "deployPreview",
+          "destroyPreview",
+          "getAutoVerify",
+          "getConfiguredServices",
+          "getLogs",
+          "getPreviewUrl",
+          "goBack",
+          "goForward",
+          "hidePreview",
+          "loadHtmlPreview",
+          "navigatePreview",
+          "pickHtmlFile",
+          "refreshPreview",
+          "setAutoVerify",
+          "setPreviewColorScheme",
+          "setPreviewViewport",
+          "showPreview",
+          "startFromConfig",
+          "stopServer",
+          "suggestDeployName",
+          "toggleSelectionMode",
+          "unpublishDeploy"
+        ],
+        "LocalAgentModeSessions": [
+          "abandonBridgeEnvironment",
+          "addFolderToSession",
+          "addTrustedFolder",
+          "archive",
+          "authorizeDirectMcpServer",
+          "delete",
+          "deleteBridgeAgentMemory",
+          "deleteBridgeSession",
+          "deleteLocalSkill",
+          "disconnectDirectMcpServer",
+          "getAll",
+          "getBridgeConsent",
+          "getDirectMcpServerStatuses",
+          "getLocalSkillFiles",
+          "getSession",
+          "getSessionsBridgeEnabled",
+          "getSessionsForScheduledTask",
+          "getSupportedCommands",
+          "getTranscript",
+          "getTranscriptFeedback",
+          "getTrustedFolders",
+          "interactiveAuth_$store$_getState",
+          "isFolderTrusted",
+          "kickBridgePoll",
+          "listLocalSkills",
+          "mcpCallTool",
+          "mcpListResources",
+          "mcpReadResource",
+          "noteCuWindowMentions",
+          "openOutputsDir",
+          "removeTrustedFolder",
+          "replaceEnabledMcpTools",
+          "replaceRemoteMcpServers",
+          "requestFolderTccAccess",
+          "resetBridge",
+          "resetBridgeSession",
+          "respondBridgePermissionPreflight",
+          "respondDirectoryServers",
+          "respondPluginSearch",
+          "respondSlashMenuSkills",
+          "respondToToolPermission",
+          "revealLocalSkill",
+          "revokeInteractiveAuth",
+          "rewind",
+          "saveLocalSkill",
+          "searchSessions",
+          "sendMessage",
+          "sessionsBridgeStatus_$store$_getState",
+          "setChromePermissionMode",
+          "setDraftSessionFolders",
+          "setFocusedSession",
+          "setLocalSkillEnabled",
+          "setMcpServers",
+          "setModel",
+          "setPermissionMode",
+          "setSessionsBridgeEnabled",
+          "shareSession",
+          "start",
+          "stop",
+          "submitTranscriptFeedback",
+          "syncSkills",
+          "triggerInteractiveAuth",
+          "updateSession"
+        ],
+        "LocalPlugins": [
+          "deletePlugin",
+          "getDownloadedRemotePlugins",
+          "getPluginCliStatus",
+          "getPluginOAuthStatus",
+          "getPluginShimOps",
+          "getPlugins",
+          "listSkillFiles",
+          "revokePluginOAuth",
+          "setPluginEnabled",
+          "setPluginEnvVars",
+          "setPluginOAuthClient",
+          "setPluginShimPermission",
+          "startPluginOAuthFlow",
+          "syncRemotePlugins",
+          "uploadPlugin"
+        ],
+        "LocalSessionEnvironment": [
+          "get",
+          "save"
+        ],
+        "LocalSessions": [
+          "addDirectories",
+          "archive",
+          "cancelQueuedMessage",
+          "checkGhAvailable",
+          "checkRemoteTrust",
+          "checkTrust",
+          "clearSession",
+          "commitAllChanges",
+          "commitWipForBranchSwitch",
+          "createAgent",
+          "createLocalPr",
+          "delete",
+          "disableAutoMerge",
+          "discardWorkingTree",
+          "enableAutoMerge",
+          "ensureBranchPushed",
+          "ensureSSHConnected",
+          "forkSession",
+          "generateLocalPrContent",
+          "getAgents",
+          "getAll",
+          "getCodeStats",
+          "getCommitDiff",
+          "getContextUsage",
+          "getDefaultEffort",
+          "getDefaultPermissionMode",
+          "getDetectedProjects",
+          "getDiffFileContent",
+          "getEffort",
+          "getGhIssue",
+          "getGitCommits",
+          "getGitDiff",
+          "getGitDiffStats",
+          "getGitInfo",
+          "getInstalledEditors",
+          "getLocalBranches",
+          "getPermissionMode",
+          "getPlanForSession",
+          "getPrChecks",
+          "getPrDetails",
+          "getPrReviewComments",
+          "getPrStateForBranch",
+          "getSSHConfigs",
+          "getSSHGitInfo",
+          "getSSHSupportedCommands",
+          "getSession",
+          "getSessionsForScheduledTask",
+          "getShellPtyBuffer",
+          "getSupportedCommands",
+          "getTeleportReadiness",
+          "getTranscript",
+          "getTrustedSSHHosts",
+          "getUncommittedChanges",
+          "getWorkingTreeStatus",
+          "importCliSession",
+          "installGh",
+          "interrupt",
+          "isVSCodeInstalled",
+          "isWorkingTreeDirty",
+          "launchUltrareview",
+          "listGhIssues",
+          "listSSHDirectory",
+          "listSessionDirectory",
+          "logCliEvent",
+          "mergePr",
+          "openInEditor",
+          "openInVSCode",
+          "pickFileAtCwd",
+          "pickSessionFile",
+          "popBackgroundTaskSuggestion",
+          "readFileAtCwd",
+          "readSessionFile",
+          "readSessionImageAsDataUrl",
+          "releaseWorktree",
+          "replaceEnabledMcpTools",
+          "replaceRemoteMcpServers",
+          "resizePty",
+          "resizeShellPty",
+          "resolveSSHSettings",
+          "respondToSSHPassword",
+          "respondToToolPermission",
+          "reviewDiff",
+          "rewind",
+          "runBashCommand",
+          "saveTrust",
+          "searchSessions",
+          "sendMessage",
+          "sendSideChatMessage",
+          "setAutoFixEnabled",
+          "setAvailableCodeModels",
+          "setEffort",
+          "setFastMode",
+          "setFocusedSession",
+          "setMcpServers",
+          "setModel",
+          "setPermissionMode",
+          "setSSHConfigs",
+          "setTrustedSSHHosts",
+          "setVisibility",
+          "shareSession",
+          "start",
+          "startPty",
+          "startShellPty",
+          "startSideChat",
+          "stashWorkingTree",
+          "stop",
+          "stopPty",
+          "stopSessionSummary",
+          "stopShellPty",
+          "stopSideChat",
+          "stopTask",
+          "submitFeedback",
+          "summarizeSession",
+          "summarizeTranscript",
+          "teleportToCloud",
+          "testSSHConnection",
+          "unarchive",
+          "updatePrBody",
+          "updateSession",
+          "validateSSHPath",
+          "writePty",
+          "writeSessionFile",
+          "writeShellPty"
+        ],
+        "NestDev": [
+          "focus",
+          "getState"
+        ],
+        "OpenDocuments": [
+          "getOpenDocuments",
+          "readOpenDocumentAsBase64"
+        ],
+        "OrbitDeploys": [
+          "getAll",
+          "removeDeploy",
+          "setDeploy",
+          "setPinned"
+        ],
+        "QuickEntry": [
+          "setRecentChats"
+        ],
+        "Resources": [
+          "fetchMentionOptions",
+          "handleMentionSelect",
+          "listProjectFiles",
+          "searchFileContents",
+          "setFindInPageClaimed",
+          "setFocusedCwd"
+        ],
+        "WindowControl": [
+          "captureScreenshot",
+          "close",
+          "focus",
+          "resize",
+          "setIncognitoMode",
+          "setThemeMode"
+        ],
+        "WindowState": [
+          "getFullscreen",
+          "getVisibility",
+          "getZoomFactor"
+        ]
+      }
+    },
+    "send_sync_tree": {
+      "claude.hybrid": {
+        "DesktopIntl": [
+          "getInitialLocale"
+        ]
+      },
+      "claude.officeAddin": {
+        "OfficeAddinFiles": [
+          "connectedFilesState_$store$_getStateSync"
+        ]
+      },
+      "claude.settings": {
+        "Custom3pSetup": [
+          "bootstrapState_$store$_getStateSync"
+        ],
+        "SupportBundle": [
+          "supportBundleState_$store$_getStateSync"
+        ]
+      },
+      "claude.simulator": {
+        "Simulator": [
+          "attachment_$store$_getStateSync"
+        ]
+      },
+      "claude.web": {
+        "AutoUpdater": [
+          "updaterState_$store$_getStateSync"
+        ],
+        "BrowserNavigation": [
+          "navigationState_$store$_getStateSync"
+        ],
+        "ClaudeVM": [
+          "apiReachability_$store$_getStateSync",
+          "isHostLoopDevOverrideActive",
+          "isHostLoopModeEnabled"
+        ],
+        "GrandPrix": [
+          "grandPrixStatus_$store$_getStateSync"
+        ],
+        "Launch": [
+          "activeServers_$store$_getStateSync",
+          "isAvailable"
+        ],
+        "LocalAgentModeSessions": [
+          "interactiveAuth_$store$_getStateSync",
+          "sessionsBridgeStatus_$store$_getStateSync"
+        ]
+      }
+    },
+    "renderer_event_tree": {
+      "claude.buddy": {
+        "Buddy": [
+          "pairingPrompt",
+          "progress"
+        ],
+        "BuddyBleTransport": [
+          "tx"
+        ]
+      },
+      "claude.hybrid": {
+        "DesktopIntl": [
+          "localeChanged"
+        ]
+      },
+      "claude.internal.ui": {
+        "MainWindowTitleBar": [
+          "hideLoadError",
+          "showLoadError",
+          "updateTitleBar"
+        ]
+      },
+      "claude.officeAddin": {
+        "OfficeAddinFiles": [
+          "connectedFilesState_$store$_update",
+          "onAddinNeedsContext",
+          "onFileAdded",
+          "onFileRemoved",
+          "onFileStateChanged"
+        ]
+      },
+      "claude.settings": {
+        "AppPreferences": [
+          "preferencesChanged"
+        ],
+        "Custom3pSetup": [
+          "bootstrapState_$store$_update"
+        ],
+        "Extensions": [
+          "extensionDownloadProgress",
+          "extensionSettingsChanged",
+          "extensionsChanged",
+          "previewExtensionInstallation"
+        ],
+        "GlobalShortcut": [
+          "globalShortcutChange"
+        ],
+        "MCP": [
+          "mcpConfigChange",
+          "mcpStatusChanged",
+          "revealMcpServerSettingsRequested"
+        ],
+        "SupportBundle": [
+          "supportBundleState_$store$_update"
+        ]
+      },
+      "claude.simulator": {
+        "Simulator": [
+          "attachment_$store$_update"
+        ]
+      },
+      "claude.skills": {
+        "Skills": [
+          "previewSkillFile"
+        ]
+      },
+      "claude.web": {
+        "AutoUpdater": [
+          "updaterState_$store$_update"
+        ],
+        "BrowserNavigation": [
+          "navigationState_$store$_update"
+        ],
+        "BuddyRemoteFeed": [
+          "permissionDecision"
+        ],
+        "CCDScheduledTasks": [
+          "onScheduledTaskEvent"
+        ],
+        "ClaudeVM": [
+          "apiReachability_$store$_update",
+          "downloadProgress",
+          "downloadStatusChanged",
+          "runningStatusChanged",
+          "startupError"
+        ],
+        "CoworkArtifacts": [
+          "onArtifactsChanged"
+        ],
+        "CoworkRadar": [
+          "onRadarUpdated"
+        ],
+        "CoworkScheduledTasks": [
+          "onScheduledTaskEvent"
+        ],
+        "CoworkSpaces": [
+          "onSpaceEvent"
+        ],
+        "CustomPlugins": [
+          "installProgress"
+        ],
+        "DeepLink": [
+          "handleDeepLink"
+        ],
+        "DesktopNotifications": [
+          "onNotificationClicked"
+        ],
+        "FindInPageProvider": [
+          "findClear",
+          "findRequest"
+        ],
+        "FloatingPenguinMini": [
+          "onMiniStateChanged"
+        ],
+        "FramebufferPreview": [
+          "openSourceRequested",
+          "sessionFatal",
+          "sessionResized"
+        ],
+        "GrandPrix": [
+          "grandPrixStatus_$store$_update"
+        ],
+        "Launch": [
+          "activeServers_$store$_update",
+          "deployEvent",
+          "elementSelected",
+          "previewSelectionShortcut",
+          "previewUrlChanged"
+        ],
+        "LocalAgentModeSessions": [
+          "interactiveAuth_$store$_update",
+          "onBridgePermissionPreflight",
+          "onCoworkFromMain",
+          "onDirectMcpServerStatusesChanged",
+          "onEvent",
+          "onRemoteSessionStart",
+          "onToolPermissionRequest",
+          "sessionsBridgeStatus_$store$_update"
+        ],
+        "LocalPlugins": [
+          "onCliOpAlwaysAllowed"
+        ],
+        "LocalSessions": [
+          "onEvent",
+          "onSSHPasswordRequired",
+          "onToolPermissionRequest"
+        ],
+        "MenuEvents": [
+          "closeWindow",
+          "openFile"
+        ],
+        "Navigation": [
+          "navigate"
+        ],
+        "QuickEntry": [
+          "onQuickEntrySubmit"
+        ],
+        "Resources": [
+          "findRequested"
+        ],
+        "Toast": [
+          "showToast"
+        ],
+        "WindowState": [
+          "cuDockStateChanged",
+          "fullscreenChanged",
+          "visibilityChanged",
+          "zoomFactorChanged"
+        ]
+      }
+    }
+  },
+  "source": {
+    "registered_invoke_count": 544,
+    "registered_send_sync_count": 15,
+    "dispatched_event_count": 75,
+    "direct_registered_invoke_count": 3,
+    "direct_dispatched_event_count": 2,
+    "registered_tree": {
+      "claude.buddy": {
+        "Buddy": [
+          "cancelScan",
+          "deviceStatus",
+          "forgetDevice",
+          "install",
+          "pairDevice",
+          "pickDevice",
+          "pickFolder",
+          "preview",
+          "scanDevices",
+          "setName",
+          "status",
+          "submitPin"
+        ],
+        "BuddyBleTransport": [
+          "log",
+          "reportState",
+          "rx"
+        ]
+      },
+      "claude.coworkArtifact": {
+        "CoworkArtifactBridge": [
+          "askClaude",
+          "callMcpTool",
+          "navigateHost",
+          "openExternalUrl",
+          "runScheduledTask"
+        ]
+      },
+      "claude.hybrid": {
+        "DesktopIntl": [
+          "getInitialLocale",
+          "requestLocaleChange"
+        ]
+      },
+      "claude.internal.findInPage": {
+        "FindInPage": [
+          "endFindSession",
+          "findInPage",
+          "stopFindInPage"
+        ]
+      },
+      "claude.internal.ui": {
+        "AboutWindow": [
+          "getAppName",
+          "getBuildProps",
+          "getSupport",
+          "openHelp"
+        ],
+        "MainWindowTitleBar": [
+          "isClaudeCurrentlyHealthy",
+          "requestMainMenuPopup",
+          "requestReloadMainView",
+          "titleBarReady"
+        ],
+        "QuickWindow": [
+          "requestDismiss",
+          "requestDismissWithPayload",
+          "requestSkooch"
+        ]
+      },
+      "claude.officeAddin": {
+        "OfficeAddinFiles": [
+          "connectedFilesState_$store$_getState",
+          "connectedFilesState_$store$_getStateSync",
+          "focusFile",
+          "getConnectedFiles",
+          "isFeatureEnabled",
+          "selectFile",
+          "updateActiveConversationSummary"
+        ]
+      },
+      "claude.settings": {
+        "AppConfig": [
+          "getAppConfig",
+          "setAppFeature",
+          "setIsDxtAutoUpdatesEnabled",
+          "setIsUsingBuiltInNodeForMcp"
+        ],
+        "AppFeatures": [
+          "getSupportedFeatures"
+        ],
+        "AppPreferences": [
+          "getPreferences",
+          "setPreference"
+        ],
+        "Custom3pHelperRun": [
+          "getCredentialHelperLastRun",
+          "runCredentialHelper"
+        ],
+        "Custom3pSetup": [
+          "authorizeAndProbeMcpServer",
+          "bootstrapState_$store$_getState",
+          "bootstrapState_$store$_getStateSync",
+          "createConfig",
+          "deleteConfig",
+          "duplicateConfig",
+          "exportConfig",
+          "forgetMcpOAuth",
+          "getConfigHealth",
+          "getLoginDesktop3pStatus",
+          "listConfigs",
+          "openDeviceCodeWindowForE2e",
+          "openSetupWindow",
+          "probeEgressHosts",
+          "probeMcpServer",
+          "readConfig",
+          "recheckConfigHealth",
+          "relaunchApp",
+          "renameConfig",
+          "revealConfig",
+          "setAppliedConfig",
+          "setDeploymentMode",
+          "triggerBootstrapAuth",
+          "writeConfig"
+        ],
+        "DesktopInfo": [
+          "getSystemInfo",
+          "showLogsInFileManager"
+        ],
+        "Extensions": [
+          "deleteExtension",
+          "getAvailableExtensionRuntimes",
+          "getDirectoryUrl",
+          "getExtension",
+          "getExtensionSettings",
+          "getExtensionVersion",
+          "getExtensionVersions",
+          "getExtensions",
+          "getInstalledExtensionsWithState",
+          "getIsUpdateAvailable",
+          "getManifestCompatibilityResult",
+          "handleDxtFile",
+          "installDxt",
+          "installDxtFromDirectory",
+          "installDxtUnpacked",
+          "installExtensionFromPreview",
+          "isDesktopExtensionDirectoryEnabled",
+          "isDesktopExtensionSignatureRequired",
+          "isDirectoryEnabled",
+          "isExtensionsEnabled",
+          "openExtensionSettingsFolder",
+          "openExtensionsFolder",
+          "refreshAllowlistCheck",
+          "setExtensionSettings",
+          "showExtensionInFolder",
+          "showInstallDxtDialog"
+        ],
+        "FilePickers": [
+          "getDirectoryPath",
+          "getFilePath"
+        ],
+        "GlobalShortcut": [
+          "getGlobalShortcut",
+          "setGlobalShortcut"
+        ],
+        "MCP": [
+          "getMcpServersConfig",
+          "getMcpServersConfigWithStatus",
+          "isLocalDevMcpEnabled",
+          "revealConfig",
+          "revealLogs",
+          "revealServerLog",
+          "setMcpServerConfigs"
+        ],
+        "Startup": [
+          "isMenuBarEnabled",
+          "isStartupOnLoginEnabled",
+          "setMenuBarEnabled",
+          "setStartupOnLoginEnabled"
+        ],
+        "SupportBundle": [
+          "submitAction",
+          "supportBundleState_$store$_getState",
+          "supportBundleState_$store$_getStateSync"
+        ],
+        "WakeScheduler": [
+          "getStatus",
+          "openSettings"
+        ]
+      },
+      "claude.simulator": {
+        "Simulator": [
+          "attach",
+          "attachment_$store$_getState",
+          "attachment_$store$_getStateSync",
+          "detach",
+          "gesture",
+          "installAndLaunch",
+          "listDevices"
+        ]
+      },
+      "claude.web": {
+        "Account": [
+          "setAccountDetails"
+        ],
+        "AgentModeFeedback": [
+          "openFeedbackAndConfirmReinstall",
+          "openFeedbackWindow",
+          "reportErrorToSlack"
+        ],
+        "Auth": [
+          "doAuthInBrowser"
+        ],
+        "AutoUpdater": [
+          "cancelPendingRestart",
+          "checkForUpdates",
+          "getRunningLocalSessionCount",
+          "restartToUpdate",
+          "restartToUpdateWhenIdle",
+          "updaterState_$store$_getState",
+          "updaterState_$store$_getStateSync"
+        ],
+        "BrowserNavigation": [
+          "goBack",
+          "goForward",
+          "navigationState_$store$_getState",
+          "navigationState_$store$_getStateSync",
+          "reportNavigationState",
+          "requestMainMenuPopup"
+        ],
+        "BuddyRemoteFeed": [
+          "sync"
+        ],
+        "CCDScheduledTasks": [
+          "createScheduledTask",
+          "getAllScheduledTasks",
+          "getScheduledTaskFileContent",
+          "removeApprovedPermission",
+          "updateScheduledTask",
+          "updateScheduledTaskFileContent",
+          "updateScheduledTaskStatus"
+        ],
+        "ChromeExtension": [
+          "installExtension",
+          "isInstalled",
+          "restartChrome"
+        ],
+        "ClaudeCode": [
+          "checkGitAvailable",
+          "getStatus",
+          "prepare",
+          "resolveLocalSettings"
+        ],
+        "ClaudeVM": [
+          "apiReachability_$store$_getState",
+          "apiReachability_$store$_getStateSync",
+          "checkVirtualMachinePlatform",
+          "deleteAndReinstall",
+          "download",
+          "enableVirtualMachinePlatform",
+          "getDownloadStatus",
+          "getRunningStatus",
+          "isHostLoopDevOverrideActive",
+          "isHostLoopModeEnabled",
+          "restartAfterVMPInstall",
+          "setForceDisableHostLoop",
+          "setYukonSilverConfig",
+          "startVM"
+        ],
+        "ComputerUseTcc": [
+          "getCurrentSessionGrants",
+          "getState",
+          "listInstalledApps",
+          "openSystemSettings",
+          "requestAccessibility",
+          "requestScreenRecording",
+          "revokeGrant"
+        ],
+        "CoworkArtifacts": [
+          "deleteArtifact",
+          "getAllArtifacts",
+          "getArtifactIndexHtmlPath",
+          "getArtifactMetadata",
+          "getArtifactThumbnail",
+          "hideArtifact",
+          "importArtifact",
+          "isSharingEnabled",
+          "parkAndCaptureArtifact",
+          "printArtifactToPdf",
+          "refreshImportedArtifact",
+          "reloadArtifactView",
+          "restoreArtifactVersion",
+          "setArtifactMcpTools",
+          "setArtifactStarred",
+          "shareArtifact",
+          "showArtifact",
+          "unshareArtifact"
+        ],
+        "CoworkFilePreview": [
+          "hide",
+          "isEnabled",
+          "isVmReady",
+          "parkAndCapture",
+          "show"
+        ],
+        "CoworkMemory": [
+          "deleteAccountMemory",
+          "listAccountMemories",
+          "readAccountMemory",
+          "readGlobalMemory",
+          "resetMemories",
+          "writeAccountMemory",
+          "writeGlobalMemory"
+        ],
+        "CoworkRadar": [
+          "adoptSession",
+          "dismissCard",
+          "getCards",
+          "getLastRun",
+          "recordCardEngagement",
+          "revealLastRunTranscript",
+          "setCardStatus"
+        ],
+        "CoworkScheduledTasks": [
+          "clearChromePermissions",
+          "createScheduledTask",
+          "getAllScheduledTasks",
+          "getScheduledTaskFileContent",
+          "removeApprovedPermission",
+          "updateScheduledTask",
+          "updateScheduledTaskFileContent",
+          "updateScheduledTaskStatus"
+        ],
+        "CoworkSpaces": [
+          "addFolderToSpace",
+          "addLinkToSpace",
+          "addProjectToSpace",
+          "classifySessions",
+          "copyFilesToSpaceFolder",
+          "createSpace",
+          "createSpaceFolder",
+          "deleteSpace",
+          "getAllSpaces",
+          "getAutoMemoryDir",
+          "getSpace",
+          "listFolderContents",
+          "openFile",
+          "readFileContents",
+          "removeFolderFromSpace",
+          "removeLinkFromSpace",
+          "removeProjectFromSpace",
+          "setAutoDescription",
+          "summarizeSpace",
+          "updateSpace"
+        ],
+        "CustomPlugins": [
+          "addMarketplace",
+          "checkPluginHasLocalChanges",
+          "getAndClearMigrationIssues",
+          "getCachedCommands",
+          "getInstallCounts",
+          "installLocalOrgPlugin",
+          "installPlugin",
+          "listAvailablePlugins",
+          "listInstalledPlugins",
+          "listLocalOrgPlugins",
+          "listMarketplaces",
+          "listRemotePluginsPage",
+          "refreshMarketplace",
+          "removeMarketplace",
+          "uninstallPlugin",
+          "updatePlugin"
+        ],
+        "DesktopNotifications": [
+          "getAuthorizationStatus",
+          "openNotificationSettings",
+          "requestAuthorization",
+          "showNotification"
+        ],
+        "FileSystem": [
+          "browseFiles",
+          "browseFolder",
+          "browseFolders",
+          "exportLocalFileToGoogleDrive",
+          "getLocalFileThumbnail",
+          "getSystemPath",
+          "listDirectory",
+          "listFilesInFolder",
+          "openLocalFile",
+          "promoteScratchpadFile",
+          "readLocalFile",
+          "savePastedFile",
+          "showInFolder",
+          "whichApplication",
+          "writeFileDownload",
+          "writeFileDownloadAndOpen",
+          "writeLocalFile"
+        ],
+        "FindInPageProvider": [
+          "reportFindResult",
+          "setProviderActive"
+        ],
+        "FloatingPenguinMini": [
+          "requestSetMiniExpanded",
+          "requestToggleMini"
+        ],
+        "FramebufferPreview": [
+          "attach",
+          "detach",
+          "listSources",
+          "requestFramePort",
+          "sendKey",
+          "sendPointer",
+          "sendScroll",
+          "setStreamHints"
+        ],
+        "GrandPrix": [
+          "disconnect",
+          "grandPrixStatus_$store$_getState",
+          "grandPrixStatus_$store$_getStateSync",
+          "pair"
+        ],
+        "Launch": [
+          "activeServers_$store$_getState",
+          "activeServers_$store$_getStateSync",
+          "capturePreviewScreenshot",
+          "clearPreviewViewport",
+          "deployPreview",
+          "destroyPreview",
+          "getAutoVerify",
+          "getConfiguredServices",
+          "getLogs",
+          "getPreviewUrl",
+          "goBack",
+          "goForward",
+          "hidePreview",
+          "isAvailable",
+          "loadHtmlPreview",
+          "navigatePreview",
+          "pickHtmlFile",
+          "refreshPreview",
+          "setAutoVerify",
+          "setPreviewColorScheme",
+          "setPreviewViewport",
+          "showPreview",
+          "startFromConfig",
+          "stopServer",
+          "suggestDeployName",
+          "toggleSelectionMode",
+          "unpublishDeploy"
+        ],
+        "LocalAgentModeSessions": [
+          "abandonBridgeEnvironment",
+          "addFolderToSession",
+          "addTrustedFolder",
+          "archive",
+          "authorizeDirectMcpServer",
+          "delete",
+          "deleteBridgeAgentMemory",
+          "deleteBridgeSession",
+          "deleteLocalSkill",
+          "disconnectDirectMcpServer",
+          "getAll",
+          "getBridgeConsent",
+          "getDirectMcpServerStatuses",
+          "getLocalSkillFiles",
+          "getSession",
+          "getSessionsBridgeEnabled",
+          "getSessionsForScheduledTask",
+          "getSupportedCommands",
+          "getTranscript",
+          "getTranscriptFeedback",
+          "getTrustedFolders",
+          "interactiveAuth_$store$_getState",
+          "interactiveAuth_$store$_getStateSync",
+          "isFolderTrusted",
+          "kickBridgePoll",
+          "listLocalSkills",
+          "mcpCallTool",
+          "mcpListResources",
+          "mcpReadResource",
+          "noteCuWindowMentions",
+          "openOutputsDir",
+          "removeTrustedFolder",
+          "replaceEnabledMcpTools",
+          "replaceRemoteMcpServers",
+          "requestFolderTccAccess",
+          "resetBridge",
+          "resetBridgeSession",
+          "respondBridgePermissionPreflight",
+          "respondDirectoryServers",
+          "respondPluginSearch",
+          "respondSlashMenuSkills",
+          "respondToToolPermission",
+          "revealLocalSkill",
+          "revokeInteractiveAuth",
+          "rewind",
+          "saveLocalSkill",
+          "searchSessions",
+          "sendMessage",
+          "sessionsBridgeStatus_$store$_getState",
+          "sessionsBridgeStatus_$store$_getStateSync",
+          "setChromePermissionMode",
+          "setDraftSessionFolders",
+          "setFocusedSession",
+          "setLocalSkillEnabled",
+          "setMcpServers",
+          "setModel",
+          "setPermissionMode",
+          "setSessionsBridgeEnabled",
+          "shareSession",
+          "start",
+          "stop",
+          "submitTranscriptFeedback",
+          "syncSkills",
+          "triggerInteractiveAuth",
+          "updateSession"
+        ],
+        "LocalPlugins": [
+          "deletePlugin",
+          "getDownloadedRemotePlugins",
+          "getPluginCliStatus",
+          "getPluginOAuthStatus",
+          "getPluginShimOps",
+          "getPlugins",
+          "listSkillFiles",
+          "revokePluginOAuth",
+          "setPluginEnabled",
+          "setPluginEnvVars",
+          "setPluginOAuthClient",
+          "setPluginShimPermission",
+          "startPluginOAuthFlow",
+          "syncRemotePlugins",
+          "uploadPlugin"
+        ],
+        "LocalSessionEnvironment": [
+          "get",
+          "save"
+        ],
+        "LocalSessions": [
+          "addDirectories",
+          "archive",
+          "cancelQueuedMessage",
+          "checkGhAvailable",
+          "checkRemoteTrust",
+          "checkTrust",
+          "clearSession",
+          "commitAllChanges",
+          "commitWipForBranchSwitch",
+          "createAgent",
+          "createLocalPr",
+          "delete",
+          "disableAutoMerge",
+          "discardWorkingTree",
+          "enableAutoMerge",
+          "ensureBranchPushed",
+          "ensureSSHConnected",
+          "forkSession",
+          "generateLocalPrContent",
+          "getAgents",
+          "getAll",
+          "getCodeStats",
+          "getCommitDiff",
+          "getContextUsage",
+          "getDefaultEffort",
+          "getDefaultPermissionMode",
+          "getDetectedProjects",
+          "getDiffFileContent",
+          "getEffort",
+          "getGhIssue",
+          "getGitCommits",
+          "getGitDiff",
+          "getGitDiffStats",
+          "getGitInfo",
+          "getInstalledEditors",
+          "getLocalBranches",
+          "getPermissionMode",
+          "getPlanForSession",
+          "getPrChecks",
+          "getPrDetails",
+          "getPrReviewComments",
+          "getPrStateForBranch",
+          "getSSHConfigs",
+          "getSSHGitInfo",
+          "getSSHSupportedCommands",
+          "getSession",
+          "getSessionsForScheduledTask",
+          "getShellPtyBuffer",
+          "getSupportedCommands",
+          "getTeleportReadiness",
+          "getTranscript",
+          "getTrustedSSHHosts",
+          "getUncommittedChanges",
+          "getWorkingTreeStatus",
+          "importCliSession",
+          "installGh",
+          "interrupt",
+          "isVSCodeInstalled",
+          "isWorkingTreeDirty",
+          "launchUltrareview",
+          "listGhIssues",
+          "listSSHDirectory",
+          "listSessionDirectory",
+          "logCliEvent",
+          "mergePr",
+          "openInEditor",
+          "openInVSCode",
+          "pickFileAtCwd",
+          "pickSessionFile",
+          "popBackgroundTaskSuggestion",
+          "readFileAtCwd",
+          "readSessionFile",
+          "readSessionImageAsDataUrl",
+          "releaseWorktree",
+          "replaceEnabledMcpTools",
+          "replaceRemoteMcpServers",
+          "resizePty",
+          "resizeShellPty",
+          "resolveSSHSettings",
+          "respondToSSHPassword",
+          "respondToToolPermission",
+          "reviewDiff",
+          "rewind",
+          "runBashCommand",
+          "saveTrust",
+          "searchSessions",
+          "sendMessage",
+          "sendSideChatMessage",
+          "setAutoFixEnabled",
+          "setAvailableCodeModels",
+          "setEffort",
+          "setFastMode",
+          "setFocusedSession",
+          "setMcpServers",
+          "setModel",
+          "setPermissionMode",
+          "setSSHConfigs",
+          "setTrustedSSHHosts",
+          "setVisibility",
+          "shareSession",
+          "start",
+          "startPty",
+          "startShellPty",
+          "startSideChat",
+          "stashWorkingTree",
+          "stop",
+          "stopPty",
+          "stopSessionSummary",
+          "stopShellPty",
+          "stopSideChat",
+          "stopTask",
+          "submitFeedback",
+          "summarizeSession",
+          "summarizeTranscript",
+          "teleportToCloud",
+          "testSSHConnection",
+          "unarchive",
+          "updatePrBody",
+          "updateSession",
+          "validateSSHPath",
+          "writePty",
+          "writeSessionFile",
+          "writeShellPty"
+        ],
+        "NestDev": [
+          "focus",
+          "getState"
+        ],
+        "OpenDocuments": [
+          "getOpenDocuments",
+          "readOpenDocumentAsBase64"
+        ],
+        "OrbitDeploys": [
+          "getAll",
+          "removeDeploy",
+          "setDeploy",
+          "setPinned"
+        ],
+        "QuickEntry": [
+          "setRecentChats"
+        ],
+        "Resources": [
+          "fetchMentionOptions",
+          "handleMentionSelect",
+          "listProjectFiles",
+          "searchFileContents",
+          "setFindInPageClaimed",
+          "setFocusedCwd"
+        ],
+        "WindowControl": [
+          "captureScreenshot",
+          "close",
+          "focus",
+          "resize",
+          "setIncognitoMode",
+          "setThemeMode"
+        ],
+        "WindowState": [
+          "getFullscreen",
+          "getVisibility",
+          "getZoomFactor"
+        ]
+      }
+    },
+    "dispatched_tree": {
+      "claude.buddy": {
+        "Buddy": [
+          "pairingPrompt",
+          "progress"
+        ],
+        "BuddyBleTransport": [
+          "tx"
+        ]
+      },
+      "claude.hybrid": {
+        "DesktopIntl": [
+          "localeChanged"
+        ]
+      },
+      "claude.internal.ui": {
+        "MainWindowTitleBar": [
+          "hideLoadError",
+          "showLoadError",
+          "updateTitleBar"
+        ]
+      },
+      "claude.officeAddin": {
+        "OfficeAddinFiles": [
+          "connectedFilesState_$store$_update",
+          "onAddinNeedsContext",
+          "onFileAdded",
+          "onFileRemoved",
+          "onFileStateChanged"
+        ]
+      },
+      "claude.settings": {
+        "AppPreferences": [
+          "preferencesChanged"
+        ],
+        "Custom3pSetup": [
+          "bootstrapState_$store$_update"
+        ],
+        "Extensions": [
+          "extensionDownloadProgress",
+          "extensionSettingsChanged",
+          "extensionsChanged",
+          "previewExtensionInstallation"
+        ],
+        "GlobalShortcut": [
+          "globalShortcutChange"
+        ],
+        "MCP": [
+          "mcpConfigChange",
+          "mcpStatusChanged",
+          "revealMcpServerSettingsRequested"
+        ],
+        "SupportBundle": [
+          "supportBundleState_$store$_update"
+        ]
+      },
+      "claude.simulator": {
+        "Simulator": [
+          "attachment_$store$_update"
+        ]
+      },
+      "claude.skills": {
+        "Skills": [
+          "previewSkillFile"
+        ]
+      },
+      "claude.web": {
+        "AutoUpdater": [
+          "updaterState_$store$_update"
+        ],
+        "BrowserNavigation": [
+          "navigationState_$store$_update"
+        ],
+        "BuddyRemoteFeed": [
+          "permissionDecision"
+        ],
+        "CCDScheduledTasks": [
+          "onScheduledTaskEvent"
+        ],
+        "ClaudeVM": [
+          "apiReachability_$store$_update",
+          "downloadProgress",
+          "downloadStatusChanged",
+          "runningStatusChanged",
+          "startupError"
+        ],
+        "CoworkArtifacts": [
+          "onArtifactsChanged"
+        ],
+        "CoworkRadar": [
+          "onRadarUpdated"
+        ],
+        "CoworkScheduledTasks": [
+          "onScheduledTaskEvent"
+        ],
+        "CoworkSpaces": [
+          "onSpaceEvent"
+        ],
+        "CustomPlugins": [
+          "installProgress"
+        ],
+        "DeepLink": [
+          "handleDeepLink"
+        ],
+        "DesktopNotifications": [
+          "onNotificationClicked"
+        ],
+        "FindInPageProvider": [
+          "findClear",
+          "findRequest"
+        ],
+        "FloatingPenguinMini": [
+          "onMiniStateChanged"
+        ],
+        "FramebufferPreview": [
+          "openSourceRequested",
+          "sessionFatal",
+          "sessionResized"
+        ],
+        "GrandPrix": [
+          "grandPrixStatus_$store$_update"
+        ],
+        "Launch": [
+          "activeServers_$store$_update",
+          "deployEvent",
+          "elementSelected",
+          "previewSelectionShortcut",
+          "previewUrlChanged"
+        ],
+        "LocalAgentModeSessions": [
+          "interactiveAuth_$store$_update",
+          "onBridgePermissionPreflight",
+          "onCoworkFromMain",
+          "onDirectMcpServerStatusesChanged",
+          "onEvent",
+          "onRemoteSessionStart",
+          "onToolPermissionRequest",
+          "sessionsBridgeStatus_$store$_update"
+        ],
+        "LocalPlugins": [
+          "onCliOpAlwaysAllowed"
+        ],
+        "LocalSessions": [
+          "onEvent",
+          "onSSHPasswordRequired",
+          "onToolPermissionRequest"
+        ],
+        "MenuEvents": [
+          "closeWindow",
+          "openFile"
+        ],
+        "Navigation": [
+          "navigate"
+        ],
+        "QuickEntry": [
+          "onQuickEntrySubmit"
+        ],
+        "Resources": [
+          "findRequested"
+        ],
+        "Toast": [
+          "showToast"
+        ],
+        "WindowState": [
+          "cuDockStateChanged",
+          "fullscreenChanged",
+          "visibilityChanged",
+          "zoomFactorChanged"
+        ]
+      }
+    }
+  },
+  "gap": {
+    "missing_invoke_count": 0,
+    "missing_send_sync_count": 0,
+    "missing_renderer_event_dispatch_count": 0,
+    "extra_source_invoke_count": 0,
+    "extra_source_send_sync_count": 0,
+    "missing_direct_invoke_count": 0,
+    "missing_direct_event_dispatch_count": 0,
+    "extra_direct_invoke_count": 0,
+    "extra_direct_event_dispatch_count": 0,
+    "missing_invoke": [],
+    "missing_send_sync": [],
+    "missing_renderer_event_dispatch": [],
+    "extra_source_invoke": [],
+    "extra_source_send_sync": [],
+    "missing_direct_invoke": [],
+    "missing_direct_event_dispatch": [],
+    "extra_direct_invoke": [],
+    "extra_direct_event_dispatch": []
+  },
+  "debt_markers": [],
+  "ok": true
+}

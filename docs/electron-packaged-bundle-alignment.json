@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-07-08T09:29:55.012Z",
+  "project_root": "D:\\work\\py\\claude\\open-claude-desktop-worktree",
+  "platform": "win32",
+  "packaged_root": "D:\\work\\py\\claude\\open-claude-desktop-worktree\\out\\Claude-Deepseek-win32-x64",
+  "executable": {
+    "exists": true,
+    "sha256": "485d15d2fad79bcdb8cc3a2563b8e1e2fad9a368e7c0447cb1cead3ef4827933"
+  },
+  "resources": {
+    "app_asar_exists": true,
+    "ion_dist_exists": true,
+    "original_runtime_exists": true,
+    "claude_code_binary_exists": true,
+    "claude_code_binary_size": 128822272,
+    "claude_code_binary_sha256": "2132b711a49b0c618e7aca08f131fd5595504f370e4a806b44454feff660a301",
+    "claude_code_manifest_exists": true,
+    "missing_original_runtime_entries": []
+  },
+  "asar": {
+    "entry_count": 485,
+    "contains_vite_index": true,
+    "contains_vite_preload": true,
+    "contains_package_json": true,
+    "contains_smoke_user_data": false
+  },
+  "ok": true
+}

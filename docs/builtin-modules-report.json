@@ -1,0 +1,497 @@
+{
+  "generated_at": "2026-07-08T09:28:49.553Z",
+  "summary": {
+    "real_npm_count": 3,
+    "builtin_count": 18,
+    "runtime_proxy_count": 3,
+    "source_built_count": 2,
+    "sdk_alias_count": 1,
+    "protocol_adapter_count": 7,
+    "bundle_derived_count": 3,
+    "compat_shim_count": 2,
+    "placeholder_count": 0,
+    "implemented_builtin_count": 18,
+    "import_failures": 0,
+    "smoke_failures": 0
+  },
+  "realPackages": [
+    {
+      "name": "@electron-forge/maker-pkg",
+      "kind": "real-npm",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "MakerPKG",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@electron-forge/publisher-gcs",
+      "kind": "real-npm",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "PublisherGCS",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@formatjs/intl",
+      "kind": "real-npm",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "defineMessages",
+          "defineMessage",
+          "createIntlCache",
+          "filterProps",
+          "DEFAULT_INTL_CONFIG",
+          "createFormatters",
+          "getNamedFormat",
+          "formatMessage",
+          "formatDate",
+          "formatDateToParts",
+          "formatTime",
+          "formatTimeToParts",
+          "formatDisplayName",
+          "formatList",
+          "formatPlural",
+          "formatRelativeTime",
+          "formatNumber",
+          "formatNumberToParts",
+          "createIntl",
+          "IntlErrorCode"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    }
+  ],
+  "vendor": [
+    {
+      "name": "@ant/chrome-native-host",
+      "kind": "protocol-adapter",
+      "dir": "vendor\\ant\\chrome-native-host",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "VERSION",
+          "MAX_MESSAGE_SIZE",
+          "ChromeNativeHost",
+          "ChromeMessageReader",
+          "createChromeMessageFrame",
+          "sendChromeMessage",
+          "runChromeNativeHost",
+          "getSocketDir",
+          "getSecureSocketPath",
+          "getAllSocketPaths"
+        ],
+        "load_error": null
+      },
+      "smoke": {
+        "ok": true,
+        "check": "native-message frame + socket path"
+      }
+    },
+    {
+      "name": "@ant/claude-for-chrome-mcp",
+      "kind": "source-built",
+      "dir": "vendor\\ant\\claude-for-chrome-mcp",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "BROWSER_TOOLS",
+          "BridgeClient",
+          "createBridgeClient",
+          "createChromeSocketClient",
+          "createClaudeForChromeMcpServer",
+          "localPlatformLabel",
+          "toLoggerDetail"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/claude-native",
+      "kind": "runtime-proxy",
+      "dir": "vendor\\ant\\claude-native",
+      "require": {
+        "ok": true,
+        "type": "function",
+        "keys": [],
+        "load_error": {
+          "code": "ERR_DLOPEN_FAILED",
+          "message": "\\\\?\\D:\\work\\py\\claude\\open-claude-desktop-worktree\\resources\\original-runtime-node_modules\\node_modules\\@ant\\claude-native\\claude-native-binding.node is not a valid Win32 application.\r\n\\\\?\\D:\\work\\py\\claude\\open-claude-desktop-worktree\\resources\\original-runtime-node_modules\\node_modules\\@ant\\claude-native\\claude-native-binding.node"
+        }
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/claude-screen-app",
+      "kind": "protocol-adapter",
+      "dir": "vendor\\ant\\claude-screen-app",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "isSupported",
+          "normalizeCaptureOptions",
+          "listDisplays",
+          "ScreenSession",
+          "createScreenSession",
+          "createScreenApp",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/claude-ssh",
+      "kind": "bundle-derived",
+      "dir": "vendor\\ant\\claude-ssh",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "version",
+          "requiredVersion",
+          "manifest",
+          "baseUrl",
+          "getReleaseMetadata",
+          "getPlatformKey",
+          "getPlatformManifest",
+          "getDownloadUrl",
+          "listPlatforms",
+          "getDefaultStorageDir",
+          "getVersionDir",
+          "getBinaryPath",
+          "getVerifiedMarkerPath",
+          "verifyBinary",
+          "binaryExists",
+          "downloadBinary",
+          "prepare"
+        ],
+        "load_error": null
+      },
+      "smoke": {
+        "ok": true,
+        "check": "manifest platform + download URL"
+      }
+    },
+    {
+      "name": "@ant/claude-swift",
+      "kind": "runtime-proxy",
+      "dir": "vendor\\ant\\claude-swift",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/claude-swift-ant",
+      "kind": "runtime-proxy",
+      "dir": "vendor\\ant\\claude-swift-ant",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "__loadError",
+          "isAvailable",
+          "getNativeModule",
+          "loadSwiftAddon",
+          "loadComputerUseAddon",
+          "createComputerUseClient",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/computer-use-mcp",
+      "kind": "source-built",
+      "dir": "vendor\\ant\\computer-use-mcp",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "ALL_SUB_GATES_OFF",
+          "ALL_SUB_GATES_ON",
+          "API_RESIZE_PARAMS",
+          "DEFAULT_GRANT_FLAGS",
+          "SENTINEL_BUNDLE_IDS",
+          "bindSessionContext",
+          "buildComputerUseTools",
+          "categoryToTier",
+          "comparePixelAtLocation",
+          "createComputerUseMcpServer",
+          "defersLockAcquire",
+          "getDefaultTierForApp",
+          "getDeniedCategory",
+          "getDeniedCategoryByDisplayName",
+          "getDeniedCategoryForApp",
+          "getSentinelCategory",
+          "handleToolCall",
+          "isPolicyDenied",
+          "isSystemKeyCombo",
+          "normalizeKeySequence"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/cowork-win32-service",
+      "kind": "protocol-adapter",
+      "dir": "vendor\\ant\\cowork-win32-service",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "DEFAULT_SERVICE_NAME",
+          "isSupported",
+          "runSc",
+          "parseServiceStatus",
+          "queryServiceStatus",
+          "startService",
+          "stopService",
+          "restartService",
+          "installService",
+          "uninstallService",
+          "createServiceController",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/disclaimer",
+      "kind": "bundle-derived",
+      "dir": "vendor\\ant\\disclaimer",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "DEFAULT_MAX_BUFFER",
+          "getDisclaimerBinaryPath",
+          "getUntrustedLaunchOptions",
+          "wrapCommand",
+          "isDisclaimerAvailable",
+          "spawnAsync",
+          "spawnAsyncDirect",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/dxt-registry",
+      "kind": "protocol-adapter",
+      "dir": "vendor\\ant\\dxt-registry",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "normalizeExtension",
+          "normalizeVersion",
+          "emptyMarketplaceList",
+          "createExtensionUrl",
+          "parseDxtReference",
+          "createMemoryRegistry",
+          "fetchJson",
+          "listExtensions",
+          "getExtension",
+          "listExtensionVersions",
+          "getExtensionVersion",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/imagine-server",
+      "kind": "bundle-derived",
+      "dir": "vendor\\ant\\imagine-server",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "IMAGINE_WIDGET_URI",
+          "IMAGINE_TOOLS",
+          "renderWidgetHtml",
+          "createImagineServer",
+          "createMcpServer",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/ipc-codegen",
+      "kind": "protocol-adapter",
+      "dir": "vendor\\ant\\ipc-codegen",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "EIPC_MESSAGE_PREFIX",
+          "EIPC_NAMESPACE_UUID",
+          "buildIpcChannel",
+          "parseIpcChannel",
+          "normalizeMethodList",
+          "defineInterface",
+          "defineNamespace",
+          "createInvokeProxy",
+          "createSyncProxy",
+          "createBridgeSpec",
+          "emitBridgeEvent",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/rfb-client",
+      "kind": "protocol-adapter",
+      "dir": "vendor\\ant\\rfb-client",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "RFB_STATE",
+          "RfbClient",
+          "createRfbClient",
+          "encodePointerEvent",
+          "encodeKeyEvent",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@ant/utils",
+      "kind": "compat-shim",
+      "dir": "vendor\\ant\\utils",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "noop",
+          "identity",
+          "constant",
+          "isObject",
+          "isRecord",
+          "assert",
+          "sleep",
+          "defer",
+          "createDeferred",
+          "once",
+          "memoize",
+          "compact",
+          "uniq",
+          "clamp",
+          "pick",
+          "omit",
+          "toError",
+          "tryJsonParse",
+          "stableStringify",
+          "ensureArray"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@anthropic-ai/claude-agent-sdk-future",
+      "kind": "sdk-alias",
+      "dir": "vendor\\anthropic-ai\\claude-agent-sdk-future",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "AbortError",
+          "DirectConnectError",
+          "DirectConnectTransport",
+          "EXIT_REASONS",
+          "HOOK_EVENTS",
+          "InMemorySessionStore",
+          "SYSTEM_PROMPT_DYNAMIC_BOUNDARY",
+          "__esModule",
+          "createSdkMcpServer",
+          "default",
+          "deleteSession",
+          "foldSessionSummary",
+          "forkSession",
+          "getSessionInfo",
+          "getSessionMessages",
+          "getSubagentMessages",
+          "importSessionToStore",
+          "listSessions",
+          "listSubagents",
+          "parseDirectConnectUrl"
+        ],
+        "load_error": null
+      },
+      "smoke": {
+        "ok": true,
+        "check": "sdk root + bridge exports"
+      }
+    },
+    {
+      "name": "@anthropic-ai/conway-client",
+      "kind": "compat-shim",
+      "dir": "vendor\\anthropic-ai\\conway-client",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "ConwayClient",
+          "createClient",
+          "createMemoryClient",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    },
+    {
+      "name": "@anthropic-ai/electron-devtools-mcp",
+      "kind": "protocol-adapter",
+      "dir": "vendor\\anthropic-ai\\electron-devtools-mcp",
+      "require": {
+        "ok": true,
+        "type": "object",
+        "keys": [
+          "DEVTOOLS_TOOLS",
+          "createElectronDevtoolsMcpServer",
+          "createServer",
+          "default"
+        ],
+        "load_error": null
+      },
+      "smoke": null
+    }
+  ]
+}

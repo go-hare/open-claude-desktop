@@ -1,6 +1,6 @@
 import { ClaudeCliRunner } from "../services/localSessions/claudeCliRunner";
 import type { IpcHandlerContext } from "./context";
-import { dispatchBridgeEvent } from "./registerIpc";
+import { originalEventSurface } from "./originalEventSurface";
 
 type SessionBridgeInterface = "LocalSessions" | "LocalAgentModeSessions";
 
@@ -18,13 +18,16 @@ function hasObjectField(event: Record<string, unknown>, ...keys: string[]): bool
 }
 
 export function dispatchSessionRunnerEvent(context: IpcHandlerContext, iface: SessionBridgeInterface, event: Record<string, unknown>): void {
-  dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", iface, "onEvent", event);
+  const events = originalEventSurface(context);
+  if (iface === "LocalSessions") events.localSessionEvent(event);
+  else events.localAgentModeEvent(event);
   const marker = eventMarker(event);
   if (marker.includes("tool_permission") || marker.includes("permission_request") || hasObjectField(event, "toolPermissionRequest", "permissionRequest")) {
-    dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", iface, "onToolPermissionRequest", event);
+    if (iface === "LocalSessions") events.localSessionToolPermissionRequest(event);
+    else events.localAgentModeToolPermissionRequest(event);
   }
   if (iface === "LocalSessions" && (marker.includes("ssh_password") || hasObjectField(event, "sshPasswordRequest"))) {
-    dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", iface, "onSSHPasswordRequired", event);
+    events.localSessionSshPasswordRequired(event);
   }
 }
 

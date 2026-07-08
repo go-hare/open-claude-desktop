@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveElectronShellPaths, type ElectronShellPaths } from "./paths/electronShellPaths";
 import { installAppProtocolHandler, registerAppProtocolScheme } from "./protocol";
+import { bundledClaudeExecutable, defaultClaudeExecutable } from "./services/localSessions/claudeCliRunner";
 import { configureOriginalRuntimeModules } from "./services/originalRuntime/originalRuntimeModules";
 import { createDefaultIpcContext, registerDesktopIpc } from "./ipc";
 import { getIpcHandlerRegistrySummary } from "./ipc/handlerRegistry";
@@ -104,6 +105,11 @@ function maybeCompleteSmoke(runtime: DesktopAppRuntime): void {
     findInPageVisible,
     applicationMenu: getApplicationMenuSummary(),
     ipcHandlers: getIpcHandlerRegistrySummary(),
+    claudeCode: {
+      executable: defaultClaudeExecutable(),
+      bundledExecutable: bundledClaudeExecutable() ?? null,
+      usesBundledExecutable: defaultClaudeExecutable() === bundledClaudeExecutable(),
+    },
   };
 
   fs.writeSync(1, `[claude-deepseek-smoke] ${JSON.stringify(payload)}\n`);

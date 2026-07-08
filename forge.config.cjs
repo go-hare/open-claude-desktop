@@ -5,10 +5,17 @@ const root = __dirname;
 const resourcesDir = path.join(root, "resources");
 const iconPath = path.join(resourcesDir, "electron");
 const ionDistRoot = path.join(resourcesDir, "ion-dist");
+const originalRuntimeRoot = path.join(resourcesDir, "original-runtime-node_modules");
+const claudeCodeBinRoot = path.join(resourcesDir, "claude-code-bin");
 const extraResource = [];
-const electronZipName = "electron-v41.5.0-darwin-arm64.zip";
+const electronVersion = require("electron/package.json").version;
+const packagePlatform = process.env.CLAUDE_PACKAGE_PLATFORM || process.platform;
+const packageArch = process.env.CLAUDE_PACKAGE_ARCH || process.arch;
+const electronZipName = `electron-v${electronVersion}-${packagePlatform}-${packageArch}.zip`;
 const electronZipDir = (() => {
   const cacheRoot = path.join(root, ".electron-cache");
+  const localZip = path.join(cacheRoot, "local", electronZipName);
+  if (fs.existsSync(localZip)) return path.dirname(localZip);
   if (!fs.existsSync(cacheRoot)) return undefined;
   for (const entry of fs.readdirSync(cacheRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
@@ -20,6 +27,12 @@ const electronZipDir = (() => {
 
 if (fs.existsSync(ionDistRoot)) {
   extraResource.push(ionDistRoot);
+}
+if (fs.existsSync(originalRuntimeRoot)) {
+  extraResource.push(originalRuntimeRoot);
+}
+if (fs.existsSync(claudeCodeBinRoot)) {
+  extraResource.push(claudeCodeBinRoot);
 }
 
 module.exports = {

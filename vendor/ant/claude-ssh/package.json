@@ -1,0 +1,15 @@
+{
+  "name": "@ant/claude-ssh",
+  "version": "869762545054f8caf5b0e36192651744a2461d3b-builtin",
+  "private": true,
+  "description": "Local Claude SSH release-manifest adapter derived from the official desktop bundle",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "xParityKind": "bundle-derived"
+}

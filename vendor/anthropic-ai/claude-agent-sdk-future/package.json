@@ -1,0 +1,39 @@
+{
+  "name": "@anthropic-ai/claude-agent-sdk-future",
+  "version": "0.2.128-dev.20260502-builtin",
+  "private": true,
+  "description": "Local future alias for @anthropic-ai/claude-agent-sdk 0.2.128 when the official dev alias is unavailable",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./browser": {
+      "types": "./browser.d.ts",
+      "default": "./browser.js"
+    },
+    "./bridge": {
+      "types": "./bridge.d.ts",
+      "default": "./bridge.js"
+    },
+    "./assistant": {
+      "types": "./assistant.d.ts",
+      "default": "./assistant.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "browser.js",
+    "browser.d.ts",
+    "bridge.js",
+    "bridge.d.ts",
+    "assistant.js",
+    "assistant.d.ts",
+    "README.md"
+  ],
+  "xParityKind": "sdk-alias"
+}

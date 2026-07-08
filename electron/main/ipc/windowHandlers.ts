@@ -68,14 +68,6 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
       getFullscreen: async () => mainWindow.isFullScreen(),
       getVisibility: async () => mainWindow.isVisible(),
       getZoomFactor: async () => mainView.webContents.getZoomFactor(),
-      fullscreenChanged: async () => mainWindow.isFullScreen(),
-      visibilityChanged: async () => mainWindow.isVisible(),
-      zoomFactorChanged: async () => mainView.webContents.getZoomFactor(),
-      cuDockStateChanged: async () => ({
-        visible: mainWindow.isVisible(),
-        focused: mainWindow.isFocused(),
-        fullscreen: mainWindow.isFullScreen(),
-      }),
     },
     BrowserNavigation: {
       goBack: async () => {
@@ -93,7 +85,6 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
         popupMainMenu(context);
         return true;
       },
-      navigationState_: async () => navigationState(context),
     },
   });
 
@@ -103,7 +94,6 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
         setOriginalIncognitoTitleBarMode(false);
         return true;
       },
-      updateTitleBar: async () => true,
       requestReloadMainView: async () => {
         mainView.webContents.reload();
         return true;
@@ -113,8 +103,6 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
         return true;
       },
       isClaudeCurrentlyHealthy: async () => true,
-      showLoadError: async () => true,
-      hideLoadError: async () => true,
     },
     AboutWindow: {
       getAppName: async () => app.getName(),
