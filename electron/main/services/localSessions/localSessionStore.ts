@@ -72,6 +72,7 @@ export type LocalSession = {
 };
 
 export type StartLocalSessionInput = {
+  sessionId?: string;
   message?: string;
   prompt?: string;
   cwd?: string;
@@ -273,7 +274,10 @@ export class LocalSessionStore {
     const kind = input.kind ?? this.defaultKind;
     const sessionKind = kind === "code" ? "code" : "cowork";
     const idPrefix = sessionKind === "cowork" ? "local" : kind;
-    const id = `${idPrefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+    const requestedId = typeof input.sessionId === "string" && input.sessionId.length > 0 ? input.sessionId : undefined;
+    const id = requestedId && !this.sessions.has(requestedId)
+      ? requestedId
+      : `${idPrefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
     const session: LocalSession = {
       id,
       sessionId: id,
