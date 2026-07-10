@@ -10,3 +10,6 @@ resources/ion-dist/
 .DS_Store
 *.log
 .codex-user-data-*/
+.codex-runtime/
+.codex-backups/
+.electron-cache-win32/
