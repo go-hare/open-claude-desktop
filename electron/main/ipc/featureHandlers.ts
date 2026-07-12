@@ -235,7 +235,6 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     })),
   ];
   let simulatorAttachment: unknown = null;
-  let coworkFilePreview: unknown = null;
   let framebufferSource: Record<string, unknown> | null = null;
   let activeOfficeFileId: string | null = null;
   let miniExpanded = false;
@@ -243,7 +242,41 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   let buddyDevice: Record<string, unknown> | null = null;
   let grandPrixPaired = false;
   let previewUrl: string | null = null;
-  const localSessions = () => [...context.localSessions.getAll(true), ...context.localAgentModeSessions.getAll(true)];
+  const localSessions = () => [
+    ...context.localSessions.getAll(true).map((session) => ({
+      cwd: session.cwd ?? session.folders?.[0] ?? session.userSelectedFolders?.[0],
+      kind: session.kind,
+      sessionId: session.id,
+      title: session.title,
+      updatedAt: session.updatedAt,
+    })),
+    ...context.localAgentModeSessions.getAll().map((session) => ({
+      cwd: session.cwd ?? session.userSelectedFolders[0],
+      kind: "epitaxy",
+      sessionId: session.sessionId,
+      title: session.title,
+      updatedAt: new Date(session.lastActivityAt).toISOString(),
+    })),
+  ];
+  context.windows.coworkFilePreview.setSessionRootsResolver((sessionId) => {
+    const local = context.localSessions.getSession(sessionId);
+    if (local) {
+      return [
+        local.cwd,
+        ...(local.folders ?? []),
+        ...(local.trustedFolders ?? []),
+        ...(local.userSelectedFolders ?? []),
+        ...(local.mountedProjects ?? []).map((project) => project.hostPath),
+      ].filter((root): root is string => typeof root === "string" && root.length > 0);
+    }
+    const cowork = context.localAgentModeSessions.getSession(sessionId);
+    if (!cowork) return [];
+    return [
+      cowork.cwd,
+      ...cowork.userSelectedFolders,
+      ...(cowork.mountedProjects ?? []).map((project) => project.hostPath),
+    ].filter((root): root is string => typeof root === "string" && root.length > 0);
+  });
   const rememberPreview = (result: { serverId?: string; error?: string }) => {
     if (result.serverId) {
       previewUrl = launch.getPreviewUrl(result.serverId);
@@ -253,13 +286,13 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     return result;
   };
   const classifyLocalSessions = () => localSessions().map((session) => {
-    const cwd = session.cwd ?? session.folders?.[0] ?? session.userSelectedFolders?.[0];
+    const cwd = session.cwd;
     const space = cwd ? Array.from(spaces.values()).find((candidate) => {
       const folders = Array.isArray(candidate.folders) ? candidate.folders.filter((item): item is string => typeof item === "string") : [];
       return folders.some((folder) => pathContains(folder, cwd));
     }) : null;
     return {
-      sessionId: session.id,
+      sessionId: session.sessionId,
       title: session.title,
       cwd,
       kind: session.kind,
@@ -594,17 +627,16 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       showArtifact: async () => true,
     },
     CoworkFilePreview: {
-      isEnabled: async () => true,
-      isVmReady: async () => vmState().runningStatus === "running",
-      show: async (_event, input) => {
-        coworkFilePreview = input;
-        return true;
-      },
+      isEnabled: async () => context.windows.coworkFilePreview.isEnabled(),
+      isVmReady: async () => context.windows.coworkFilePreview.isVmReady(),
+      show: async (_event, sessionId, encodedPath, bounds) =>
+        context.windows.coworkFilePreview.show(sessionId, encodedPath, bounds),
       hide: async () => {
-        coworkFilePreview = null;
+        context.windows.coworkFilePreview.hide();
         return true;
       },
-      parkAndCapture: async () => ({ preview: coworkFilePreview, capturedAt: new Date().toISOString() }),
+      parkAndCapture: async (_event, bounds) =>
+        context.windows.coworkFilePreview.parkAndCapture(bounds),
     },
     CoworkMemory: {
       readGlobalMemory: async () => memories.get("global") ?? "",
@@ -643,7 +675,7 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       })),
       getLastRun: async () => {
         const session = localSessions().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-        return session ? { id: session.id, title: session.title, updatedAt: session.updatedAt, cwd: session.cwd } : null;
+        return session ? { id: session.sessionId, title: session.title, updatedAt: session.updatedAt, cwd: session.cwd } : null;
       },
       revealLastRunTranscript: async () => {
         shell.showItemInFolder(context.localSessions.getStorageFile());
@@ -986,8 +1018,22 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   });
 
   registerInterfaceSyncHandlers("claude.web", "ClaudeVM", {
-    isHostLoopModeEnabled: () => false,
-    isHostLoopDevOverrideActive: () => false,
+    // Official v4() feature gate 1143815894 is not bridged yet; report disabled
+    // rather than hard-true. Dev force path remains env + override based.
+    isHostLoopModeEnabled: () => {
+      if (featureState.getBoolean("vmForceDisableHostLoop", "global", false)) return false;
+      const forced =
+        process.env.CLAUDE_FORCE_HOST_LOOP === "1"
+        && (globalThis as { isDeveloperApprovedDevUrlOverrideEnabled?: boolean })
+          .isDeveloperApprovedDevUrlOverrideEnabled === true;
+      if (forced) return true;
+      const feature = process.env.CLAUDE_HOST_LOOP_FEATURE ?? process.env.CLAUDE_HOST_LOOP_FLAG;
+      return feature === "1" || feature === "true";
+    },
+    isHostLoopDevOverrideActive: () =>
+      process.env.CLAUDE_FORCE_HOST_LOOP === "1"
+      && (globalThis as { isDeveloperApprovedDevUrlOverrideEnabled?: boolean })
+        .isDeveloperApprovedDevUrlOverrideEnabled === true,
   }, "claude.web.ClaudeVM");
   registerInterfaceSyncHandlers("claude.web", "Launch", {
     isAvailable: () => true,

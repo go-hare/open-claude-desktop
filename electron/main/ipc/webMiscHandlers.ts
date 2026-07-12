@@ -22,10 +22,16 @@ function notificationStatus(): string {
 }
 
 function rootsForResources(context: IpcHandlerContext, focusedCwd: string | null): string[] {
-  const sessions = [...context.localSessions.getAll(true), ...context.localAgentModeSessions.getAll(true)];
+  const codeRoots = context.localSessions
+    .getAll(true)
+    .flatMap((session) => [session.cwd, ...(session.folders ?? []), ...(session.userSelectedFolders ?? [])]);
+  const coworkRoots = context.localAgentModeSessions
+    .getAll()
+    .flatMap((session) => [session.cwd, ...session.userSelectedFolders]);
   const roots = [
     focusedCwd,
-    ...sessions.flatMap((session) => [session.cwd, ...(session.folders ?? []), ...(session.userSelectedFolders ?? [])]),
+    ...codeRoots,
+    ...coworkRoots,
     process.cwd(),
   ];
   return [...new Set(roots.filter((item): item is string => Boolean(item)))];
@@ -126,7 +132,10 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
       },
     },
     Account: {
-      setAccountDetails: async () => true,
+      setAccountDetails: async (_event, details) => {
+        context.coworkAccount.setAccountDetails(details);
+        return true;
+      },
     },
     Auth: {
       doAuthInBrowser: async (_event, url) => {

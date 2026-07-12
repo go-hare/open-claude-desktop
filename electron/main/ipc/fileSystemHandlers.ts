@@ -15,6 +15,42 @@ function asPath(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/** Official FileSystem path args: (sessionId, encodeURIComponent(path)) or bare host path. */
+function resolveOfficialLocalPath(filePathOrSessionId: unknown, encodedFilePath?: unknown): string | null {
+  if (typeof encodedFilePath === "string" && encodedFilePath.length > 0) {
+    try {
+      return decodeURIComponent(encodedFilePath);
+    } catch {
+      return encodedFilePath;
+    }
+  }
+  return asPath(filePathOrSessionId);
+}
+
+function mimeTypeForLocalPath(filePath: string): string {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".apng":
+      return "image/apng";
+    case ".avif":
+      return "image/avif";
+    case ".bmp":
+      return "image/bmp";
+    case ".gif":
+      return "image/gif";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".svg":
+      return "image/svg+xml";
+    case ".webp":
+      return "image/webp";
+    default:
+      return "application/octet-stream";
+  }
+}
+
 function safeName(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 180) || `download-${Date.now()}`;
 }
@@ -145,22 +181,49 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       const entries = await fs.readdir(dir, { withFileTypes: true });
       return entries.filter((entry) => entry.isFile()).map((entry) => path.join(dir, entry.name));
     },
-    readLocalFile: async (_event, filePath, options) => {
-      const target = asPath(filePath);
+    // Official Gzt local_session: bT.readLocalFile(sessionId, encodeURIComponent(path))
+    // → { content, encoding?: "base64" }. Also accept legacy bare-path calls.
+    readLocalFile: async (_event, filePathOrSessionId, encodedFilePathOrOptions, maybeOptions) => {
+      const officialTwoArg = typeof encodedFilePathOrOptions === "string";
+      const target = resolveOfficialLocalPath(
+        filePathOrSessionId,
+        officialTwoArg ? encodedFilePathOrOptions : undefined,
+      );
       if (!target) return null;
+      const options = asObject(officialTwoArg ? maybeOptions : encodedFilePathOrOptions);
       const stat = await fs.stat(target);
       await recordOpenDocument(target);
-      if (stat.size > TEXT_LIMIT_BYTES && asObject(options).encoding !== "base64") {
+      if (stat.size > TEXT_LIMIT_BYTES && options.encoding !== "base64") {
         return { path: target, name: path.basename(target), size: stat.size, tooLarge: true };
       }
       const buffer = await fs.readFile(target);
-      return asObject(options).encoding === "base64" ? buffer.toString("base64") : buffer.toString("utf8");
+      if (options.encoding === "base64") {
+        return {
+          content: buffer.toString("base64"),
+          encoding: "base64",
+          mimeType: mimeTypeForLocalPath(target),
+          path: target,
+          name: path.basename(target),
+          size: stat.size,
+        };
+      }
+      return {
+        content: buffer.toString("utf8"),
+        path: target,
+        name: path.basename(target),
+        size: stat.size,
+      };
     },
-    writeLocalFile: async (_event, filePath, data, options) => {
-      const target = asPath(filePath);
+    writeLocalFile: async (_event, filePathOrSessionId, encodedFilePathOrData, dataOrOptions, maybeOptions) => {
+      const hasOfficialPath = typeof dataOrOptions === "string" || Buffer.isBuffer(dataOrOptions) || dataOrOptions instanceof Uint8Array;
+      const target = hasOfficialPath
+        ? resolveOfficialLocalPath(filePathOrSessionId, encodedFilePathOrData)
+        : asPath(filePathOrSessionId);
       if (!target) return null;
+      const data = hasOfficialPath ? dataOrOptions : encodedFilePathOrData;
+      const options = asObject(hasOfficialPath ? maybeOptions : dataOrOptions);
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, dataToBuffer(data, asObject(options)));
+      await fs.writeFile(target, dataToBuffer(data, options));
       await recordOpenDocument(target);
       return target;
     },
@@ -170,15 +233,20 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       await shell.openPath(target);
       return target;
     },
-    openLocalFile: async (_event, filePath) => {
-      const target = asPath(filePath);
+    // Official: openLocalFile(sessionId, encodeURIComponent(path), reveal?)
+    openLocalFile: async (_event, filePathOrSessionId, encodedFilePath, reveal) => {
+      const target = resolveOfficialLocalPath(filePathOrSessionId, encodedFilePath);
       if (!target) return { ok: false, error: "missing path" };
       await recordOpenDocument(target);
+      if (reveal === true) {
+        shell.showItemInFolder(target);
+        return { ok: true };
+      }
       const error = await shell.openPath(target);
       return { ok: error.length === 0, error: error || undefined };
     },
-    showInFolder: async (_event, filePath) => {
-      const target = asPath(filePath);
+    showInFolder: async (_event, filePathOrSessionId, encodedFilePath) => {
+      const target = resolveOfficialLocalPath(filePathOrSessionId, encodedFilePath);
       if (!target) return false;
       shell.showItemInFolder(target);
       return true;
@@ -210,8 +278,8 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       await recordOpenDocument(target);
       return target;
     },
-    exportLocalFileToGoogleDrive: async (_event, filePath) => {
-      const target = asPath(filePath);
+    exportLocalFileToGoogleDrive: async (_event, filePathOrSessionId, encodedFilePath) => {
+      const target = resolveOfficialLocalPath(filePathOrSessionId, encodedFilePath);
       if (!target) return { ok: false, error: "missing path" };
       const cloudStorage = path.join(app.getPath("home"), "Library", "CloudStorage");
       const candidates = await fs.readdir(cloudStorage).catch(() => []);

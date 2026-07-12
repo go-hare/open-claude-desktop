@@ -20,21 +20,19 @@ import { getTranscriptFeedback, submitTranscriptFeedback } from "../services/loc
 import { getLocalSessionEnvironment, saveLocalSessionEnvironment } from "../services/localSessions/localSessionEnvironmentStore";
 import { loadOriginalNodePty } from "../services/originalRuntime/originalRuntimeModules";
 import type { IpcHandlerContext } from "./context";
-import { getSessionRunner } from "./localSessionRunner";
+import { getLocalSessionRunner } from "./localSessionRunner";
 import { originalEventSurface } from "./originalEventSurface";
 import { describeMcpServer, mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
-import type { InterfaceHandlers } from "./registerIpc";
+import type { InterfaceHandlers, IpcHandler } from "./registerIpc";
 import { dispatchBridgeEvent, registerInterfaceHandlers } from "./registerIpc";
 
 const execFileAsync = promisify(execFile);
 const TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
 
+// Code LocalSessions only. Cowork LocalAgentModeSessions is registered solely via
+// coworkSessionsHandlers + CoworkSessionManager (see registerDesktopIpc).
 const LOCAL_SESSIONS_METHODS = [
   "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getDetectedProjects","getDiffFileContent","getEffort","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrReviewComments","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
-] as const;
-
-const LOCAL_AGENT_METHODS = [
-  "abandonBridgeEnvironment","addFolderToSession","addTrustedFolder","archive","authorizeDirectMcpServer","delete","deleteBridgeAgentMemory","deleteBridgeSession","deleteLocalSkill","disconnectDirectMcpServer","getAll","getBridgeConsent","getDirectMcpServerStatuses","getLocalSkillFiles","getSession","getSessionsBridgeEnabled","getSessionsForScheduledTask","getSupportedCommands","getTranscript","getTranscriptFeedback","getTrustedFolders","interactiveAuth_$store$_getState","isFolderTrusted","kickBridgePoll","listLocalSkills","mcpCallTool","mcpListResources","mcpReadResource","noteCuWindowMentions","openOutputsDir","removeTrustedFolder","replaceEnabledMcpTools","replaceRemoteMcpServers","requestFolderTccAccess","resetBridge","resetBridgeSession","respondBridgePermissionPreflight","respondDirectoryServers","respondPluginSearch","respondSlashMenuSkills","respondToToolPermission","revealLocalSkill","revokeInteractiveAuth","rewind","saveLocalSkill","searchSessions","sendMessage","sessionsBridgeStatus_$store$_getState","setChromePermissionMode","setDraftSessionFolders","setFocusedSession","setLocalSkillEnabled","setMcpServers","setModel","setPermissionMode","setSessionsBridgeEnabled","shareSession","start","stop","submitTranscriptFeedback","syncSkills","triggerInteractiveAuth","updateSession",
 ] as const;
 
 function asString(value: unknown): string | null {
@@ -799,21 +797,44 @@ function planFromTranscript(transcript: unknown[]): { content?: string; path?: s
   return content || planPath ? { content, path: planPath } : null;
 }
 
-function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerContext, allMethods: readonly string[], bridgeInterface: "LocalSessions" | "LocalAgentModeSessions"): InterfaceHandlers {
+function createSessionHandlers(
+  store: LocalSessionStore,
+  context: IpcHandlerContext,
+  allMethods: readonly string[],
+): InterfaceHandlers {
   const ptys = new Map<string, { terminal: { write: (data: string) => void; kill: (signal?: string) => void; resize?: (cols: number, rows: number) => void }; buffer: string }>();
   const handlers: InterfaceHandlers = {};
   const events = originalEventSurface(context);
 
   const dispatchBridgeSessionEvent = (event: Record<string, unknown>) => {
-    if (bridgeInterface === "LocalSessions") events.localSessionEvent(event);
-    else events.localAgentModeEvent(event);
+    events.localSessionEvent(event);
   };
 
   const dispatchSessionEvent = (type: string, sessionId?: string, session?: unknown) => {
     dispatchBridgeSessionEvent({ type, sessionId, session: toBridgeSession(session) });
   };
 
-  const sessionRunner = getSessionRunner(context, bridgeInterface);
+  const sessionRunner = getLocalSessionRunner(context);
+
+  const sendCodeMessage: IpcHandler = async (_event, id, text, images, permissionMode, messageUuid, options) => {
+    const sessionId = asString(id);
+    const request = asObject(options);
+    const userSelectedFiles = stringArray(request.userSelectedFiles);
+    const rawMessageUuid = asString(messageUuid);
+    const messageRaw = userSelectedFiles.length > 0 || rawMessageUuid ? {
+      ...(rawMessageUuid ? { messageUuid: rawMessageUuid } : {}),
+      ...(userSelectedFiles.length > 0 ? { userSelectedFiles } : {}),
+    } : undefined;
+    const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text, "user", messageRaw) : null;
+    if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+    if (sessionId && session && typeof text === "string") sessionRunner.runTurn(sessionId, text, {
+      images,
+      messageUuid: asString(messageUuid),
+      permissionMode: asString(permissionMode),
+      userSelectedFiles,
+    });
+    return toBridgeSession(sessionId ? store.getSession(sessionId) ?? session : session);
+  };
 
   const startDiffReview = async (cwdOrSession: unknown, options: unknown, title: string) => {
     const request = { ...asObject(cwdOrSession), ...asObject(options) };
@@ -978,25 +999,7 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
       return toBridgeSession(session);
     },
-    sendMessage: async (_event, id, text, images, permissionMode, messageUuid, options) => {
-      const sessionId = asString(id);
-      const request = asObject(options);
-      const userSelectedFiles = stringArray(request.userSelectedFiles);
-      const rawMessageUuid = asString(messageUuid);
-      const messageRaw = userSelectedFiles.length > 0 || rawMessageUuid ? {
-        ...(rawMessageUuid ? { messageUuid: rawMessageUuid } : {}),
-        ...(userSelectedFiles.length > 0 ? { userSelectedFiles } : {}),
-      } : undefined;
-      const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text, "user", messageRaw) : null;
-      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      if (sessionId && session && typeof text === "string") sessionRunner.runTurn(sessionId, text, {
-        images,
-        messageUuid: asString(messageUuid),
-        permissionMode: asString(permissionMode),
-        userSelectedFiles,
-      });
-      return toBridgeSession(sessionId ? store.getSession(sessionId) ?? session : session);
-    },
+    sendMessage: sendCodeMessage,
     sendSideChatMessage: async (_event, id, text) => {
       const sessionId = asString(id);
       const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text, "user") : null;
@@ -1567,8 +1570,12 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
 }
 
 export function registerLocalSessionsHandlers(context: IpcHandlerContext): void {
-  registerInterfaceHandlers("claude.web", "LocalSessions", createSessionHandlers(context.localSessions, context, LOCAL_SESSIONS_METHODS, "LocalSessions"), "claude.web.LocalSessions");
-  registerInterfaceHandlers("claude.web", "LocalAgentModeSessions", createSessionHandlers(context.localAgentModeSessions, context, LOCAL_AGENT_METHODS, "LocalAgentModeSessions"), "claude.web.LocalAgentModeSessions");
+  registerInterfaceHandlers(
+    "claude.web",
+    "LocalSessions",
+    createSessionHandlers(context.localSessions, context, LOCAL_SESSIONS_METHODS),
+    "claude.web.LocalSessions",
+  );
   registerInterfaceHandlers("claude.web", "LocalSessionEnvironment", {
     get: async () => ({ env: await getLocalSessionEnvironment(), userData: app.getPath("userData") }),
     save: async (env: unknown) => ({ env: await saveLocalSessionEnvironment(env), userData: app.getPath("userData") }),

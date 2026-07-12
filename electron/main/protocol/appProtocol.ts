@@ -1,4 +1,5 @@
-import { protocol } from "electron";
+import { app, protocol } from "electron";
+import { loadOrCreateCustom3pInstallId } from "../services/custom3p/custom3pInstallIdentity";
 import { APP_HOST, APP_ORIGIN, APP_PROTOCOL } from "./constants";
 import { createCustom3pApiHandler, type Custom3pApiOptions } from "./custom3pApi";
 import { createStaticIonDistHandler } from "./staticIonDist";
@@ -27,7 +28,8 @@ export function installAppProtocolHandler(options: AppProtocolOptions): void {
   installShellCustomProtocolHandlers();
 
   const staticHandler = createStaticIonDistHandler({ root: options.ionDistRoot });
-  const apiHandler = createCustom3pApiHandler({ ionDistRoot: options.ionDistRoot, ...(options.custom3p ?? {}) });
+  const installId = options.custom3p?.installId ?? loadOrCreateCustom3pInstallId({ userDataPath: app.getPath("userData") });
+  const apiHandler = createCustom3pApiHandler({ ionDistRoot: options.ionDistRoot, ...(options.custom3p ?? {}), installId });
 
   protocol.handle(APP_PROTOCOL, async (request) => {
     const url = new URL(request.url);

@@ -1,0 +1,203 @@
+import { randomUUID } from "node:crypto";
+import type {
+  CoworkImagePayload,
+  CoworkRendererSession,
+  CoworkSdkUserMessage,
+  CoworkSessionRuntimeState,
+  CoworkStartSessionInput,
+  CoworkToolPermissionRequest,
+  CoworkToolState,
+} from "./coworkSessionTypes";
+
+function buildMessageContent(
+  message: string,
+  images?: CoworkImagePayload[],
+): string | unknown[] {
+  const validImages = images?.filter((image) => image.base64.length > 0);
+  if (!validImages?.length) return message;
+  const content: unknown[] = validImages.map((image) => ({
+    source: {
+      data: image.base64,
+      media_type: image.mimeType,
+      type: "base64",
+    },
+    type: "image",
+  }));
+  if (message.trim()) content.push({ text: message, type: "text" });
+  return content;
+}
+
+function selectedFolders(input: CoworkStartSessionInput) {
+  return (input.userSelectedFolders ?? []).map((folder) => ({
+    canonical: folder,
+    display: folder,
+    kind: "local" as const,
+  }));
+}
+
+export function createDefaultCoworkSessionId(): string {
+  return `local_${randomUUID()}`;
+}
+
+export function createDefaultCoworkProcessName(sessionId: string): string {
+  return sessionId.replace(/^local_/, "");
+}
+
+export function isValidCoworkSessionId(sessionId: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(sessionId);
+}
+
+export function createRuntimeState(
+  input: CoworkStartSessionInput,
+  sessionId: string,
+  processName: string,
+  now: number,
+): CoworkSessionRuntimeState {
+  return {
+    createdAt: now,
+    cwd: `/sessions/${processName}`,
+    enabledMcpTools: input.enabledMcpTools,
+    fsDetectedFiles: new Map(),
+    hostLoopMode: input.hostLoopMode,
+    initialMessage: input.message,
+    inputStream: null,
+    isFirstTurn: true,
+    lastActivityAt: now,
+    lifecycleState: "initializing",
+    messageBuffer: [],
+    mcpServers: input.mcpServers,
+    model: input.model,
+    parentSessionId: input.parentSessionId,
+    pendingNotifications: [],
+    permissionMode: input.permissionMode,
+    processName,
+    query: null,
+    remoteMcpServersConfig: input.remoteMcpServers,
+    resolvedFolders: selectedFolders(input),
+    scheduledTaskId: input.scheduledTaskId,
+    sessionId,
+    sessionType: input.sessionType,
+    spaceId: input.spaceId,
+    spaceIdSetBy: input.spaceId ? "user" : undefined,
+    systemPrompt: input.systemPrompt,
+    title: input.title,
+    userSelectedProjectUuids: input.userSelectedProjectUuids,
+    vmProcessName: processName,
+  };
+}
+
+export function applyStartInput(
+  session: CoworkSessionRuntimeState,
+  input: CoworkStartSessionInput,
+): void {
+  session.enabledMcpTools = input.enabledMcpTools ?? session.enabledMcpTools;
+  session.hostLoopMode = input.hostLoopMode ?? session.hostLoopMode;
+  session.mcpServers = input.mcpServers ?? session.mcpServers;
+  session.model = input.model ?? session.model;
+  session.parentSessionId = input.parentSessionId ?? session.parentSessionId;
+  session.permissionMode = input.permissionMode ?? session.permissionMode;
+  session.remoteMcpServersConfig =
+    input.remoteMcpServers ?? session.remoteMcpServersConfig;
+  if (input.userSelectedFolders) {
+    session.resolvedFolders = selectedFolders(input);
+  }
+  session.sessionType = input.sessionType ?? session.sessionType;
+  session.spaceId = input.spaceId ?? session.spaceId;
+  session.systemPrompt = input.systemPrompt ?? session.systemPrompt;
+  session.title = input.title ?? session.title;
+  session.userSelectedProjectUuids =
+    input.userSelectedProjectUuids ?? session.userSelectedProjectUuids;
+}
+
+export function createUserMessage(
+  session: CoworkSessionRuntimeState,
+  message: string,
+  messageUuid: string,
+  images?: CoworkImagePayload[],
+  userSelectedFiles?: string[],
+  toolStates?: CoworkToolState[],
+): CoworkSdkUserMessage {
+  return {
+    client_platform: "desktop_app",
+    message: { content: buildMessageContent(message, images), role: "user" },
+    parent_tool_use_id: null,
+    session_id:
+      session.cliSessionId ?? session.sessionId.replace(/^local_/, ""),
+    tool_states: toolStates?.length ? toolStates : undefined,
+    type: "user",
+    user_selected_files: userSelectedFiles?.length
+      ? userSelectedFiles
+      : undefined,
+    uuid: messageUuid,
+  };
+}
+
+export function createResumeInput(
+  session: CoworkSessionRuntimeState,
+  message: string,
+  images?: CoworkImagePayload[],
+  userSelectedFiles?: string[],
+  messageUuid?: string,
+  toolStates?: CoworkToolState[],
+): CoworkStartSessionInput {
+  return {
+    enabledMcpTools: session.enabledMcpTools,
+    hostLoopMode: session.hostLoopMode,
+    images,
+    mcpServers: session.mcpServers,
+    message,
+    messageUuid,
+    model: session.model,
+    permissionMode: session.permissionMode,
+    remoteMcpServers: session.remoteMcpServersConfig,
+    sessionId: session.sessionId,
+    sessionType: session.sessionType,
+    spaceId: session.spaceId,
+    systemPrompt: session.systemPrompt,
+    toolStates,
+    userSelectedFiles,
+    userSelectedFolders: session.resolvedFolders.map(
+      (folder) => folder.canonical ?? folder.display,
+    ),
+  };
+}
+
+export function toRendererSession(
+  session: CoworkSessionRuntimeState,
+  pendingToolPermissions: CoworkToolPermissionRequest[],
+  homePath: string,
+  folderExists: (folder: string) => boolean,
+): CoworkRendererSession {
+  return {
+    bufferedMessages:
+      session.messageBuffer.length > 0 ? [...session.messageBuffer] : undefined,
+    cliSessionId: session.cliSessionId,
+    createdAt: session.createdAt,
+    cwd: session.cwd,
+    enabledMcpTools: session.enabledMcpTools,
+    error: session.error,
+    folderExists: folderExists(session.cwd),
+    homePath,
+    hostLoopMode: session.hostLoopMode,
+    isAgentCompleted: session.isAgentCompleted,
+    isArchived: session.lifecycleState === "archived",
+    isRunning: !["archived", "idle"].includes(session.lifecycleState),
+    isStarred: session.isStarred,
+    lastActivityAt: session.lastActivityAt,
+    model: session.model,
+    parentSessionId: session.parentSessionId,
+    pendingToolPermissions:
+      pendingToolPermissions.length > 0 ? pendingToolPermissions : undefined,
+    permissionMode: session.permissionMode,
+    promptSuggestion: session.promptSuggestion,
+    scheduledTaskId: session.scheduledTaskId,
+    sessionId: session.sessionId,
+    sessionType: session.sessionType,
+    spaceId: session.spaceId,
+    title: session.title,
+    userSelectedFolders: session.resolvedFolders.map(
+      (folder) => folder.canonical ?? folder.display,
+    ),
+    userSelectedProjectUuids: session.userSelectedProjectUuids,
+  };
+}

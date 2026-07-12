@@ -5,22 +5,45 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Claude Desktop Shell</title>
     <style>
+      /*
+       * Official MainWindowPage shell (ion-dist main_window + window-shared.css):
+       *   - Mac isMainWindow titleBarHeight = 0 → Pe returns null (no nc-drag strip)
+       *   - body is otherwise empty; Claude UI lives in mainView WebContentsView
+       *   - .nc-no-drag / .nc-drag are the only app-region helpers in window-shared.css
+       *
+       * Electron titleBarStyle:"hidden" still treats the base BrowserWindow webContents
+       * as the native titlebar hit surface. A full-viewport painted shell root without
+       * no-drag steals the top ~titlebar band from child WebContentsViews, so Mac chrome
+       * buttons in mainView only receive the bottom of their hit box.
+       *
+       * Match official: no shell drag strip on Mac main; mark body nc-no-drag so the
+       * base page never owns the titlebar drag band. Window drag stays on mainView
+       * dframe `.draggable` regions (official FrameSidebar / content chrome).
+       */
       html,
-      body,
-      #titlebar-root {
+      body {
         width: 100%;
         height: 100%;
         margin: 0;
+        padding: 0;
         overflow: hidden;
         background: transparent;
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell",
+          "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
       }
 
-      .drag-region {
-        position: fixed;
-        inset: 0 0 auto 0;
-        height: 32px;
+      /* Official window-shared.css */
+      .nc-no-drag {
+        -webkit-app-region: no-drag;
+        app-region: no-drag;
+      }
+
+      .nc-drag {
         -webkit-app-region: drag;
+        app-region: drag;
       }
 
       .load-error {
@@ -37,16 +60,13 @@
       }
     </style>
   </head>
-  <body>
-    <!-- Mirrors original role: title bar and error UI only; main Claude UI is loaded in mainView WebContentsView. -->
-    <div id="titlebar-root">
-      <div class="drag-region" aria-hidden="true"></div>
-      <section id="load-error" class="load-error" role="alert" aria-live="polite">
-        <div>
-          <h1>Claude will return soon</h1>
-          <p>The main view failed to load.</p>
-        </div>
-      </section>
-    </div>
+  <!-- Official index body is empty class="light"; Mac main Pe is null (no titlebar strip). -->
+  <body class="light nc-no-drag">
+    <section id="load-error" class="load-error nc-no-drag" role="alert" aria-live="polite">
+      <div>
+        <h1>Claude will return soon</h1>
+        <p>The main view failed to load.</p>
+      </div>
+    </section>
   </body>
 </html>

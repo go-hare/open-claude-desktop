@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { net } from "electron";
 import { JSON_HEADERS, THIRD_PARTY_NOT_AVAILABLE_BODY } from "./constants";
@@ -26,6 +25,7 @@ type ThirdPartyBootstrapConfig = {
 export type Custom3pApiOptions = {
   ionDistRoot: string;
   bootstrap?: BootstrapPayload | (() => Promise<BootstrapPayload> | BootstrapPayload);
+  installId?: string;
   readAccountSettings?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   upstreamBaseUrl?: string;
   egressRules?: Array<{ host: string; path?: string; pathSuffix?: string; followRedirects?: boolean }>;
@@ -53,7 +53,7 @@ function custom3pUnavailable(): Response {
 
 const DEFAULT_CREATED_AT = "1970-01-01T00:00:00.000Z";
 const DEFAULT_ORG_UUID = "00000000-0000-4000-8000-000000000001";
-const DEFAULT_INSTALL_ID = crypto.randomUUID();
+const DEFAULT_INSTALL_ID = "00000000-0000-4000-8000-000000000002";
 
 const FEATURE_FLAGS: Record<string, unknown> = {
   574905726: { defaultValue: true },
@@ -138,7 +138,7 @@ function createOrganization(config: Required<ThirdPartyBootstrapConfig>): Record
   };
 }
 
-function createThirdPartyBootstrap(value: BootstrapPayload | undefined, accountSettings: Record<string, unknown>): BootstrapPayload {
+function createThirdPartyBootstrap(value: BootstrapPayload | undefined, accountSettings: Record<string, unknown>, installId: string): BootstrapPayload {
   if (value?.account && value?.statsig && value?.growthbook) return { ...value, account_settings: accountSettings };
 
   const config = defaultBootstrapConfig(value);
@@ -155,8 +155,8 @@ function createThirdPartyBootstrap(value: BootstrapPayload | undefined, accountS
 
   return {
     account: {
-      tagged_id: `cowork_3p_${DEFAULT_INSTALL_ID}`,
-      uuid: DEFAULT_INSTALL_ID,
+      tagged_id: `cowork_3p_${installId}`,
+      uuid: installId,
       email_address: "cowork-3p@localhost",
       full_name: typeof identity.full_name === "string" ? identity.full_name : "Claude-Deepseek",
       display_name: typeof identity.display_name === "string" ? identity.display_name : "Claude-Deepseek",
@@ -171,7 +171,7 @@ function createThirdPartyBootstrap(value: BootstrapPayload | undefined, accountS
       settings: { ...settings, enabled_geolocation: false },
     },
     locale: typeof profile.locale === "string" ? profile.locale : null,
-    statsig: { user: { userID: DEFAULT_INSTALL_ID }, values: {}, values_hash: "custom3p" },
+    statsig: { user: { userID: installId }, values: {}, values_hash: "custom3p" },
     growthbook: { features: modelFeatureConfig(config) },
     intercom_account_hash: null,
     system_prompts: {
@@ -191,7 +191,7 @@ function createThirdPartyBootstrap(value: BootstrapPayload | undefined, accountS
 async function getBootstrap(options: Custom3pApiOptions): Promise<BootstrapPayload> {
   const value = typeof options.bootstrap === "function" ? await options.bootstrap() : options.bootstrap;
   const accountSettings = options.readAccountSettings ? await options.readAccountSettings() : {};
-  return createThirdPartyBootstrap(value, accountSettings);
+  return createThirdPartyBootstrap(value, accountSettings, options.installId ?? DEFAULT_INSTALL_ID);
 }
 
 function matchEgressRule(hostname: string, pathname: string, options: Custom3pApiOptions) {
@@ -216,6 +216,7 @@ async function fetchI18nFile(root: string, pathname: string): Promise<Response> 
 /** Original `frr(ionDistPath, discoveredRendererConfig)` equivalent for the local third-party desktop mode. */
 export function createCustom3pApiHandler(options: Custom3pApiOptions) {
   const root = path.resolve(options.ionDistRoot);
+  const installId = options.installId ?? DEFAULT_INSTALL_ID;
   let accountSettings: Record<string, unknown> = {};
 
   const readAccountSettings = async () => ({
@@ -229,6 +230,7 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
   const currentBootstrap = async () => createThirdPartyBootstrap(
     typeof options.bootstrap === "function" ? await options.bootstrap() : options.bootstrap,
     await readAccountSettings(),
+    installId,
   );
 
   return async function handleCustom3pApi(request: Request): Promise<Response | undefined> {
@@ -265,7 +267,7 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
           ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
         },
       }));
-      return json(createThirdPartyBootstrap(typeof options.bootstrap === "function" ? await options.bootstrap() : options.bootstrap, next));
+      return json(createThirdPartyBootstrap(typeof options.bootstrap === "function" ? await options.bootstrap() : options.bootstrap, next, installId));
     }
     if (pathname === "/api/account_profile") {
       const profile = ((await readAccountSettings()).__account_profile ?? {}) as Record<string, unknown>;

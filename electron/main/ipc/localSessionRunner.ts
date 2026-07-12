@@ -2,9 +2,7 @@ import { ClaudeCliRunner } from "../services/localSessions/claudeCliRunner";
 import type { IpcHandlerContext } from "./context";
 import { originalEventSurface } from "./originalEventSurface";
 
-type SessionBridgeInterface = "LocalSessions" | "LocalAgentModeSessions";
-
-const runners = new WeakMap<IpcHandlerContext, Partial<Record<SessionBridgeInterface, ClaudeCliRunner>>>();
+const runners = new WeakMap<IpcHandlerContext, ClaudeCliRunner>();
 
 function eventMarker(event: Record<string, unknown>): string {
   return [event.type, event.kind, event.subtype, event.event]
@@ -17,46 +15,43 @@ function hasObjectField(event: Record<string, unknown>, ...keys: string[]): bool
   return keys.some((key) => typeof event[key] === "object" && event[key] !== null);
 }
 
-export function dispatchSessionRunnerEvent(context: IpcHandlerContext, iface: SessionBridgeInterface, event: Record<string, unknown>): void {
+/** Code LocalSessions runner events only. Cowork uses CoworkSessionManager.emit → onEvent. */
+export function dispatchLocalSessionEvent(
+  context: IpcHandlerContext,
+  event: Record<string, unknown>,
+): void {
   const events = originalEventSurface(context);
-  if (iface === "LocalSessions") events.localSessionEvent(event);
-  else events.localAgentModeEvent(event);
+  events.localSessionEvent(event);
   const marker = eventMarker(event);
-  if (marker.includes("tool_permission") || marker.includes("permission_request") || hasObjectField(event, "toolPermissionRequest", "permissionRequest")) {
-    if (iface === "LocalSessions") events.localSessionToolPermissionRequest(event);
-    else events.localAgentModeToolPermissionRequest(event);
+  if (
+    marker.includes("tool_permission")
+    || marker.includes("permission_request")
+    || hasObjectField(event, "toolPermissionRequest", "permissionRequest")
+  ) {
+    events.localSessionToolPermissionRequest(event);
   }
-  if (iface === "LocalSessions" && (marker.includes("ssh_password") || hasObjectField(event, "sshPasswordRequest"))) {
+  if (marker.includes("ssh_password") || hasObjectField(event, "sshPasswordRequest")) {
     events.localSessionSshPasswordRequired(event);
   }
 }
 
-export function dispatchLocalSessionEvent(context: IpcHandlerContext, event: Record<string, unknown>): void {
-  dispatchSessionRunnerEvent(context, "LocalSessions", event);
-}
-
-function getRunnerStore(context: IpcHandlerContext, iface: SessionBridgeInterface) {
-  return iface === "LocalSessions" ? context.localSessions : context.localAgentModeSessions;
-}
-
 export function getLocalSessionRunner(context: IpcHandlerContext): ClaudeCliRunner {
-  return getSessionRunner(context, "LocalSessions");
-}
-
-export function getSessionRunner(context: IpcHandlerContext, iface: SessionBridgeInterface): ClaudeCliRunner {
-  const scoped = runners.get(context) ?? {};
-  const existing = scoped[iface];
+  const existing = runners.get(context);
   if (existing) return existing;
 
-  const store = getRunnerStore(context, iface);
-  const runner = new ClaudeCliRunner(store, {
-    onEvent: (event) => dispatchSessionRunnerEvent(context, iface, event),
+  const runner = new ClaudeCliRunner(context.localSessions, {
+    onEvent: (event) => dispatchLocalSessionEvent(context, event),
     onSessionUpdated: (sessionId) => {
-      const session = store.getSession(sessionId);
-      if (session) dispatchSessionRunnerEvent(context, iface, { type: "session_updated", sessionId, session });
+      const session = context.localSessions.getSession(sessionId);
+      if (session) {
+        dispatchLocalSessionEvent(context, {
+          type: "session_updated",
+          sessionId,
+          session,
+        });
+      }
     },
   });
-  scoped[iface] = runner;
-  runners.set(context, scoped);
+  runners.set(context, runner);
   return runner;
 }
