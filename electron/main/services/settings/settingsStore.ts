@@ -21,9 +21,14 @@ type PersistedSettings = {
   credentialHelperLastRun: unknown;
 };
 
+/** Official AppPreferences defaults used by hYt Keep awake (keepAwakeEnabled always defined). */
+const DEFAULT_PREFERENCES: Record<string, unknown> = {
+  keepAwakeEnabled: false,
+};
+
 function defaultState(): PersistedSettings {
   return {
-    preferences: {},
+    preferences: { ...DEFAULT_PREFERENCES },
     appFeatures: {},
     menuBarEnabled: true,
     globalShortcut: null,
@@ -69,7 +74,16 @@ export class SettingsStore {
 
   private read(): PersistedSettings {
     try {
-      return { ...defaultState(), ...JSON.parse(fs.readFileSync(this.settingsFile, "utf8")) };
+      const raw = JSON.parse(fs.readFileSync(this.settingsFile, "utf8")) as Partial<PersistedSettings>;
+      const base = defaultState();
+      return {
+        ...base,
+        ...raw,
+        preferences: { ...DEFAULT_PREFERENCES, ...(raw.preferences ?? {}) },
+        appFeatures: { ...base.appFeatures, ...(raw.appFeatures ?? {}) },
+        mcpServersConfig: { ...base.mcpServersConfig, ...(raw.mcpServersConfig ?? {}) },
+        custom3pConfigs: { ...base.custom3pConfigs, ...(raw.custom3pConfigs ?? {}) },
+      };
     } catch {
       return defaultState();
     }
@@ -109,7 +123,7 @@ export class SettingsStore {
   }
 
   getPreferences(): Record<string, unknown> {
-    return { ...this.state.preferences };
+    return { ...DEFAULT_PREFERENCES, ...this.state.preferences };
   }
 
   setPreference(key: string, value: unknown): boolean {

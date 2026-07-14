@@ -193,6 +193,21 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
       const options = asObject(officialTwoArg ? maybeOptions : encodedFilePathOrOptions);
       const stat = await fs.stat(target);
       await recordOpenDocument(target);
+      if (stat.isDirectory()) {
+        return {
+          path: target,
+          name: path.basename(target),
+          isDirectory: true,
+          error: "Cannot preview a directory",
+        };
+      }
+      if (!stat.isFile()) {
+        return {
+          path: target,
+          name: path.basename(target),
+          error: "Not a regular file",
+        };
+      }
       if (stat.size > TEXT_LIMIT_BYTES && options.encoding !== "base64") {
         return { path: target, name: path.basename(target), size: stat.size, tooLarge: true };
       }

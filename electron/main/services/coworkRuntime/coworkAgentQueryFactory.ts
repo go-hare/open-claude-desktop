@@ -97,17 +97,30 @@ function createCanUseTool(input: CoworkQueryFactoryInput): CanUseTool {
   };
 }
 
-function hostCwd(input: CoworkQueryFactoryInput): string {
-  if (!input.hostLoopMode) return input.cwd;
-  return input.userSelectedFolders[0] ?? process.cwd();
+function isVmSessionPath(value: string | undefined): boolean {
+  if (!value) return true;
+  return value === "/sessions" || value.startsWith("/sessions/");
+}
+
+function hostFolders(folders: string[] | undefined): string[] {
+  return (folders ?? []).filter((folder) => !isVmSessionPath(folder));
+}
+
+/** Resolve a host-spawnable cwd. `/sessions/...` is a VM path and fails on Windows. */
+export function hostCwd(input: CoworkQueryFactoryInput): string {
+  const folders = hostFolders(input.userSelectedFolders);
+  if (input.hostLoopMode) return folders[0] ?? process.cwd();
+  if (!isVmSessionPath(input.cwd)) return input.cwd;
+  return folders[0] ?? process.cwd();
 }
 
 export function buildCoworkSdkOptions(
   input: CoworkQueryFactoryInput,
   options: CoworkAgentQueryFactoryOptions = {},
 ): Options {
+  const folders = hostFolders(input.userSelectedFolders);
   const sdkOptions: Options = {
-    additionalDirectories: input.userSelectedFolders,
+    additionalDirectories: folders.length > 0 ? folders : undefined,
     allowedTools: stringArray(input.enabledMcpTools),
     canUseTool: createCanUseTool(input),
     cwd: hostCwd(input),

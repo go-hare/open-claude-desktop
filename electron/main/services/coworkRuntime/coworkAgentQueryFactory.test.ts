@@ -36,6 +36,31 @@ it("builds the long-lived host-loop SDK options", () => {
   expect(options.disallowedTools).toContain("Bash");
 });
 
+it("falls back off VM /sessions paths so Windows can spawn Claude Code", () => {
+  const options = buildCoworkSdkOptions(
+    input({
+      hostLoopMode: false,
+      userSelectedFolders: ["/sessions/session-1"],
+    }),
+    { executable: "/opt/claude" },
+  );
+
+  expect(options.cwd).toBe(process.cwd());
+  expect(options.additionalDirectories).toBeUndefined();
+});
+
+it("prefers real host folders over VM session paths in host-loop mode", () => {
+  const options = buildCoworkSdkOptions(
+    input({
+      userSelectedFolders: ["/sessions/session-1", "D:/work/project"],
+    }),
+    { executable: "/opt/claude" },
+  );
+
+  expect(options.cwd).toBe("D:/work/project");
+  expect(options.additionalDirectories).toEqual(["D:/work/project"]);
+});
+
 it("routes SDK permission requests into the Cowork broker callback", async () => {
   const canUseTool = vi.fn(async () => ({
     behavior: "allow" as const,

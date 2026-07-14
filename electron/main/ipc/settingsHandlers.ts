@@ -18,6 +18,7 @@ import {
 import { describeMcpServer, mcpConfigEntries } from "../services/mcp/mcpRuntime";
 import { handleSupportBundleAction } from "../services/support/supportBundle";
 import { openCustom3pSetupWindow } from "../windows/custom3pSetupWindow";
+import { applyKeepAwakeEnabled, syncKeepAwakeFromPreferences } from "../services/settings/keepAwake";
 import type { IpcHandlerContext } from "./context";
 import { originalEventSurface } from "./originalEventSurface";
 import { dispatchBridgeEvent, registerInterfaceSyncHandlers, registerNamespaceHandlers } from "./registerIpc";
@@ -215,6 +216,8 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
   const settings = context.settings;
   const mainView = context.windows.mainView.webContents;
   const events = originalEventSurface(context);
+  // Official keepAwakeEnabled: restore powerSaveBlocker from persisted prefs on boot.
+  syncKeepAwakeFromPreferences(settings.getPreferences());
 
   registerNamespaceHandlers("claude.settings", {
     AppConfig: {
@@ -231,6 +234,9 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       setPreference: async (_event, key, value) => {
         if (typeof key !== "string") return false;
         const result = settings.setPreference(key, value);
+        if (key === "keepAwakeEnabled") {
+          applyKeepAwakeEnabled(value === true);
+        }
         dispatchBridgeEvent(mainView, "claude.settings", "AppPreferences", "preferencesChanged", settings.getPreferences());
         return result;
       },

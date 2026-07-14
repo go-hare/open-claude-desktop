@@ -23,6 +23,7 @@ import type { IpcHandlerContext } from "./context";
 import { getLocalSessionRunner } from "./localSessionRunner";
 import { originalEventSurface } from "./originalEventSurface";
 import { describeMcpServer, mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
+import { getOfficialGitDiff } from "../services/localSessions/officialGitDiff";
 import type { InterfaceHandlers, IpcHandler } from "./registerIpc";
 import { dispatchBridgeEvent, registerInterfaceHandlers } from "./registerIpc";
 
@@ -32,7 +33,7 @@ const TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
 // Code LocalSessions only. Cowork LocalAgentModeSessions is registered solely via
 // coworkSessionsHandlers + CoworkSessionManager (see registerDesktopIpc).
 const LOCAL_SESSIONS_METHODS = [
-  "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getDetectedProjects","getDiffFileContent","getEffort","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrReviewComments","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
+  "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getDetectedProjects","getDiffFileContent","getEffort","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getMergeBase","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrReviewComments","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
 ] as const;
 
 function asString(value: unknown): string | null {
@@ -471,7 +472,27 @@ function cwdFromSession(store: LocalSessionStore, sessionIdOrCwd: unknown): stri
 
 async function readText(filePath: string) {
   const stat = await fs.stat(filePath);
-  if (stat.size > TEXT_LIMIT_BYTES) return { path: filePath, size: stat.size, tooLarge: true };
+  // Official file pane only opens files (c119 eS: dirs expand, files onPreview).
+  // Never fs.readFile a directory — Node throws EISDIR and IPC surfaces a raw remote error.
+  if (stat.isDirectory()) {
+    return {
+      path: filePath,
+      absPath: filePath,
+      isDirectory: true,
+      error: "Cannot preview a directory",
+    };
+  }
+  if (!stat.isFile()) {
+    return {
+      path: filePath,
+      absPath: filePath,
+      error: "Not a regular file",
+    };
+  }
+  if (stat.size > TEXT_LIMIT_BYTES) {
+    return { path: filePath, absPath: filePath, size: stat.size, tooLarge: true };
+  }
+  // Success: plain utf8 string (legacy callers + official content consumers both accept).
   return fs.readFile(filePath, "utf8");
 }
 
@@ -1176,8 +1197,14 @@ function createSessionHandlers(
     getTranscriptFeedback: async (_event, sessionId) => getTranscriptFeedback(sessionId),
     shareSession: async (_event, id) => ({ ok: true, id, localOnly: true }),
     summarizeSession: async (_event, id) => {
-      const transcript = asString(id) ? store.getTranscript(asString(id)!) : [];
-      return transcript.map(textFromTranscriptItem).join("\n").slice(0, 1000);
+      const sessionId = asString(id);
+      if (!sessionId) return { summary: "", title: null };
+      const transcript = store.getTranscript(sessionId);
+      const summary = transcript.map(textFromTranscriptItem).join("\n").slice(0, 1000);
+      // Refresh placeholder titles after content exists (web may call this on turn settle).
+      const refreshed = store.refreshTitleFromMessages?.(sessionId) ?? store.getSession(sessionId);
+      if (refreshed) dispatchSessionEvent("session_updated", sessionId, refreshed);
+      return { summary, title: refreshed?.title ?? null, session: toBridgeSession(refreshed) };
     },
     summarizeTranscript: async (_event, transcript) => Array.isArray(transcript) ? transcript.map(textFromTranscriptItem).join("\n").slice(0, 1000) : "",
     getPlanForSession: async (_event, id) => {
@@ -1356,9 +1383,12 @@ function createSessionHandlers(
       const raw = asObject(pull);
       return { number: raw.number, state: raw.state, title: raw.title, url: raw.html_url, draft: raw.draft, merged: raw.merged_at !== null && raw.merged_at !== undefined };
     },
-    createLocalPr: async (_event, cwdOrSession, title, body) => {
+    createLocalPr: async (_event, cwdOrSession, title, body, options) => {
       const cwd = cwdFromSession(store, cwdOrSession);
       const args = ["pr", "create"];
+      // Official draft path (c11959232 draft: e / ccr_auto_create_pr_as_draft).
+      const draft = options && typeof options === "object" && (options as { draft?: unknown }).draft === true;
+      if (draft) args.push("--draft");
       if (asString(title)) args.push("--title", asString(title)!);
       if (asString(body)) args.push("--body", asString(body)!);
       if (!asString(title) && !asString(body)) args.push("--fill");
@@ -1372,7 +1402,31 @@ function createSessionHandlers(
       const root = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
       const branch = await runGit(cwd, ["branch", "--show-current"]);
       const remote = await runGit(cwd, ["remote", "-v"]);
-      return { cwd, root: root.ok ? String(root.stdout ?? "").trim() : null, branch: branch.ok ? String(branch.stdout ?? "").trim() : null, remotes: remote.ok ? String(remote.stdout ?? "").trim() : "" };
+      // Official baseBranch source (c11959232 Jn?.defaultBranch): origin/HEAD → main|master fallback.
+      const originHead = await runGit(cwd, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
+      let defaultBranch: string | null = null;
+      if (originHead.ok) {
+        const ref = String(originHead.stdout ?? "").trim();
+        const match = ref.match(/refs\/remotes\/origin\/(.+)$/);
+        if (match?.[1]) defaultBranch = match[1];
+      }
+      if (!defaultBranch) {
+        const local = await runGit(cwd, ["branch", "--list"]);
+        if (local.ok) {
+          const names = String(local.stdout ?? "")
+            .split(/\r?\n/)
+            .map((line) => line.replace(/^\*\s*/, "").trim())
+            .filter(Boolean);
+          defaultBranch = names.find((name) => name === "main" || name === "master") ?? null;
+        }
+      }
+      return {
+        cwd,
+        root: root.ok ? String(root.stdout ?? "").trim() : null,
+        branch: branch.ok ? String(branch.stdout ?? "").trim() : null,
+        remotes: remote.ok ? String(remote.stdout ?? "").trim() : "",
+        defaultBranch,
+      };
     },
     getWorkingTreeStatus: async (_event, cwdOrSession) => runGitInRepository(cwdFromSession(store, cwdOrSession), ["status", "--short", "--branch"]),
     getUncommittedChanges: async (_event, cwdOrSession) => runGit(cwdFromSession(store, cwdOrSession), ["status", "--porcelain=v1"]),
@@ -1380,12 +1434,60 @@ function createSessionHandlers(
       const result = await runGit(cwdFromSession(store, cwdOrSession), ["status", "--porcelain=v1"]);
       return result.ok && String(result.stdout ?? "").trim().length > 0;
     },
-    getGitDiff: async (_event, cwdOrSession, base) => runGitInRepository(cwdFromSession(store, cwdOrSession), ["diff", ...gitDiffArgs(base)]),
+    // Official O7i/a2A: structured comparison { files[].patch, merge_base, … } — not raw stdout.
+    getGitDiff: async (_event, cwdOrSession, base) =>
+      getOfficialGitDiff(cwdFromSession(store, cwdOrSession), asString(base) ?? "HEAD"),
     getGitDiffStats: async (_event, cwdOrSession, base) => runGitInRepository(cwdFromSession(store, cwdOrSession), ["diff", "--stat", ...gitDiffArgs(base)]),
-    getDiffFileContent: async (_event, cwdOrSession, refOrFilePath, filePath, previousFilePath) => {
-      const ref = asString(filePath) ? String(refOrFilePath || "HEAD") : "HEAD";
-      const target = asString(filePath) ? String(previousFilePath || filePath) : String(refOrFilePath ?? "");
-      return runGit(cwdFromSession(store, cwdOrSession), ["show", `${ref}:${target}`]);
+    // Official c11959232 nN: merge_base for getDiffFileContent(cwd, merge_base, path).
+    getMergeBase: async (_event, cwdOrSession, base) => {
+      const ref = asString(base) ?? "HEAD";
+      return runGitInRepository(cwdFromSession(store, cwdOrSession), ["merge-base", "HEAD", ref]);
+    },
+    // Official electron-shell H7i / LocalSessions.getDiffFileContent:
+    // (cwd, mergeBase, filePath, prevFilePath?) → { oldText, newText } | null
+    // oldText = git show mergeBase:(prev||path); newText = working-tree file read.
+    getDiffFileContent: async (_event, cwdOrSession, mergeBase, filePath, previousFilePath) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const base = asString(mergeBase);
+      const targetPath = asString(filePath);
+      if (!cwd || !base || base.startsWith("-") || !targetPath) return null;
+
+      const rootResult = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+      const root = rootResult.ok ? String(rootResult.stdout ?? "").trim() : cwd;
+      if (!root) return null;
+
+      const showPath = asString(previousFilePath) ?? targetPath;
+      const maxBytes = 2 * 1024 * 1024;
+
+      const [oldText, newText] = await Promise.all([
+        (async (): Promise<string | null> => {
+          try {
+            const shown = await execFileAsync("git", ["show", `${base}:${showPath}`, "--"], {
+              cwd: root,
+              timeout: 5000,
+              maxBuffer: maxBytes,
+            });
+            return typeof shown.stdout === "string" ? shown.stdout : String(shown.stdout ?? "");
+          } catch {
+            return null;
+          }
+        })(),
+        (async (): Promise<string | null> => {
+          try {
+            const abs = path.resolve(root, targetPath);
+            const rel = path.relative(root, abs);
+            if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+            const stat = await fs.stat(abs).catch(() => null);
+            if (!stat?.isFile() || stat.size > maxBytes) return null;
+            return await fs.readFile(abs, "utf8");
+          } catch {
+            return null;
+          }
+        })(),
+      ]);
+
+      if (oldText === null && newText === null) return null;
+      return { oldText, newText };
     },
     getCommitDiff: async (_event, cwdOrSession, commit) => runGit(cwdFromSession(store, cwdOrSession), ["show", "--stat", String(commit ?? "HEAD")]),
     getGitCommits: async (_event, cwdOrSession, limit) => runGit(cwdFromSession(store, cwdOrSession), ["log", `-${Number(limit) || 20}`, "--oneline"]),

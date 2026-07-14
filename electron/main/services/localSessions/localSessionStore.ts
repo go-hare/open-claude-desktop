@@ -112,10 +112,33 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function titleFromPrompt(prompt?: string): string {
+function titleFromPrompt(prompt?: string, kind?: string): string {
   const visiblePrompt = prompt?.replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>\s*/g, "").trim();
-  const first = visiblePrompt?.split("\n")[0] ?? "New session";
-  return first.length > 40 ? `${first.slice(0, 40)}…` : first || "New session";
+  const first = visiblePrompt?.split("\n")[0]?.trim() ?? "";
+  // Official local code empty/placeholder → "Coding session" (c11959232 header fallback path).
+  if (!first || /^\d+$/.test(first)) {
+    return kind === "code" ? "Coding session" : "New session";
+  }
+  return first.length > 40 ? `${first.slice(0, 40)}…` : first;
+}
+
+function isPlaceholderSessionTitle(title?: string, kind?: string): boolean {
+  const text = title?.trim() ?? "";
+  if (!text) return true;
+  if (/^\d+$/.test(text)) return true;
+  if (text === "Untitled" || text === "Untitled session") return true;
+  if (kind === "code" && (text === "Coding session" || text === "General coding session" || text === "New session")) return true;
+  if (kind !== "code" && text === "New session") return true;
+  return false;
+}
+
+/** Prefer first user prompt line for list/header once a turn has content. */
+function titleFromSessionMessages(session: LocalSession): string | null {
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  const user = messages.find((message) => message.role === "user" && typeof message.text === "string" && message.text.trim());
+  if (!user?.text) return null;
+  const next = titleFromPrompt(user.text, session.kind === "code" ? "code" : "cowork");
+  return isPlaceholderSessionTitle(next, session.kind === "code" ? "code" : "cowork") ? null : next;
 }
 
 function uniqueStrings(values: unknown): string[] {
@@ -289,7 +312,7 @@ export class LocalSessionStore {
     const session: LocalSession = {
       id,
       sessionId: id,
-      title: input.title ?? titleFromPrompt(prompt),
+      title: input.title ?? titleFromPrompt(prompt, kind === "code" ? "code" : "cowork"),
       kind,
       sessionKind,
       createdAt: timestamp,
@@ -395,10 +418,25 @@ export class LocalSessionStore {
     session.isRunning = isRunning;
     session.stopped = !isRunning && session.stopped ? session.stopped : false;
     session.runtime = { ...(session.runtime ?? { kind: "local" }), ...runtime } as LocalSessionRuntime;
+    // When a turn finishes, promote placeholder titles from the first user prompt (list + header parity).
+    if (!isRunning && isPlaceholderSessionTitle(session.title, session.kind === "code" ? "code" : "cowork")) {
+      const derived = titleFromSessionMessages(session);
+      if (derived) session.title = derived;
+    }
     session.updatedAt = timestamp;
     session.lastActivityAt = timestamp;
     this.save();
     return session;
+  }
+
+  /** Optional explicit title refresh after summarize / transcript settle. */
+  refreshTitleFromMessages(id: string): LocalSession | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if (!isPlaceholderSessionTitle(session.title, session.kind === "code" ? "code" : "cowork")) return session;
+    const derived = titleFromSessionMessages(session);
+    if (!derived) return session;
+    return this.update(id, { title: derived });
   }
 
   setCliSessionId(id: string, cliSessionId: string): LocalSession | null {
