@@ -188,10 +188,16 @@ function createThirdPartyBootstrap(value: BootstrapPayload | undefined, accountS
   };
 }
 
-async function getBootstrap(options: Custom3pApiOptions): Promise<BootstrapPayload> {
+async function getBootstrap(
+  options: Custom3pApiOptions,
+  runtimeAccountSettings: Record<string, unknown> = {},
+): Promise<BootstrapPayload> {
   const value = typeof options.bootstrap === "function" ? await options.bootstrap() : options.bootstrap;
-  const accountSettings = options.readAccountSettings ? await options.readAccountSettings() : {};
-  return createThirdPartyBootstrap(value, accountSettings, options.installId ?? DEFAULT_INSTALL_ID);
+  const persisted = options.readAccountSettings ? await options.readAccountSettings() : {};
+  // Official personal settings mutate account.settings via PATCH /api/account/settings and
+  // identity via PUT /api/account. Runtime handler state must win over disk defaults so
+  // bootstrap reflects in-session updates (c0db37792 profile + cc989143e PR settings).
+  return createThirdPartyBootstrap(value, { ...persisted, ...runtimeAccountSettings }, options.installId ?? DEFAULT_INSTALL_ID);
 }
 
 function matchEgressRule(hostname: string, pathname: string, options: Custom3pApiOptions) {
@@ -227,11 +233,7 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
     accountSettings = updater(await readAccountSettings());
     return accountSettings;
   };
-  const currentBootstrap = async () => createThirdPartyBootstrap(
-    typeof options.bootstrap === "function" ? await options.bootstrap() : options.bootstrap,
-    await readAccountSettings(),
-    installId,
-  );
+  const currentBootstrap = async () => getBootstrap(options, accountSettings);
 
   return async function handleCustom3pApi(request: Request): Promise<Response | undefined> {
     const url = new URL(request.url);
@@ -254,9 +256,10 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
       }
     }
 
-    if (pathname === "/api/bootstrap" || pathname.endsWith("/app_start")) return json(await getBootstrap(options));
-    if (pathname.startsWith("/api/bootstrap/") && pathname.endsWith("/system_prompts")) return json((await getBootstrap(options)).system_prompts ?? {});
+    if (pathname === "/api/bootstrap" || pathname.endsWith("/app_start")) return json(await currentBootstrap());
+    if (pathname.startsWith("/api/bootstrap/") && pathname.endsWith("/system_prompts")) return json((await currentBootstrap()).system_prompts ?? {});
     if (pathname === "/api/account") {
+      if (request.method === "GET") return json(await currentBootstrap());
       if (request.method !== "PUT") return new Response(null, { status: 405 });
       const body = await request.json().catch(() => ({})) as Record<string, unknown>;
       const next = await writeAccountSettings((current) => ({
@@ -267,21 +270,31 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
           ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
         },
       }));
-      return json(createThirdPartyBootstrap(typeof options.bootstrap === "function" ? await options.bootstrap() : options.bootstrap, next, installId));
+      return json(await getBootstrap(options, next));
     }
     if (pathname === "/api/account_profile") {
       const profile = ((await readAccountSettings()).__account_profile ?? {}) as Record<string, unknown>;
       if (request.method === "GET") return json({ locale: null, ...profile });
-      if (request.method !== "PUT") return new Response(null, { status: 405 });
+      if (request.method !== "PUT" && request.method !== "PATCH") return new Response(null, { status: 405 });
       const body = await request.json().catch(() => ({})) as Record<string, unknown>;
       await writeAccountSettings((current) => ({
         ...current,
         __account_profile: { ...((current.__account_profile ?? {}) as Record<string, unknown>), ...body },
+        // Official profile fields (avatar / work_function / conversation_preferences) also surface on account.settings.
+        ...Object.fromEntries(
+          Object.entries(body).filter(([key]) =>
+            key === "avatar" || key === "work_function" || key === "conversation_preferences",
+          ),
+        ),
       }));
       return emptyObject();
     }
     if (pathname === "/api/account/settings") {
-      if (request.method !== "PATCH") return new Response(null, { status: 405 });
+      if (request.method === "GET") {
+        const settings = await readAccountSettings();
+        return json(Object.fromEntries(Object.entries(settings).filter(([key]) => !key.startsWith("__"))));
+      }
+      if (request.method !== "PATCH" && request.method !== "PUT") return new Response(null, { status: 405 });
       const body = await request.json().catch(() => ({})) as Record<string, unknown>;
       await writeAccountSettings((current) => ({
         ...current,
