@@ -152,6 +152,19 @@ export function registerCoworkSessionsHandlers(context: IpcHandlerContext): void
     {
       ...createCoworkSessionHandlers(context.localAgentModeSessions),
       ...createCoworkSessionWorkspaceHandlers(context),
+      // Official Dispatch Ht (cc989143e): Xe.get/setSessionsBridgeEnabled on LocalAgentModeSessions.
+      getSessionsBridgeEnabled: async () => {
+        const prefs = context.settings.getPreferences();
+        return prefs.sessionsBridgeEnabled !== false;
+      },
+      setSessionsBridgeEnabled: async (_event, enabled) => {
+        context.settings.setPreference("sessionsBridgeEnabled", enabled !== false);
+        return true;
+      },
+      sessionsBridgeStatus_$store$_getState: async () => {
+        const enabled = context.settings.getPreferences().sessionsBridgeEnabled !== false;
+        return { enabled, status: enabled ? "ready" : "disabled" };
+      },
     },
     "claude.web.LocalAgentModeSessions",
   );

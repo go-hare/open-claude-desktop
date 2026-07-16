@@ -78,3 +78,35 @@ it("persists identity + profile fields through PUT account and account_profile",
   expect(payload.account.settings.work_function).toBe("Engineering");
   expect(payload.account.settings.conversation_preferences).toBe("Be concise");
 });
+
+it("persists preview_feature_uses_artifacts and browser_extension_settings on account/settings", async () => {
+  const handle = createCustom3pApiHandler({ installId: "99999999-9999-4999-8999-999999999999", ionDistRoot: process.cwd() });
+  const patch = await handle(
+    new Request("app://localhost/api/account/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        preview_feature_uses_artifacts: false,
+        browser_extension_settings: {
+          enabled: true,
+          default_domain_policy: "block",
+          allowed_domains: ["example.com"],
+          blocked_domains: [],
+        },
+      }),
+    }),
+  );
+  expect(patch?.status).toBe(202);
+
+  const bootstrap = await handle(new Request("app://localhost/api/bootstrap"));
+  const payload = (await bootstrap?.json()) as {
+    account: { settings: Record<string, unknown> };
+  };
+  expect(payload.account.settings.preview_feature_uses_artifacts).toBe(false);
+  expect(payload.account.settings.browser_extension_settings).toEqual({
+    enabled: true,
+    default_domain_policy: "block",
+    allowed_domains: ["example.com"],
+    blocked_domains: [],
+  });
+});

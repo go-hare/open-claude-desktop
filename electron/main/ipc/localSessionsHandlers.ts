@@ -1119,8 +1119,15 @@ function createSessionHandlers(
       return id ? toBridgeSessions(store.getSessionsForScheduledTask(id)) : [];
     },
     getSupportedCommands: async (_event, request) => getSupportedCommands(store, asObject(request)),
-    getSessionsBridgeEnabled: async () => true,
-    sessionsBridgeStatus_$store$_getState: async () => ({ enabled: true, status: "ready" }),
+    getSessionsBridgeEnabled: async () => {
+      const prefs = asObject(context.settings.getPreferences());
+      return prefs.sessionsBridgeEnabled !== false;
+    },
+    sessionsBridgeStatus_$store$_getState: async () => {
+      const prefs = asObject(context.settings.getPreferences());
+      const enabled = prefs.sessionsBridgeEnabled !== false;
+      return { enabled, status: enabled ? "ready" : "disabled" };
+    },
     interactiveAuth_$store$_getState: async () => ({ status: "idle" }),
     getContextUsage: async (_event, id) => {
       const sessionId = asString(id);
@@ -1160,7 +1167,10 @@ function createSessionHandlers(
     setAvailableCodeModels: async () => true,
     setChromePermissionMode: async () => true,
     setDraftSessionFolders: async () => true,
-    setSessionsBridgeEnabled: async () => true,
+    setSessionsBridgeEnabled: async (_event, enabled) => {
+      context.settings.setPreference("sessionsBridgeEnabled", enabled !== false);
+      return true;
+    },
     getBridgeConsent: async () => ({ granted: true }),
     deleteBridgeSession: async () => true,
     deleteBridgeAgentMemory: async () => true,
