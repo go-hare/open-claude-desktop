@@ -181,7 +181,11 @@ function assistantTextFromEvent(event: Record<string, unknown>): string | undefi
 
 function buildClaudeArgs(session: LocalSession, request: Record<string, unknown>, cliSessionId: string, resume: boolean, forkSession = false): string[] {
   const sessionRaw = asRecord(session);
+  // Official CLI (claude-code main.tsx): --include-partial-messages requires --print
+  // and --output-format=stream-json. Without --print, QueryEngine never yields
+  // stream_event deltas → UI only sees final assistant blobs (no typewriter).
   const args = [
+    "--print",
     "--output-format",
     "stream-json",
     "--verbose",
@@ -253,6 +257,13 @@ function writeJsonLine(child: ChildProcessWithoutNullStreams, value: Record<stri
   if (child.stdin.destroyed || child.stdin.writableEnded) return false;
   child.stdin.write(`${JSON.stringify(value)}\n`);
   return true;
+}
+
+/** Remove UI routing fields so they are not forwarded as tool updatedInput. */
+function stripBridgePermissionFields(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const { sessionId: _sessionId, session_id: _session_id, ...rest } = value as Record<string, unknown>;
+  return rest;
 }
 
 function parseJsonLine(line: string): Record<string, unknown> | null {
@@ -421,8 +432,36 @@ export class ClaudeCliRunner {
 
   stop(sessionId: string): boolean {
     const turn = this.active.get(sessionId);
-    if (!turn) return false;
-    turn.child.kill("SIGTERM");
+    // Always clear store running/pending even if the child already exited —
+    // otherwise the composer stays in isResponding forever (stuck stop button).
+    this.clearPendingPermissions(sessionId, turn);
+    this.clearPendingControlResponses(turn);
+    if (turn) {
+      try {
+        if (!turn.child.killed) {
+          // Prefer tree-kill style: SIGTERM the process group when possible.
+          if (typeof turn.child.pid === "number" && turn.child.pid > 0) {
+            try {
+              process.kill(-turn.child.pid, "SIGTERM");
+            } catch {
+              turn.child.kill("SIGTERM");
+            }
+          } else {
+            turn.child.kill("SIGTERM");
+          }
+        }
+      } catch {
+        try { turn.child.kill("SIGKILL"); } catch { /* ignore */ }
+      }
+      // If close is slow/missed, still drop active so a new turn can start.
+      // close handler is idempotent via this.active.get checks.
+      if (this.active.get(sessionId) === turn) {
+        this.active.delete(sessionId);
+      }
+    }
+    this.store.setRunning(sessionId, false, { kind: "claude-cli", finishedAt: nowIso() });
+    this.callbacks.onEvent({ type: "stopped", sessionId });
+    this.callbacks.onSessionUpdated(sessionId);
     return true;
   }
 
@@ -437,14 +476,34 @@ export class ClaudeCliRunner {
   }
 
   respondToToolPermission(sessionId: string, requestId: string, decision: ToolPermissionDecision, updatedInput?: unknown): Record<string, unknown> {
-    const turn = this.active.get(sessionId);
-    if (!turn) return { ok: false, error: "no_active_turn", requestId, decision };
+    // Resolve the live turn by requestId first — sessionId from the UI/store can lag or
+    // disagree with the active map key, which previously surfaced as no_active_turn while
+    // the CLI was still waiting on stdin for control_response.
+    let resolvedSessionId = sessionId;
+    let turn = this.active.get(sessionId);
+    if (!turn?.pendingPermissions.has(requestId)) {
+      for (const [id, activeTurn] of this.active) {
+        if (activeTurn.pendingPermissions.has(requestId)) {
+          turn = activeTurn;
+          resolvedSessionId = id;
+          break;
+        }
+      }
+    }
+    if (!turn) {
+      // Stale card: process already exited. Drop store pending so the UI can clear.
+      this.store.clearPendingToolPermission(sessionId, requestId);
+      if (resolvedSessionId !== sessionId) this.store.clearPendingToolPermission(resolvedSessionId, requestId);
+      return { ok: false, error: "no_active_turn", requestId, decision };
+    }
     if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
       return { ok: false, error: "permission_response_channel_unavailable", requestId, decision };
     }
     const pending = turn.pendingPermissions.get(requestId);
     if (!pending) return { ok: false, error: "permission_request_not_found", requestId, decision };
-    const response = this.permissionResponsePayload(pending, decision, updatedInput);
+    // UI may attach sessionId for routing — strip bridge-only keys before CLI payload.
+    const toolInput = stripBridgePermissionFields(updatedInput);
+    const response = this.permissionResponsePayload(pending, decision, toolInput);
     const ok = writeJsonLine(turn.child, {
       type: "control_response",
       response: {
@@ -454,7 +513,7 @@ export class ClaudeCliRunner {
       },
     });
     if (!ok) return { ok: false, error: "permission_response_channel_unavailable", requestId, decision };
-    this.resolvePendingPermission(sessionId, turn, pending);
+    this.resolvePendingPermission(resolvedSessionId, turn, pending);
     return { ok: true, requestId, decision };
   }
 
@@ -480,16 +539,43 @@ export class ClaudeCliRunner {
     }
 
     this.store.appendTranscriptEvent(sessionId, event);
+    // Official local agent path: stream_event + durable messages are pushed as
+    // {type:"message", message:event}. session_updated is metadata-only (title /
+    // folders / permissions) — do NOT fire it on every assistant NDJSON line or the
+    // renderer will thrash and look like "old messages refresh".
     this.callbacks.onEvent({ type: "message", sessionId, message: event });
 
     const turn = this.active.get(sessionId);
     const assistantText = assistantTextFromEvent(event);
     if (assistantText && (event.type !== "result" || !turn?.sawAssistantText)) {
+      // Keep a durable assistant row in session.messages (chat history). The raw CLI
+      // event is already in transcript via appendTranscriptEvent above; do not
+      // duplicate it into transcript again (includeTranscript=false).
       this.store.appendMessage(sessionId, "assistant", assistantText, event, false);
       if (turn) turn.sawAssistantText = true;
     }
-    if (event.type === "result" && turn && !turn.child.stdin.destroyed && !turn.child.stdin.writableEnded) turn.child.stdin.end();
-    if (event.type !== "stream_event") this.callbacks.onSessionUpdated(sessionId);
+    // Never close stdin while a can_use_tool control_request is outstanding — that
+    // kills the CLI mid-approval and the UI then gets no_active_turn on Allow/Deny.
+    if (
+      event.type === "result"
+      && turn
+      && turn.pendingPermissions.size === 0
+      && !turn.child.stdin.destroyed
+      && !turn.child.stdin.writableEnded
+    ) {
+      turn.child.stdin.end();
+    }
+    // session_updated only for lifecycle/meta (not each assistant/user content line).
+    // stream_event never; assistant/user content is already onEvent(message).
+    const eventType = stringValue(event.type);
+    if (
+      eventType
+      && eventType !== "stream_event"
+      && eventType !== "assistant"
+      && eventType !== "user"
+    ) {
+      this.callbacks.onSessionUpdated(sessionId);
+    }
   }
 
   private sendControlRequest(turn: ActiveTurn, request: Record<string, unknown>): Promise<unknown | null> {
@@ -517,7 +603,8 @@ export class ClaudeCliRunner {
     const cliSessionId = session.cliSessionId;
     if (!cliSessionId) return Promise.resolve(null);
     const executable = defaultClaudeExecutable();
-    const args = ["--print", ...buildClaudeArgs(session, {}, cliSessionId, true)];
+    // buildClaudeArgs already includes --print for stream_event partials.
+    const args = buildClaudeArgs(session, {}, cliSessionId, true);
     const cwd = resolveCwd(session);
     const requestId = randomUUID();
 
@@ -618,25 +705,41 @@ export class ClaudeCliRunner {
     this.callbacks.onSessionUpdated(sessionId);
   }
 
+  /**
+   * Official PermissionPromptToolResultSchema + ion-dist Mme:
+   *   deny  → { behavior:"deny", message }
+   *   allow → { behavior:"allow", updatedInput: Record }  ({} means "use original")
+   *   always → allow + updatedPermissions (CLI suggestions preferred)
+   * Optional: toolUseID, decisionClassification, interrupt (deny only).
+   */
   private permissionResponsePayload(pending: LocalToolPermissionRequest, decision: ToolPermissionDecision, updatedInput?: unknown): Record<string, unknown> {
+    // Prefer original pending.input when UI sends empty/routing-only payload.
+    const fromUi = asRecord(updatedInput);
+    const fromPending = asRecord(pending.input);
+    const inputKeys = Object.keys(fromUi).filter((key) => key !== "_feedbackMessage");
+    const input = inputKeys.length > 0 ? fromUi : fromPending;
     if (decision === "deny") {
-      const feedback = stringValue(asRecord(updatedInput)._feedbackMessage);
+      const feedback = stringValue(fromUi._feedbackMessage) ?? stringValue(input._feedbackMessage);
       return {
         behavior: "deny",
-        message: feedback ? `User rejected ${pending.toolName}: ${feedback}` : `User rejected ${pending.toolName}`,
-        interrupt: !feedback,
-        decisionClassification: "user_reject",
-        toolUseID: pending.toolUseId,
+        message: feedback ? `User rejected ${pending.toolName}: ${feedback}` : "Denied by user",
+        ...(pending.toolUseId ? { toolUseID: pending.toolUseId } : {}),
       };
     }
-    const response: Record<string, unknown> = {
+    const body: Record<string, unknown> = {
       behavior: "allow",
-      updatedInput: updatedInput ?? pending.input,
-      decisionClassification: decision === "always" ? "user_permanent" : "user_temporary",
-      toolUseID: pending.toolUseId,
+      // Schema requires a record; empty object → CLI falls back to original tool input.
+      updatedInput: input && typeof input === "object" ? input : {},
     };
-    if (decision === "always") response.updatedPermissions = pending.suggestions;
-    return response;
+    if (pending.toolUseId) body.toolUseID = pending.toolUseId;
+    if (decision === "always") {
+      if (Array.isArray(pending.suggestions) && pending.suggestions.length > 0) {
+        body.updatedPermissions = pending.suggestions;
+      }
+      // Do not invent replaceRules when CLI sent no suggestions — malformed updates
+      // are ignored, but empty is safer than a wrong rule shape.
+    }
+    return body;
   }
 
   private writeControlError(sessionId: string, requestId: string | undefined, message: string): void {

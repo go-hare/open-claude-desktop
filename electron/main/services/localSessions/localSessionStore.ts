@@ -149,18 +149,50 @@ function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
-function messageIdFromRaw(raw: unknown): string | undefined {
-  const messageUuid = asRecord(raw).messageUuid;
-  return typeof messageUuid === "string" && messageUuid.length > 0 ? messageUuid : undefined;
+function messageIdFromRaw(raw: unknown, role?: LocalSessionMessage["role"]): string | undefined {
+  const envelope = asRecord(raw);
+  // Prefer explicit bridge uuid, then Anthropic message.id for assistants (official eke key).
+  // Outer CLI NDJSON `uuid` is per event and must not mint a new durable row per partial.
+  const nested = asRecord(envelope.message);
+  const nestedInRaw = asRecord(asRecord(envelope.raw).message);
+  const anthropicId =
+    (typeof nested.id === "string" && nested.id.length > 0 ? nested.id : undefined)
+    ?? (typeof nestedInRaw.id === "string" && nestedInRaw.id.length > 0 ? nestedInRaw.id : undefined)
+    ?? (typeof envelope.message_id === "string" && envelope.message_id.length > 0 ? envelope.message_id : undefined);
+  if ((role === "assistant" || envelope.type === "assistant" || nested.role === "assistant") && anthropicId) {
+    return anthropicId;
+  }
+  const messageUuid = envelope.messageUuid;
+  if (typeof messageUuid === "string" && messageUuid.length > 0) return messageUuid;
+  if (typeof envelope.uuid === "string" && envelope.uuid.length > 0) return envelope.uuid;
+  if (typeof envelope.id === "string" && envelope.id.length > 0) return envelope.id;
+  return anthropicId;
 }
 
 function createMessage(role: LocalSessionMessage["role"], text: string, createdAt = nowIso(), raw?: unknown): LocalSessionMessage {
-  return { id: messageIdFromRaw(raw) ?? `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`, role, text, createdAt, raw };
+  return {
+    id: messageIdFromRaw(raw, role) ?? `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+    role,
+    text,
+    createdAt,
+    raw,
+  };
 }
 
 function transcriptMessage(sessionId: string, message: LocalSessionMessage): Record<string, unknown> {
-  const raw = asRecord(message.raw);
-  const userSelectedFiles = uniqueStrings(raw.userSelectedFiles);
+  // Prefer the original CLI/event envelope when present so eke sees nested Anthropic message.id
+  // and tool_use blocks instead of a flattened text-only reconstruction.
+  const original = asRecord(message.raw);
+  if (typeof original.type === "string" && (original.type === "assistant" || original.type === "user" || original.type === "system" || original.type === "result")) {
+    return {
+      ...original,
+      sessionId: typeof original.sessionId === "string" ? original.sessionId : sessionId,
+      uuid: typeof original.uuid === "string" ? original.uuid : message.id,
+      timestamp: typeof original.timestamp === "string" ? original.timestamp : message.createdAt,
+      text: typeof original.text === "string" ? original.text : message.text,
+    };
+  }
+  const userSelectedFiles = uniqueStrings(original.userSelectedFiles);
   return {
     type: message.role,
     sessionId,
@@ -172,16 +204,33 @@ function transcriptMessage(sessionId: string, message: LocalSessionMessage): Rec
   };
 }
 
+/**
+ * Official-aligned identity for transcript collapse (index-BELzQL5P eke / Lt stream replace):
+ * - Assistant: Anthropic `message.id` first so multi-emit NDJSON partials + durable chat row collapse.
+ * - Other roles: outer CLI uuid / id (each user event is unique).
+ * Also accepts LocalSessionMessage shape where the CLI envelope lives under `.raw`.
+ */
 function messageIdentity(value: unknown): string | undefined {
   if (typeof value === "string") return value;
   const raw = asRecord(value);
-  const nested = asRecord(raw.message);
-  return typeof raw.id === "string" ? raw.id
-    : typeof raw.uuid === "string" ? raw.uuid
-      : typeof raw.message_id === "string" ? raw.message_id
-        : typeof nested.id === "string" ? nested.id
-          : typeof nested.uuid === "string" ? nested.uuid
-            : undefined;
+  // LocalSessionMessage: { id, role, text, raw: cliEvent }
+  const nestedEnvelope = asRecord(raw.raw);
+  const envelope = typeof nestedEnvelope.type === "string" || nestedEnvelope.message ? nestedEnvelope : raw;
+  const nested = asRecord(envelope.message);
+  const role = typeof raw.role === "string" ? raw.role : typeof envelope.type === "string" ? envelope.type : typeof nested.role === "string" ? nested.role : undefined;
+  const anthropicId =
+    (typeof nested.id === "string" && nested.id.length > 0 ? nested.id : undefined)
+    ?? (typeof envelope.message_id === "string" && envelope.message_id.length > 0 ? envelope.message_id : undefined);
+  if ((role === "assistant" || envelope.type === "assistant") && anthropicId) {
+    return anthropicId;
+  }
+  if (typeof envelope.uuid === "string" && envelope.uuid.length > 0) return envelope.uuid;
+  if (typeof envelope.id === "string" && envelope.id.length > 0) return envelope.id;
+  if (typeof raw.uuid === "string" && raw.uuid.length > 0) return raw.uuid;
+  if (typeof raw.id === "string" && raw.id.length > 0) return raw.id;
+  if (anthropicId) return anthropicId;
+  if (typeof nested.uuid === "string" && nested.uuid.length > 0) return nested.uuid;
+  return undefined;
 }
 
 function timestampValue(value: unknown): string | undefined {
@@ -192,6 +241,34 @@ function timestampValue(value: unknown): string | undefined {
       : typeof nested.createdAt === "string" ? nested.createdAt
         : typeof nested.timestamp === "string" ? nested.timestamp
           : undefined;
+}
+
+/** Prefer the event with richer assistant content when collapsing by Anthropic message.id. */
+function preferRicherTranscriptEvent(prev: unknown, next: unknown): unknown {
+  const prevScore = transcriptEventRichness(prev);
+  const nextScore = transcriptEventRichness(next);
+  return nextScore >= prevScore ? next : prev;
+}
+
+function transcriptEventRichness(value: unknown): number {
+  const raw = asRecord(value);
+  const nested = asRecord(raw.message);
+  const content = nested.content ?? raw.content;
+  if (Array.isArray(content)) {
+    // Prefer full content-block arrays (tools + text) over plain text.
+    let score = content.length * 1000;
+    for (const block of content) {
+      const record = asRecord(block);
+      const type = typeof record.type === "string" ? record.type : "";
+      if (type === "tool_use") score += 500;
+      if (type === "text" && typeof record.text === "string") score += record.text.length;
+      if (type === "thinking" && typeof record.thinking === "string") score += record.thinking.length;
+    }
+    return score;
+  }
+  if (typeof content === "string") return content.length;
+  if (typeof raw.text === "string") return raw.text.length;
+  return 0;
 }
 
 function sliceThroughMessageId<T>(items: T[] | undefined, messageId?: string): T[] {
@@ -285,7 +362,46 @@ export class LocalSessionStore {
 
   getTranscript(id: string): unknown[] {
     const session = this.sessions.get(id);
-    return session?.transcript?.length ? session.transcript : session?.messages ?? [];
+    if (!session) return [];
+    // transcript is the raw CLI event log and includes stream_event noise. Chat UI must not
+    // treat a stream-only log as the full history — otherwise durable assistants that only
+    // live in session.messages disappear mid-stream ("new wipes old").
+    const eventLog = Array.isArray(session.transcript) ? session.transcript : [];
+    const durable = Array.isArray(session.messages) ? session.messages : [];
+    const durableEvents = eventLog.filter((event) => {
+      const type = asRecord(event).type;
+      return type !== "stream_event";
+    });
+    if (durableEvents.length === 0) {
+      return durable.map((message) => transcriptMessage(session.id, message));
+    }
+    // Collapse multi-emit assistants by Anthropic message.id (official eke expects one row).
+    // Prefer the richest envelope (longer text / array content) when identities collide.
+    const collapsed: unknown[] = [];
+    const indexByIdentity = new Map<string, number>();
+    const putEvent = (event: unknown) => {
+      const identity = messageIdentity(event);
+      if (!identity) {
+        collapsed.push(event);
+        return;
+      }
+      const existingIndex = indexByIdentity.get(identity);
+      if (existingIndex === undefined) {
+        indexByIdentity.set(identity, collapsed.length);
+        collapsed.push(event);
+        return;
+      }
+      const prev = collapsed[existingIndex];
+      collapsed[existingIndex] = preferRicherTranscriptEvent(prev, event);
+    };
+    for (const event of durableEvents) putEvent(event);
+    // Back-fill durable-only rows (optimistic user / appendMessage-only) missing from event log.
+    for (const message of durable) {
+      const identity = messageIdentity(message) ?? message.id;
+      if (identity && indexByIdentity.has(identity)) continue;
+      putEvent(transcriptMessage(session.id, message));
+    }
+    return collapsed;
   }
 
   getSessionsForScheduledTask(scheduledTaskId: string): LocalSession[] {
@@ -388,10 +504,39 @@ export class LocalSessionStore {
     if (!session) return null;
     const timestamp = nowIso();
     const message = createMessage(role, text, timestamp, raw);
-    session.messages.push(message);
+    // Official path keeps one durable assistant row per Anthropic message.id.
+    // Prefer content-block richness (tools + text) over plain text.length so a longer
+    // text-only envelope cannot wipe a tool_use / thinking-bearing row.
+    const identity = messageIdentity(message) ?? message.id;
+    const existingIndex = session.messages.findIndex((item) => (messageIdentity(item) ?? item.id) === identity);
+    if (existingIndex >= 0) {
+      const existing = session.messages[existingIndex]!;
+      const preferIncoming = transcriptEventRichness(message) >= transcriptEventRichness(existing);
+      session.messages[existingIndex] = preferIncoming
+        ? { ...message, createdAt: existing.createdAt }
+        : {
+            ...existing,
+            // Keep richer raw envelope when incoming is poorer structure.
+            raw: existing.raw ?? message.raw,
+            text: (existing.text?.length ?? 0) >= (message.text?.length ?? 0) ? existing.text : message.text,
+          };
+    } else {
+      session.messages.push(message);
+    }
     if (includeTranscript) {
       session.transcript ??= [];
-      session.transcript.push(raw ?? transcriptMessage(session.id, message));
+      const event = raw ?? transcriptMessage(session.id, message);
+      const eventIdentity = messageIdentity(event);
+      if (eventIdentity) {
+        const transcriptIndex = session.transcript.findIndex((item) => messageIdentity(item) === eventIdentity);
+        if (transcriptIndex >= 0) {
+          session.transcript[transcriptIndex] = preferRicherTranscriptEvent(session.transcript[transcriptIndex], event);
+        } else {
+          session.transcript.push(event);
+        }
+      } else {
+        session.transcript.push(event);
+      }
     }
     session.updatedAt = timestamp;
     session.lastActivityAt = timestamp;
@@ -506,7 +651,18 @@ export class LocalSessionStore {
   }
 
   stop(id: string): boolean {
-    return Boolean(this.update(id, { stopped: true }));
+    // Official LocalSessions.stop ends the turn: both stopped + not running.
+    // Leaving isRunning=true keeps the composer stop button stuck (isResponding).
+    const session = this.sessions.get(id);
+    if (!session) return false;
+    session.stopped = true;
+    session.isRunning = false;
+    session.pendingToolPermissions = [];
+    session.updatedAt = nowIso();
+    session.lastActivityAt = session.updatedAt;
+    this.sessions.set(id, session);
+    this.save();
+    return true;
   }
 
   fork(id: string, messageId?: string): LocalSession | null {
