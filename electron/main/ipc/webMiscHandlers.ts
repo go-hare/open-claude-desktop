@@ -78,16 +78,20 @@ async function fetchMentionOptions(context: IpcHandlerContext, focusedCwd: strin
       return !needle || label.toLowerCase().includes(needle) || path.basename(file.path).toLowerCase().includes(needle);
     })
     .slice(0, 50)
-    .map((file) => ({
-      id: file.path,
-      label: path.basename(file.path),
-      description: relativeLabel(file.root, file.path),
-      category: path.basename(file.root) || "Files",
-      icon: "file",
-      metadata: { path: file.path },
-      providerId: "ccd-files",
-      renderedText: relativeLabel(file.root, file.path),
-    }));
+    .map((file) => {
+      const relative = relativeLabel(file.root, file.path);
+      // Official QC (c11959232): id "file-${absPath}", metadata JSON with relative path.
+      return {
+        id: `file-${file.path}`,
+        label: path.basename(file.path),
+        description: relative,
+        category: path.basename(file.root) || "Files",
+        icon: "file",
+        metadata: JSON.stringify({ path: relative, isDirectory: false }),
+        providerId: "ccd-files",
+        renderedText: relative,
+      };
+    });
 }
 
 async function searchFileContents(context: IpcHandlerContext, focusedCwd: string | null, query: unknown) {

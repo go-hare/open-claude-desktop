@@ -259,7 +259,12 @@ function writeJsonLine(child: ChildProcessWithoutNullStreams, value: Record<stri
   return true;
 }
 
-/** Remove UI routing fields so they are not forwarded as tool updatedInput. */
+/**
+ * Remove UI routing fields so they are not forwarded as tool updatedInput.
+ * Official Mme (index-BELzQL5P) keeps `_targetMode` / `_feedbackMessage` on the payload:
+ * - ExitPlanMode once → updatedPermissions setMode from `_targetMode`
+ * - deny → message from `_feedbackMessage`
+ */
 function stripBridgePermissionFields(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const { sessionId: _sessionId, session_id: _session_id, ...rest } = value as Record<string, unknown>;
@@ -513,8 +518,77 @@ export class ClaudeCliRunner {
       },
     });
     if (!ok) return { ok: false, error: "permission_response_channel_unavailable", requestId, decision };
+    // Official shell: ExitPlanMode once with _targetMode also updates host session.permissionMode
+    // so Mode pill seeds match CLI setMode without waiting for the next status event.
+    if (decision === "once" && pending.toolName === "ExitPlanMode") {
+      // Mirror official Mme setMode defaulting: missing/unknown _targetMode → default.
+      const target = stringValue(asRecord(toolInput)._targetMode);
+      const mode = target === "acceptEdits" || target === "auto" || target === "bypassPermissions" || target === "default"
+        ? target
+        : "default";
+      const normalized = normalizePermissionMode(mode);
+      if (normalized) {
+        const current = this.store.getSession(resolvedSessionId);
+        if (current && current.permissionMode !== normalized) {
+          this.store.update(resolvedSessionId, { permissionMode: normalized });
+          this.callbacks.onSessionUpdated(resolvedSessionId);
+        }
+      }
+    }
     this.resolvePendingPermission(resolvedSessionId, turn, pending);
     return { ok: true, requestId, decision };
+  }
+
+  /**
+   * Official ion-dist Fke(e): extract live meta from stream events.
+   * - system init → model (+ permissionMode for bookkeeping only on cold seed)
+   * - system status → permissionMode (EnterPlanMode / ExitPlanMode / Shift+Tab / set_permission_mode)
+   *
+   * Host Mode pill seeds from session.permissionMode (`be(n.permissionMode)`).
+   * Only system/status may overwrite host permissionMode — system/init default must not
+   * snap user bypass/acceptEdits after menu selection or prior live status.
+   */
+  private syncLiveMetaFromCliEvent(sessionId: string, event: Record<string, unknown>): void {
+    if (stringValue(event.type) !== "system") return;
+    const subtype = stringValue(event.subtype);
+    if (subtype !== "init" && subtype !== "status") return;
+
+    const patch: Partial<LocalSession> = {};
+    if (subtype === "init") {
+      const model = stringValue(event.model);
+      if (model && model !== "<synthetic>") patch.model = model;
+      // Do not apply init.permissionMode onto host session — official Mode pill does not
+      // seed from Uke(init). Status is the live Fke signal for mode transitions.
+    } else if (subtype === "status") {
+      const permissionMode = normalizePermissionMode(stringValue(event.permissionMode));
+      if (permissionMode) patch.permissionMode = permissionMode;
+    }
+    if (Object.keys(patch).length === 0) return;
+
+    const current = this.store.getSession(sessionId);
+    if (!current) return;
+    if (patch.permissionMode && patch.permissionMode === current.permissionMode) delete patch.permissionMode;
+    if (patch.model && patch.model === current.model) delete patch.model;
+    if (Object.keys(patch).length === 0) return;
+    this.store.update(sessionId, patch);
+  }
+
+  /**
+   * Push permission mode into an active CLI turn via control_request set_permission_mode
+   * (print.ts). CLI onChangeAppState then enqueues system/status which we persist + fan out.
+   * When no turn is active, host store alone is enough — next runTurn uses --permission-mode.
+   */
+  async setPermissionMode(sessionId: string, mode: string): Promise<boolean> {
+    const permissionMode = normalizePermissionMode(mode);
+    if (!permissionMode) return false;
+    const turn = this.active.get(sessionId);
+    if (!turn) return false;
+    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) return false;
+    const response = await this.sendControlRequest(turn, {
+      subtype: "set_permission_mode",
+      mode: permissionMode,
+    });
+    return response !== null;
   }
 
   private handleStdoutLine(sessionId: string, line: string): void {
@@ -537,6 +611,10 @@ export class ClaudeCliRunner {
     if (event.type === "system" && stringValue(event.subtype) === "init" && Array.isArray(event.slash_commands)) {
       this.store.setSlashCommands(sessionId, event.slash_commands.filter((command): command is string => typeof command === "string" && command.length > 0));
     }
+    // Official ion Fke/Uke: system init/status carry permissionMode (and init model).
+    // CLI emits system:status whenever toolPermissionContext.mode changes (EnterPlanMode,
+    // ExitPlanMode, Shift+Tab, slash /plan, etc.). Persist so composer pill re-syncs.
+    this.syncLiveMetaFromCliEvent(sessionId, event);
 
     this.store.appendTranscriptEvent(sessionId, event);
     // Official local agent path: stream_event + durable messages are pushed as
@@ -706,33 +784,43 @@ export class ClaudeCliRunner {
   }
 
   /**
-   * Official PermissionPromptToolResultSchema + ion-dist Mme:
-   *   deny  → { behavior:"deny", message }
-   *   allow → { behavior:"allow", updatedInput: Record }  ({} means "use original")
+   * Official PermissionPromptToolResultSchema + ion-dist Mme / shell ExitPlanMode once:
+   *   deny  → { behavior:"deny", message }  (_feedbackMessage → official jme prefix)
+   *   allow → { behavior:"allow", updatedInput }  (keeps _targetMode)
+   *   ExitPlanMode once → updatedPermissions [{type:"setMode", mode, destination:"session"}]
    *   always → allow + updatedPermissions (CLI suggestions preferred)
-   * Optional: toolUseID, decisionClassification, interrupt (deny only).
    */
   private permissionResponsePayload(pending: LocalToolPermissionRequest, decision: ToolPermissionDecision, updatedInput?: unknown): Record<string, unknown> {
     // Prefer original pending.input when UI sends empty/routing-only payload.
     const fromUi = asRecord(updatedInput);
     const fromPending = asRecord(pending.input);
-    const inputKeys = Object.keys(fromUi).filter((key) => key !== "_feedbackMessage");
-    const input = inputKeys.length > 0 ? fromUi : fromPending;
+    // Routing-only keys already stripped; treat remaining UI object as authoritative when non-empty
+    // beyond host decision markers (official keeps _targetMode / _feedbackMessage on updatedInput).
+    const markerOnly = Object.keys(fromUi).every((key) => key === "_feedbackMessage" || key === "_targetMode");
+    const input = Object.keys(fromUi).length > 0 && !markerOnly ? fromUi : (Object.keys(fromUi).length > 0 ? { ...fromPending, ...fromUi } : fromPending);
     if (decision === "deny") {
       const feedback = stringValue(fromUi._feedbackMessage) ?? stringValue(input._feedbackMessage);
+      // Official Mme jme prefix when feedback present.
+      const denyPrefix = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\n";
       return {
         behavior: "deny",
-        message: feedback ? `User rejected ${pending.toolName}: ${feedback}` : "Denied by user",
+        message: feedback ? `${denyPrefix}${feedback}` : "Denied by user",
         ...(pending.toolUseId ? { toolUseID: pending.toolUseId } : {}),
       };
     }
     const body: Record<string, unknown> = {
       behavior: "allow",
       // Schema requires a record; empty object → CLI falls back to original tool input.
+      // Official Mme passes full updatedInput including _targetMode for ExitPlanMode.
       updatedInput: input && typeof input === "object" ? input : {},
     };
     if (pending.toolUseId) body.toolUseID = pending.toolUseId;
-    if (decision === "always") {
+    if (decision === "once" && pending.toolName === "ExitPlanMode") {
+      // Official Mme / shell: setMode from _targetMode (acceptEdits|auto|bypassPermissions|default).
+      const target = stringValue(input._targetMode);
+      const mode = target === "acceptEdits" || target === "auto" || target === "bypassPermissions" ? target : "default";
+      body.updatedPermissions = [{ type: "setMode", mode, destination: "session" }];
+    } else if (decision === "always") {
       if (Array.isArray(pending.suggestions) && pending.suggestions.length > 0) {
         body.updatedPermissions = pending.suggestions;
       }

@@ -1,5 +1,6 @@
 import { app, dialog, shell } from "electron";
 import { execFile, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import https from "node:https";
 import path from "node:path";
@@ -470,6 +471,11 @@ function cwdFromSession(store: LocalSessionStore, sessionIdOrCwd: unknown): stri
   return store.getAll(true).find((item) => item.cwd)?.cwd ?? process.cwd();
 }
 
+/** Official c119 vN / writeSessionFile use content hash for Edit enablement + conflict. */
+function contentHash(contents: string) {
+  return crypto.createHash("sha256").update(contents, "utf8").digest("hex");
+}
+
 async function readText(filePath: string) {
   const stat = await fs.stat(filePath);
   // Official file pane only opens files (c119 eS: dirs expand, files onPreview).
@@ -492,8 +498,14 @@ async function readText(filePath: string) {
   if (stat.size > TEXT_LIMIT_BYTES) {
     return { path: filePath, absPath: filePath, size: stat.size, tooLarge: true };
   }
-  // Success: plain utf8 string (legacy callers + official content consumers both accept).
-  return fs.readFile(filePath, "utf8");
+  // Official epitaxy-file payload: { contents, absPath, hash } so vN F (Edit) can enable.
+  const contents = await fs.readFile(filePath, "utf8");
+  return {
+    path: filePath,
+    absPath: filePath,
+    contents,
+    hash: contentHash(contents),
+  };
 }
 
 async function listDirectory(target: string) {
@@ -792,8 +804,13 @@ function applyPlanEdit(content: string, input: Record<string, unknown>): string 
   return index >= 0 ? `${content.slice(0, index)}${newString}${content.slice(index + oldString.length)}` : content;
 }
 
+/**
+ * Official XN (c11959232): writeEdits ?? exitPlan — Write/Edit/MultiEdit under first
+ * `/.claude/plans/` path preferred over ExitPlanMode input.plan.
+ */
 function planFromTranscript(transcript: unknown[]): { content?: string; path?: string } | null {
-  let content: string | undefined;
+  let exitPlan: string | undefined;
+  let writeEdits: string | undefined;
   let planPath: string | undefined;
   for (const entry of transcript) {
     const raw = asObject(entry);
@@ -802,19 +819,20 @@ function planFromTranscript(transcript: unknown[]): { content?: string; path?: s
       const tool = planContentItem(item);
       if (!tool) continue;
       if (tool.name === "ExitPlanMode") {
-        content = asString(tool.input.plan) ?? content;
+        exitPlan = asString(tool.input.plan) ?? exitPlan;
         continue;
       }
       const filePath = asString(tool.input.file_path) ?? asString(tool.input.filePath);
       if (!filePath || !filePath.replace(/\\/g, "/").includes("/.claude/plans/")) continue;
       planPath ??= filePath;
-      if (tool.name === "Write") content = asString(tool.input.content) ?? content;
-      else if (tool.name === "Edit" && content !== undefined) content = applyPlanEdit(content, tool.input);
-      else if (tool.name === "MultiEdit" && Array.isArray(tool.input.edits) && content !== undefined) {
-        for (const edit of tool.input.edits) content = applyPlanEdit(content, asObject(edit));
+      if (tool.name === "Write") writeEdits = asString(tool.input.content) ?? writeEdits;
+      else if (tool.name === "Edit" && writeEdits !== undefined) writeEdits = applyPlanEdit(writeEdits, tool.input);
+      else if (tool.name === "MultiEdit" && Array.isArray(tool.input.edits) && writeEdits !== undefined) {
+        for (const edit of tool.input.edits) writeEdits = applyPlanEdit(writeEdits, asObject(edit));
       }
     }
   }
+  const content = writeEdits ?? exitPlan;
   return content || planPath ? { content, path: planPath } : null;
 }
 
@@ -1137,11 +1155,47 @@ function createSessionHandlers(
     getCodeStats: async (_event, cwdOrSession) => (cwdOrSession ? getWorkspaceCodeStats(cwdFromSession(store, cwdOrSession)) : getSessionUsageCodeStats(store)),
     getDefaultEffort: async () => "medium",
     getEffort: async (_event, id) => (asString(id) ? store.getSession(asString(id)!)?.effort ?? "medium" : "medium"),
-    setEffort: async (_event, id, effort) => toBridgeSession(asString(id) ? store.update(asString(id)!, { effort: String(effort ?? "medium") }) : null),
+    setEffort: async (_event, id, effort) => {
+      const sessionId = asString(id);
+      const session = sessionId ? store.update(sessionId, { effort: String(effort ?? "medium") }) : null;
+      // Official config changes fan out on session_updated so composer triggers re-sync without reload.
+      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      return toBridgeSession(session);
+    },
     getDefaultPermissionMode: async () => "default",
     getPermissionMode: async (_event, id) => (asString(id) ? store.getSession(asString(id)!)?.permissionMode ?? "default" : "default"),
-    setPermissionMode: async (_event, id, mode) => toBridgeSession(asString(id) ? store.update(asString(id)!, { permissionMode: String(mode ?? "default") }) : null),
-    setModel: async (_event, id, model) => toBridgeSession(asString(id) ? store.update(asString(id)!, { model: String(model ?? "") }) : null),
+    setPermissionMode: async (_event, id, mode) => {
+      const sessionId = asString(id);
+      const nextMode = String(mode ?? "default");
+      // Persist host first so Mode pill / next --permission-mode see the value even if
+      // the active CLI turn rejects control_request (no turn / stdin closed).
+      const session = sessionId ? store.update(sessionId, { permissionMode: nextMode }) : null;
+      if (sessionId && session) {
+        // Active turn: official print.ts set_permission_mode → system/status fan-out.
+        // Best-effort — store update above is authoritative for UI + next spawn.
+        try {
+          await sessionRunner.setPermissionMode(sessionId, nextMode);
+        } catch {
+          // ignore — host mode still updated
+        }
+        const bridged = toBridgeSession(session);
+        dispatchSessionEvent("session_updated", sessionId, session);
+        // Official ion Mode pill: permission_mode_changed → be(s.permissionMode).
+        dispatchBridgeSessionEvent({
+          type: "permission_mode_changed",
+          sessionId,
+          permissionMode: nextMode,
+          session: bridged,
+        });
+      }
+      return toBridgeSession(session);
+    },
+    setModel: async (_event, id, model) => {
+      const sessionId = asString(id);
+      const session = sessionId ? store.update(sessionId, { model: String(model ?? "") }) : null;
+      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      return toBridgeSession(session);
+    },
     setVisibility: async (_event, id, visibility) => toBridgeSession(asString(id) ? store.update(asString(id)!, { visibility: String(visibility ?? "") }) : null),
     setFocusedSession: async () => true,
     setFastMode: async () => true,
@@ -1278,13 +1332,26 @@ function createSessionHandlers(
       await shell.openPath(store.getOutputsDir());
       return true;
     },
+    // Official XC (c11959232 ZC): fe.listSessionDirectory(sessionId, absPath)
+    // where absPath is cwd/worktree (or expanded branch). Not session outputs dir.
     listSessionDirectory: async (_event, id, relative = ".") => {
       const sessionId = asString(id);
       if (!sessionId) return [];
-      const target = resolveSessionFile(store, sessionId, String(relative ?? "."));
+      const rawPath = String(relative ?? ".");
+      let target: string | null = null;
+      if (path.isAbsolute(rawPath)) {
+        target = rawPath;
+      } else if (rawPath === "." || rawPath === "") {
+        target = cwdFromSession(store, sessionId) ?? sessionFileRoot(store, sessionId);
+      } else {
+        target = resolveSessionOrWorkspaceFile(store, sessionId, rawPath);
+      }
       if (!target) return [];
-      await fs.mkdir(target, { recursive: true });
-      return listDirectory(target);
+      try {
+        return await listDirectory(target);
+      } catch {
+        return [];
+      }
     },
     readSessionFile: async (_event, id, relative) => {
       const sessionId = asString(id);
@@ -1300,14 +1367,31 @@ function createSessionHandlers(
       const buffer = await fs.readFile(target);
       return `data:${mimeTypeForFile(target)};base64,${buffer.toString("base64")}`;
     },
-    writeSessionFile: async (_event, id, relative, content) => {
+    // Official fe.writeSessionFile(sessionId, absPath|rel, contents, expectedHash?)
+    // → { status: "ok"|"conflict"|"denied", hash?, currentHash? } (c119 vN / UI enum).
+    writeSessionFile: async (_event, id, relative, content, expectedHash) => {
       const sessionId = asString(id);
       if (!sessionId) return null;
-      const target = resolveSessionFile(store, sessionId, String(relative ?? "file.txt"));
-      if (!target) return null;
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, typeof content === "string" ? content : JSON.stringify(content, null, 2));
-      return target;
+      const target = resolveSessionOrWorkspaceFile(store, sessionId, String(relative ?? "file.txt"));
+      if (!target) return { status: "denied" as const };
+      const nextContents = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+      try {
+        const existing = await fs.readFile(target, "utf8").catch((error: NodeJS.ErrnoException) => {
+          if (error?.code === "ENOENT") return null;
+          throw error;
+        });
+        if (existing != null && expectedHash != null && String(expectedHash).length > 0) {
+          const current = contentHash(existing);
+          if (current !== String(expectedHash)) {
+            return { status: "conflict" as const, currentHash: current };
+          }
+        }
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.writeFile(target, nextContents);
+        return { status: "ok" as const, hash: contentHash(nextContents), absPath: target };
+      } catch {
+        return { status: "denied" as const };
+      }
     },
     pickSessionFile: async (_event, id) => {
       const sessionId = asString(id);

@@ -43,7 +43,7 @@ function runElectron() {
     CLAUDE_DESKTOP_MAIN_VIEW_URL: mainViewUrl,
     CLAUDE_DESKTOP_RESOURCES_ROOT: resourcesRoot,
   };
-  const child = spawn(process.execPath, [electronCli, ...electronArgs, "."], {
+  const child = spawn(process.execPath, [electronCli, "--remote-debugging-port=9223", "--remote-allow-origins=*", ...electronArgs, "."], {
     cwd: root,
     env,
     stdio: "inherit",

@@ -110,6 +110,23 @@ export function createDesktopWindow(options: DesktopWindowOptions): DesktopWindo
     syncTrafficLightPosition(mainWindow, mainView);
     options.onMainViewDomReady?.(mainView);
   });
+  // Stream paint diagnosis: log Va commit lengths from the renderer every 500ms.
+  const streamDiagInterval = setInterval(() => {
+    if (mainView.webContents.isDestroyed()) {
+      clearInterval(streamDiagInterval);
+      return;
+    }
+    mainView.webContents.executeJavaScript(`
+      (() => {
+        const d = window.__tileVaDiag;
+        if (!d || d.length === 0) return null;
+        const first = d[0]?.t ?? 0;
+        return { count: d.length, lastChars: d[d.length - 1]?.chars ?? 0, times: d.slice(-8).map(x => Math.round(x.t - first)) };
+      })()
+    `, true).then((result: unknown) => {
+      if (result) console.log("[stream-diag]", JSON.stringify(result));
+    }).catch(() => {});
+  }, 500);
   installNavigationGuards(mainView.webContents, mainWindow);
   installMainWindowEvents(mainWindow, mainView, findInPageView, coworkFilePreview, options);
 

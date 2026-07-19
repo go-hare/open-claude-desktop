@@ -865,30 +865,66 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         return { success: true, pluginId: record.id };
       },
     },
+    // Official lr (c11959232): listSources(cwd), attach(cwd, sessionName) → {sessionId,name,width,height}.
     FramebufferPreview: {
-      listSources: async () => {
+      listSources: async (_event, _cwd?: unknown) => {
         const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 320, height: 200 } });
         return sources.map((source) => ({
           id: source.id,
           name: source.name,
           displayId: source.display_id,
+          origin: source.display_id || source.id,
           appIcon: source.appIcon?.isEmpty() ? undefined : source.appIcon?.toDataURL(),
           thumbnail: source.thumbnail.isEmpty() ? undefined : source.thumbnail.toDataURL(),
         }));
       },
-      attach: async (_event, source) => {
-        framebufferSource = asObject(source);
-        events.framebufferSessionResized(String(framebufferSource.id ?? "default"), Number(framebufferSource.width ?? 0), Number(framebufferSource.height ?? 0));
-        return { attached: true, source: framebufferSource };
+      attach: async (_event, cwdOrSource: unknown, sessionName?: unknown) => {
+        // Official web: attach(cwd: string, sessionName: string).
+        // Legacy/stub: attach(source: object) still accepted.
+        if (typeof cwdOrSource === "string") {
+          const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 1, height: 1 } });
+          const primary = sources[0];
+          if (!primary) return null;
+          const name = asString(sessionName) || primary.name || "Screen";
+          const sessionId = `${cwdOrSource}::${name}`;
+          const width = 1280;
+          const height = 720;
+          framebufferSource = {
+            id: sessionId,
+            name,
+            width,
+            height,
+            sourceId: primary.id,
+            cwd: cwdOrSource,
+          };
+          events.framebufferSessionResized(sessionId, width, height);
+          return { sessionId, name, width, height, attached: true, source: framebufferSource };
+        }
+        framebufferSource = asObject(cwdOrSource);
+        const sessionId = String(framebufferSource.id ?? framebufferSource.sessionId ?? "default");
+        const width = Number(framebufferSource.width ?? 0) || 0;
+        const height = Number(framebufferSource.height ?? 0) || 0;
+        events.framebufferSessionResized(sessionId, width, height);
+        return {
+          sessionId,
+          name: asString(framebufferSource.name) ?? undefined,
+          width,
+          height,
+          attached: true,
+          source: framebufferSource,
+        };
       },
-      detach: async () => {
-        if (framebufferSource?.id) events.framebufferSessionFatal(String(framebufferSource.id), "detached");
+      detach: async (_event, _sessionId?: unknown) => {
+        // Official: detach is intentional unmount — do NOT emit sessionFatal
+        // (that event is for hard failures; Strict Mode remount + cleanup would
+        // otherwise race the next attach into the error UI).
         framebufferSource = null;
         return true;
       },
       requestFramePort: async () => {
+        // Full RFB frame MessagePort not wired in open-claude-desktop yet — UI canvas shell after attach.
         if (!framebufferSource) return { attached: false };
-        return { attached: true, source: framebufferSource };
+        return { attached: true, source: framebufferSource, sessionId: framebufferSource.id };
       },
       sendKey: async () => true,
       sendPointer: async () => true,

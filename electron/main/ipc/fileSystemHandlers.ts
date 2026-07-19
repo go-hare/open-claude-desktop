@@ -1,4 +1,5 @@
 import { app, dialog, nativeImage, shell } from "electron";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { recordOpenDocument } from "../services/openDocuments/openDocumentsStore";
@@ -222,11 +223,16 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
           size: stat.size,
         };
       }
+      const content = buffer.toString("utf8");
+      // Official epitaxy-file / vN Edit gate needs hash alongside content.
       return {
-        content: buffer.toString("utf8"),
+        content,
+        contents: content,
         path: target,
+        absPath: target,
         name: path.basename(target),
         size: stat.size,
+        hash: crypto.createHash("sha256").update(content, "utf8").digest("hex"),
       };
     },
     writeLocalFile: async (_event, filePathOrSessionId, encodedFilePathOrData, dataOrOptions, maybeOptions) => {
