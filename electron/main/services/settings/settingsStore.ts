@@ -23,6 +23,12 @@ type PersistedSettings = {
 
 /** Official AppPreferences defaults used by hYt Keep awake (keepAwakeEnabled always defined). */
 const DEFAULT_PREFERENCES: Record<string, unknown> = {
+  /**
+   * Official allowAllBrowserActions:!1 — toggled by xn from
+   * setChromePermissionMode(skip_all_permission_checks). Browser automation
+   * product residual; key is preference-only here.
+   */
+  allowAllBrowserActions: false,
   keepAwakeEnabled: false,
 };
 

@@ -1,5 +1,10 @@
 import { readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
+import {
+  COWORK_LOCAL_AGENT_MODE_SESSIONS_DIR,
+  resolveCoworkAutoMemoryDir,
+  type CoworkAutoMemorySessionIdentity,
+} from "./coworkAutoMemoryPaths";
 import { writeCoworkMetadataAtomically } from "./coworkSessionPersistenceWriter";
 import type {
   CoworkDetectedFile,
@@ -32,7 +37,8 @@ export type CoworkSessionPersistenceOptions = {
 };
 
 const defaultDebounceMs = 1_000;
-const storageDirectoryName = "local-agent-mode-sessions";
+/** Official Kb. */
+const storageDirectoryName = COWORK_LOCAL_AGENT_MODE_SESSIONS_DIR;
 
 function safeSegment(value: string, label: string): string {
   if (/^[a-zA-Z0-9_-]+$/.test(value)) return value;
@@ -72,16 +78,53 @@ function optionalMetadata(
 ): Partial<CoworkPersistedSessionMetadata> {
   return {
     approvedToolNames: session.approvedToolNames,
+    chromeAllowedDomains:
+      session.chromeAllowedDomains && session.chromeAllowedDomains.length > 0
+        ? [...session.chromeAllowedDomains]
+        : undefined,
+    chromePermissionMode: session.chromePermissionMode,
+    // Official saveSession writes chromePermsBeforeUnsupervised even when
+    // domains are empty/undefined (snapshot of current mode+domains).
+    chromePermsBeforeUnsupervised: session.chromePermsBeforeUnsupervised
+      ? {
+          mode: session.chromePermsBeforeUnsupervised.mode,
+          domains: session.chromePermsBeforeUnsupervised.domains
+            ? [...session.chromePermsBeforeUnsupervised.domains]
+            : undefined,
+        }
+      : undefined,
+    // Official saveSession: chromeTabGroupId:s.chromeTabGroupId
+    chromeTabGroupId: session.chromeTabGroupId,
+    // Official saveSession: cuAllowedApps:s.cuAllowedApps, cuGrantFlags:s.cuGrantFlags
+    cuAllowedApps: session.cuAllowedApps
+      ? session.cuAllowedApps.map((app) => ({ ...app }))
+      : undefined,
+    cuGrantFlags: session.cuGrantFlags
+      ? { ...session.cuGrantFlags }
+      : undefined,
     cliSessionId: session.cliSessionId,
+    egressAllowedDomains:
+      session.egressAllowedDomains && session.egressAllowedDomains.length > 0
+        ? [...session.egressAllowedDomains]
+        : undefined,
     enabledMcpTools: session.enabledMcpTools,
     error: session.error,
+    fileDeleteApprovedMounts:
+      session.fileDeleteApprovedMounts &&
+      session.fileDeleteApprovedMounts.length > 0
+        ? [...session.fileDeleteApprovedMounts]
+        : undefined,
     hostLoopMode: session.hostLoopMode,
     initialMessage: session.initialMessage,
     isAgentCompleted: session.isAgentCompleted,
     isStarred: session.isStarred,
+    memoryEnabled: session.memoryEnabled,
     model: session.model,
+    overrideLabel: session.overrideLabel,
+    otelConfig: session.otelConfig,
     parentSessionId: session.parentSessionId,
     pendingRewindTo: session.pendingRewindTo,
+    pendingSystemReminder: session.pendingSystemReminder,
     permissionMode: session.permissionMode,
     promptSuggestion: session.promptSuggestion,
     remoteMcpServersConfig: session.remoteMcpServersConfig,
@@ -91,6 +134,7 @@ function optionalMetadata(
     spaceIdSetBy: session.spaceIdSetBy,
     systemPrompt: session.systemPrompt,
     title: session.title,
+    titleSource: session.titleSource,
     userSelectedProjectUuids: session.userSelectedProjectUuids,
   };
 }
@@ -168,6 +212,16 @@ export class CoworkSessionPersistence {
 
   getAccountStorageDir(): string {
     return this.accountStorageDir;
+  }
+
+  /**
+   * Official LocalAgentModeSessionManager.getAutoMemoryDirForSession.
+   * Requires identity (accountStorageDir already scoped to account/org).
+   */
+  getAutoMemoryDirForSession(
+    session: CoworkAutoMemorySessionIdentity,
+  ): string | null {
+    return resolveCoworkAutoMemoryDir(this.accountStorageDir, session);
   }
 
   getSessionMetadataPath(session: SessionPathIdentity): string {

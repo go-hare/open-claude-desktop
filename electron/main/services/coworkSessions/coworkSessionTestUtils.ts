@@ -11,6 +11,7 @@ import type {
   CoworkSessionPersistencePort,
 } from "./coworkSessionManagerTypes";
 import type {
+  CoworkFlagSettings,
   CoworkPermissionMode,
   CoworkRuntimeQuery,
   CoworkSdkMessage,
@@ -20,6 +21,7 @@ import type {
 type MessageResolver = (result: IteratorResult<CoworkSdkMessage>) => void;
 
 export class TestCoworkQuery implements CoworkRuntimeQuery {
+  readonly flagSettings: CoworkFlagSettings[] = [];
   readonly models: string[] = [];
   readonly permissionModes: CoworkPermissionMode[] = [];
   closed = false;
@@ -27,6 +29,10 @@ export class TestCoworkQuery implements CoworkRuntimeQuery {
   private done = false;
   private readonly messages: CoworkSdkMessage[] = [];
   private readonly resolvers: MessageResolver[] = [];
+
+  async applyFlagSettings(settings: CoworkFlagSettings): Promise<void> {
+    this.flagSettings.push(settings);
+  }
 
   close(): void {
     this.closed = true;
@@ -75,6 +81,30 @@ export class TestCoworkPersistence implements CoworkSessionPersistencePort {
   readonly flushed: string[] = [];
   readonly saved: CoworkSessionRuntimeState[] = [];
   restored: CoworkSessionRuntimeState[] = [];
+  /**
+   * Optional inject for getOutputsDir / host-loop applyFlagSettings tests.
+   * When unset, getSessionStorageDir is undefined so createQuery stays
+   * sync-fast (existing manager tests race fire-and-forget start).
+   */
+  sessionStorageDir: string | null = null;
+  /** Populated only when sessionStorageDir is set (optional persistence API). */
+  getSessionStorageDir?: (
+    session: Pick<CoworkSessionRuntimeState, "sessionId" | "sessionType">,
+  ) => string;
+
+  constructor() {
+    const self = this;
+    Object.defineProperty(this, "getSessionStorageDir", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        if (!self.sessionStorageDir) return undefined;
+        return (
+          _session: Pick<CoworkSessionRuntimeState, "sessionId" | "sessionType">,
+        ) => self.sessionStorageDir as string;
+      },
+    });
+  }
 
   async deleteSession(session: CoworkSessionRuntimeState): Promise<void> {
     this.deleted.push(session.sessionId);
@@ -94,12 +124,20 @@ export class TestCoworkPersistence implements CoworkSessionPersistencePort {
 }
 
 class TestCoworkAccountContext extends CoworkAccountContext {
-  override getAccountDetails(): CoworkAccountDetails {
-    return {
+  private readonly accountDetails: CoworkAccountDetails;
+
+  constructor(details: Partial<CoworkAccountDetails> = {}) {
+    super();
+    this.accountDetails = {
       accountUuid: "account-1",
       emailAddress: "cowork@example.com",
       isLoggedOut: false,
+      ...details,
     };
+  }
+
+  override getAccountDetails(): CoworkAccountDetails {
+    return { ...this.accountDetails };
   }
 
   override getIdentity(): CoworkAccountIdentity {
@@ -111,8 +149,10 @@ class TestCoworkAccountContext extends CoworkAccountContext {
   }
 }
 
-export function createTestAccountContext(): CoworkAccountContext {
-  return new TestCoworkAccountContext();
+export function createTestAccountContext(
+  details: Partial<CoworkAccountDetails> = {},
+): CoworkAccountContext {
+  return new TestCoworkAccountContext(details);
 }
 
 export type CoworkManagerHarness = {

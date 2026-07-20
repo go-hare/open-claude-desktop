@@ -1,9 +1,22 @@
-import { app } from "electron";
+import { app, dialog, shell } from "electron";
+import { homedir } from "node:os";
 import { LocalSessionStore } from "../services/localSessions/localSessionStore";
 import { CoworkAccountContext } from "../services/coworkAccount/coworkAccountContext";
 import { loadCoworkBootstrapIdentity } from "../services/coworkAccount/coworkBootstrapIdentity";
 import { createCoworkHostLoopModeResolver } from "../services/coworkHostLoop/createCoworkHostLoopModeResolver";
 import { createCoworkAgentQueryFactory } from "../services/coworkRuntime/coworkAgentQueryFactory";
+import {
+  createWebContentsDirectoryDispatcher,
+  setCoworkDirectoryBridgeDispatcher,
+} from "../services/coworkRuntime/coworkMcpDirectoryBridge";
+import {
+  createWebContentsPluginSearchDispatcher,
+  setCoworkPluginSearchBridgeDispatcher,
+} from "../services/coworkRuntime/coworkPluginSearchBridge";
+import {
+  createWebContentsSkillsSlashDispatcher,
+  setCoworkSkillsSlashBridgeDispatcher,
+} from "../services/coworkRuntime/coworkSkillsSlashBridge";
 import { createCoworkTranscriptReader } from "../services/coworkRuntime/coworkTranscriptReader";
 import { FeatureStateStore } from "../services/featureState/featureStateStore";
 import { CoworkSessionManager } from "../services/coworkSessions/coworkSessionManager";
@@ -36,14 +49,33 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
   const resolveHostLoopMode = createCoworkHostLoopModeResolver({
     getForceDisableHostLoop: () => featureState.getBoolean("vmForceDisableHostLoop", "global", false),
   });
+  // Official mcpDirectoryBridge wPA + skills c9e + pluginSearchBridge I9e:
+  // reverse-RPC via LocalAgentModeSessions.onEvent.
+  const getMainWc = () => windows.mainView.webContents;
+  setCoworkDirectoryBridgeDispatcher(
+    createWebContentsDirectoryDispatcher(getMainWc),
+  );
+  setCoworkSkillsSlashBridgeDispatcher(
+    createWebContentsSkillsSlashDispatcher(getMainWc),
+  );
+  setCoworkPluginSearchBridgeDispatcher(
+    createWebContentsPluginSearchDispatcher(getMainWc),
+  );
+  // Official getSessionStorageDir for XL transcript/message path context.
+  let coworkPersistence: CoworkSessionPersistence | null = null;
+  // Shared SettingsStore so xn allowAllBrowserActions and AppPreferences IPC
+  // see the same preference bag (official Xo()/F_ preferences).
+  const settings = new SettingsStore();
   const localAgentModeSessions = new CoworkSessionManager({
     accountContext: coworkAccount,
-    createPersistence: (identity) =>
-      new CoworkSessionPersistence({
+    createPersistence: (identity) => {
+      coworkPersistence = new CoworkSessionPersistence({
         accountId: identity.accountUuid,
         orgId: identity.organizationUuid,
         userDataPath: app.getPath("userData"),
-      }),
+      });
+      return coworkPersistence;
+    },
     emit: (event) => {
       dispatchBridgeEvent(
         windows.mainView.webContents,
@@ -53,13 +85,78 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
         event,
       );
     },
+    // Official P4 for request_cowork_directory: openDirectory + createDirectory,
+    // title/message match dXe dialogTitle/dialogMessage.
+    pickDirectory: async () => {
+      const mainWindow = windows.mainWindow;
+      const dialogOptions = {
+        title: "Select Directory to Share",
+        message: "Select a directory to share with the agent",
+        defaultPath: homedir(),
+        properties: ["openDirectory", "createDirectory"] as Array<
+          "openDirectory" | "createDirectory"
+        >,
+      };
+      const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+        : await dialog.showOpenDialog(dialogOptions);
+      if (result.canceled || result.filePaths.length === 0) {
+        return { canceled: true as const };
+      }
+      return { canceled: false as const, path: result.filePaths[0]! };
+    },
+    // Official gA.shell.openPath for LocalAgentModeSessions.openOutputsDir.
+    // Ss Windows roaming residual not product-wired.
+    openPath: (target) => shell.openPath(target),
+    // Official gA.shell.showItemInFolder for transcript feedback iXi bundle.
+    showItemInFolder: (target) => {
+      shell.showItemInFolder(target);
+    },
+    // Official nB("downloads") residual — Electron app.getPath("downloads").
+    getDownloadsDir: () => app.getPath("downloads"),
+    // Official gA.app.getPath("logs") for J6e shareSession log tree.
+    getLogsDir: () => app.getPath("logs"),
+    // Official D7().appPath / homedir for S1/Qw share log scrub.
+    getAppPath: () => app.getAppPath(),
+    getScrubHomedir: () => homedir(),
+    // Official xn("allowAllBrowserActions", bool) via AppPreferences residual.
+    // Preference key exists in official defaults; do not invent browser automation.
+    setAllowAllBrowserActions: (allowed) => {
+      settings.setPreference("allowAllBrowserActions", allowed);
+      const mainView = windows.mainView?.webContents;
+      if (mainView && !mainView.isDestroyed()) {
+        dispatchBridgeEvent(
+          mainView,
+          "claude.settings",
+          "AppPreferences",
+          "preferencesChanged",
+          settings.getPreferences(),
+        );
+      }
+    },
+    // Official gi("allowAllBrowserActions") read for start chrome seed m.
+    getAllowAllBrowserActions: () =>
+      settings.getPreferences().allowAllBrowserActions === true,
+    // Official K2() from account isRaven — manager derives when inject omitted.
+    // Do not hardcode false; leave allowSkipAllOutsideUnsupervised unset.
     queryFactory: createCoworkAgentQueryFactory({
       onStderr: (chunk) => console.warn("[cowork-agent-sdk]", chunk.trimEnd()),
     }),
     resolveHostLoopMode: () => resolveHostLoopMode(),
     // Org sandbox policy source is unresolved until account/org payload is wired.
     requireCoworkFullVmSandbox: () => false,
-    transcriptReader: createCoworkTranscriptReader(),
+    // Official transcript load applies XL via buildVMPathContext.
+    transcriptReader: createCoworkTranscriptReader(
+      undefined,
+      undefined,
+      (session) => ({
+        // Official buildVMPathContext: storage + autoMemory (ZrA/Use/GL).
+        autoMemoryDir:
+          coworkPersistence?.getAutoMemoryDirForSession(session) ?? null,
+        sessionStorageDir:
+          coworkPersistence?.getSessionStorageDir(session) ?? null,
+      }),
+    ),
   });
   return {
     windows,
@@ -67,7 +164,7 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
     localSessions: new LocalSessionStore("code"),
     localAgentModeSessions,
     scheduledTasks: new ScheduledTaskStore(),
-    settings: new SettingsStore(),
+    settings,
   };
 }
 

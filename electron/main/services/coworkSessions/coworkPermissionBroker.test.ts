@@ -161,6 +161,55 @@ it("reports a request stalled after 300 seconds and clears the timer on finish",
   expect(onStalled).toHaveBeenCalledTimes(1);
 });
 
+it("fires onRequested after emit and onResponded with latency on user decision", async () => {
+  const onRequested = vi.fn();
+  const onResponded = vi.fn();
+  let now = 1_000;
+  const broker = new CoworkPermissionBroker({
+    createRequestId: requestIds("request-1"),
+    emit: () => undefined,
+    now: () => now,
+    onRequested,
+    onResponded,
+  });
+  const result = broker.requestPermission({
+    input: { path: "/tmp" },
+    sessionId: "session-1",
+    toolName: "Read",
+  });
+  expect(onRequested).toHaveBeenCalledWith(
+    expect.objectContaining({ requestId: "request-1", toolName: "Read" }),
+  );
+  now = 1_450;
+  broker.respondToToolPermission("request-1", "once");
+  await result;
+  expect(onResponded).toHaveBeenCalledWith(
+    expect.objectContaining({ requestId: "request-1" }),
+    "once",
+    450,
+  );
+});
+
+it("does not fire onResponded for non-user resolvePendingPermission", async () => {
+  const onResponded = vi.fn();
+  const broker = new CoworkPermissionBroker({
+    createRequestId: requestIds("request-1"),
+    emit: () => undefined,
+    onResponded,
+  });
+  const result = broker.requestPermission({
+    input: {},
+    sessionId: "session-1",
+    toolName: "Read",
+  });
+  broker.resolvePendingPermission("request-1", {
+    behavior: "deny",
+    message: "Turn ended",
+  });
+  await result;
+  expect(onResponded).not.toHaveBeenCalled();
+});
+
 it("denies internal requests by session or owner but leaves external requests pending", async () => {
   const broker = new CoworkPermissionBroker({
     createRequestId: requestIds("request-1", "request-2"),

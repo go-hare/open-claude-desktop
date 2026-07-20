@@ -7,7 +7,10 @@ import type {
   CoworkSessionPersistenceFactory,
   CoworkSessionPersistencePort,
 } from "./coworkSessionManagerTypes";
-import { createRuntimeState } from "./coworkSessionState";
+import {
+  createRuntimeState,
+  type CoworkCreateRuntimeChromeOptions,
+} from "./coworkSessionState";
 import type {
   CoworkSessionRuntimeState,
   CoworkStartSessionInput,
@@ -17,6 +20,10 @@ type CoworkSessionRepositoryOptions = {
   accountContext: CoworkAccountContext;
   createPersistence: CoworkSessionPersistenceFactory;
   createProcessName: (sessionId: string) => string;
+  /** Official K2 / gi / ps.getChromePermissions inject for start chrome seed. */
+  getCreateRuntimeChromeOptions?: (
+    info: CoworkStartSessionInput,
+  ) => CoworkCreateRuntimeChromeOptions | undefined;
   now: () => number;
 };
 
@@ -24,6 +31,9 @@ export class CoworkSessionRepository {
   private readonly accountContext: CoworkAccountContext;
   private readonly createPersistence: CoworkSessionPersistenceFactory;
   private readonly createProcessName: (sessionId: string) => string;
+  private readonly getCreateRuntimeChromeOptions?: (
+    info: CoworkStartSessionInput,
+  ) => CoworkCreateRuntimeChromeOptions | undefined;
   private readonly now: () => number;
   private readonly sessions = new Map<string, CoworkSessionRuntimeState>();
   private identity: CoworkAccountIdentity | null = null;
@@ -34,6 +44,7 @@ export class CoworkSessionRepository {
     this.accountContext = options.accountContext;
     this.createPersistence = options.createPersistence;
     this.createProcessName = options.createProcessName;
+    this.getCreateRuntimeChromeOptions = options.getCreateRuntimeChromeOptions;
     this.now = options.now;
   }
 
@@ -68,6 +79,7 @@ export class CoworkSessionRepository {
       sessionId,
       this.createProcessName(sessionId),
       this.now(),
+      this.getCreateRuntimeChromeOptions?.(info),
     );
     this.sessions.set(sessionId, session);
     return session;
@@ -92,6 +104,19 @@ export class CoworkSessionRepository {
 
   flush(sessionId: string): Promise<void> {
     return this.requirePersistence().flushSession(sessionId);
+  }
+
+  /** Official getSessionStorageDir — outputs dir parent for FileSystemWatcher fallback. */
+  getSessionStorageDir(session: CoworkSessionRuntimeState): string | null {
+    return this.persistence?.getSessionStorageDir?.(session) ?? null;
+  }
+
+  /**
+   * Official getAutoMemoryDirForSession — ZrA/Use/GL under account/org root.
+   * Null when identity not ready or session has no memory mount.
+   */
+  getAutoMemoryDirForSession(session: CoworkSessionRuntimeState): string | null {
+    return this.persistence?.getAutoMemoryDirForSession?.(session) ?? null;
   }
 
   async delete(session: CoworkSessionRuntimeState): Promise<void> {

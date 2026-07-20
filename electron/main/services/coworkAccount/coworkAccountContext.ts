@@ -37,7 +37,14 @@ function normalizeAccountDetails(value: unknown): CoworkAccountDetails {
     fullName: nonEmptyString(input.fullName),
     hasWiggle: input.hasWiggle === true,
     isLoggedOut: input.isLoggedOut === true,
-    isRaven: input.isRaven === true,
+    // Official isRaven is optional — preserve undefined so K2 uses (isRaven ?? true).
+    // Only coerce explicit boolean true/false; do not invent default true here.
+    isRaven:
+      input.isRaven === true
+        ? true
+        : input.isRaven === false
+          ? false
+          : undefined,
   };
 }
 

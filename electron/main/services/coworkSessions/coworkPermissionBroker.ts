@@ -12,6 +12,15 @@ export type CoworkPermissionBrokerOptions = {
   createRequestId?: () => string;
   emit: (event: CoworkPermissionEvent) => void;
   now?: () => number;
+  /** Official je("lam_tool_permission_requested") after emit request. */
+  onRequested?: (pending: CoworkPendingPermission) => void;
+  /** Official je("lam_tool_permission_responded") on user decision only. */
+  onResponded?: (
+    pending: CoworkPendingPermission,
+    decision: CoworkPermissionDecision,
+    latencyMs: number,
+  ) => void;
+  /** Official je("lam_tool_permission_stalled") after 300s while still pending. */
   onStalled?: (pending: CoworkPendingPermission) => void;
   persistAlwaysAllow?: (
     pending: CoworkPendingPermission,
@@ -41,6 +50,8 @@ export class CoworkPermissionBroker {
   private readonly createRequestId: () => string;
   private readonly emit: (event: CoworkPermissionEvent) => void;
   private readonly now: () => number;
+  private readonly onRequested?: CoworkPermissionBrokerOptions["onRequested"];
+  private readonly onResponded?: CoworkPermissionBrokerOptions["onResponded"];
   private readonly onStalled?: CoworkPermissionBrokerOptions["onStalled"];
   private readonly pendingPermissions = new Map<
     string,
@@ -53,6 +64,8 @@ export class CoworkPermissionBroker {
     this.createRequestId = options.createRequestId ?? randomUUID;
     this.emit = options.emit;
     this.now = options.now ?? Date.now;
+    this.onRequested = options.onRequested;
+    this.onResponded = options.onResponded;
     this.onStalled = options.onStalled;
     this.persistAlwaysAllow = options.persistAlwaysAllow;
     this.stalledAfterMs = options.stalledAfterMs ?? defaultStalledAfterMs;
@@ -80,6 +93,7 @@ export class CoworkPermissionBroker {
         sessionId: pending.sessionId,
         type: "tool_permission_request",
       });
+      this.onRequested?.(pending);
     });
   }
 
@@ -90,12 +104,14 @@ export class CoworkPermissionBroker {
   ): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) return;
+    const latencyMs = this.now() - pending.requestedAt;
     const resolution = this.userDecisionResolution(
       pending,
       decision,
       updatedInput,
     );
     if (decision === "always") this.persistAlwaysAllow?.(pending, resolution);
+    this.onResponded?.(pending, decision, latencyMs);
     this.finish(requestId, resolution);
   }
 
@@ -155,10 +171,11 @@ export class CoworkPermissionBroker {
 
   private startStalledTimer(pending: CoworkPendingPermission): void {
     if (!this.onStalled) return;
-    const timer = setTimeout(
-      () => this.onStalled?.(pending),
-      this.stalledAfterMs,
-    );
+    const timer = setTimeout(() => {
+      // Official: only fire while pendingPermissions still has this requestId.
+      if (!this.pendingPermissions.has(pending.requestId)) return;
+      this.onStalled?.(pending);
+    }, this.stalledAfterMs);
     pending.stalledCleanup = () => clearTimeout(timer);
   }
 

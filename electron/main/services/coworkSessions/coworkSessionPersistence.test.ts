@@ -230,6 +230,38 @@ it("restores persisted metadata into an idle or archived runtime state", async (
   expect(archived?.lifecycleState).toBe("archived");
 });
 
+it("resolves official getAutoMemoryDirForSession paths by space/agent/radar", async () => {
+  const userDataPath = await createTemporaryDirectory();
+  const persistence = new CoworkSessionPersistence({
+    accountId: "account-1",
+    orgId: "org-1",
+    userDataPath,
+  });
+  const accountRoot = path.join(
+    userDataPath,
+    "local-agent-mode-sessions",
+    "account-1",
+    "org-1",
+  );
+  expect(persistence.getAccountStorageDir()).toBe(accountRoot);
+  expect(
+    persistence.getAutoMemoryDirForSession({ spaceId: "space_xyz" }),
+  ).toBe(path.join(accountRoot, "spaces", "space_xyz", "memory"));
+  expect(
+    persistence.getAutoMemoryDirForSession({ sessionType: "agent" }),
+  ).toBe(path.join(accountRoot, "agent", "memory"));
+  expect(
+    persistence.getAutoMemoryDirForSession({ sessionType: "radar" }),
+  ).toBe(path.join(accountRoot, "memory", "memory"));
+  expect(persistence.getAutoMemoryDirForSession({})).toBeNull();
+  expect(
+    persistence.getAutoMemoryDirForSession({
+      memoryEnabled: false,
+      spaceId: "space_xyz",
+    }),
+  ).toBeNull();
+});
+
 it("deletes both session metadata and its storage directory", async () => {
   const userDataPath = await createTemporaryDirectory();
   const persistence = new CoworkSessionPersistence({
@@ -256,4 +288,130 @@ it("deletes both session metadata and its storage directory", async () => {
   await expect(
     readFile(path.join(storageDirectory, "transcript.jsonl"), "utf8"),
   ).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("persists and restores egressAllowedDomains + otelConfig for workspace allowlist", async () => {
+  const userDataPath = await createTemporaryDirectory();
+  const persistence = new CoworkSessionPersistence({
+    accountId: "account-1",
+    orgId: "org-1",
+    userDataPath,
+  });
+  const state = runtimeState({
+    egressAllowedDomains: ["api.example.com", "*.internal.com"],
+    otelConfig: {
+      endpoint: "https://otel.example.com:4318/v1/traces",
+      protocol: "http/protobuf",
+    },
+  });
+  persistence.saveSession(state);
+  await persistence.flushAll();
+
+  const saved = JSON.parse(
+    await readFile(persistence.getSessionMetadataPath(state), "utf8"),
+  ) as Record<string, unknown>;
+  expect(saved.egressAllowedDomains).toEqual([
+    "api.example.com",
+    "*.internal.com",
+  ]);
+  expect(saved.otelConfig).toMatchObject({
+    endpoint: "https://otel.example.com:4318/v1/traces",
+    protocol: "http/protobuf",
+  });
+
+  const restored = await persistence.loadSessions();
+  const session = restored.find((item) => item.sessionId === "local_session_1");
+  expect(session?.egressAllowedDomains).toEqual([
+    "api.example.com",
+    "*.internal.com",
+  ]);
+  expect(session?.otelConfig).toMatchObject({
+    endpoint: "https://otel.example.com:4318/v1/traces",
+  });
+});
+
+it("persists and restores chromeTabGroupId (official save/get)", async () => {
+  const userDataPath = await createTemporaryDirectory();
+  const persistence = new CoworkSessionPersistence({
+    accountId: "account-1",
+    orgId: "org-1",
+    userDataPath,
+  });
+  const withId = runtimeState({
+    chromeTabGroupId: 42,
+    sessionId: "local_tab_group_1",
+  });
+  const withoutId = runtimeState({
+    sessionId: "local_tab_group_none",
+  });
+  persistence.saveSession(withId);
+  persistence.saveSession(withoutId);
+  await persistence.flushAll();
+
+  const savedWith = JSON.parse(
+    await readFile(persistence.getSessionMetadataPath(withId), "utf8"),
+  ) as Record<string, unknown>;
+  const savedWithout = JSON.parse(
+    await readFile(persistence.getSessionMetadataPath(withoutId), "utf8"),
+  ) as Record<string, unknown>;
+  expect(savedWith.chromeTabGroupId).toBe(42);
+  // undefined is omitted by JSON.stringify — key absent is fine for optional field.
+  expect(savedWithout.chromeTabGroupId).toBeUndefined();
+
+  const restored = await persistence.loadSessions();
+  expect(
+    restored.find((s) => s.sessionId === "local_tab_group_1")?.chromeTabGroupId,
+  ).toBe(42);
+  expect(
+    restored.find((s) => s.sessionId === "local_tab_group_none")
+      ?.chromeTabGroupId,
+  ).toBeUndefined();
+});
+
+it("persists and restores cuAllowedApps/cuGrantFlags (official IXi)", async () => {
+  const userDataPath = await createTemporaryDirectory();
+  const persistence = new CoworkSessionPersistence({
+    accountId: "account-1",
+    orgId: "org-1",
+    userDataPath,
+  });
+  const apps = [
+    { bundleId: "com.apple.Safari", displayName: "Safari", grantedAt: 1_700 },
+  ];
+  const flags = {
+    clipboardRead: true,
+    clipboardWrite: false,
+    systemKeyCombos: true,
+  };
+  const withCu = runtimeState({
+    cuAllowedApps: apps,
+    cuGrantFlags: flags,
+    sessionId: "local_cu_1",
+  });
+  const withoutCu = runtimeState({
+    sessionId: "local_cu_none",
+  });
+  persistence.saveSession(withCu);
+  persistence.saveSession(withoutCu);
+  await persistence.flushAll();
+
+  const savedWith = JSON.parse(
+    await readFile(persistence.getSessionMetadataPath(withCu), "utf8"),
+  ) as Record<string, unknown>;
+  expect(savedWith.cuAllowedApps).toEqual(apps);
+  expect(savedWith.cuGrantFlags).toEqual(flags);
+
+  const restored = await persistence.loadSessions();
+  expect(
+    restored.find((s) => s.sessionId === "local_cu_1")?.cuAllowedApps,
+  ).toEqual(apps);
+  expect(
+    restored.find((s) => s.sessionId === "local_cu_1")?.cuGrantFlags,
+  ).toEqual(flags);
+  expect(
+    restored.find((s) => s.sessionId === "local_cu_none")?.cuAllowedApps,
+  ).toBeUndefined();
+  expect(
+    restored.find((s) => s.sessionId === "local_cu_none")?.cuGrantFlags,
+  ).toBeUndefined();
 });

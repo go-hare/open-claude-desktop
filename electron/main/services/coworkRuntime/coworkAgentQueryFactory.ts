@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   query as sdkQuery,
   type CanUseTool,
@@ -15,8 +16,12 @@ import {
 } from "../coworkHostLoop/coworkHostProcess";
 import {
   createCoworkHostFileDenyResult,
+  coworkAutoMemoryAllowedToolRules,
+  coworkHostConfigAllowedToolRules,
+  coworkSessionMountAllowedToolRules,
   HOST_LOOP_DIRECT_DISALLOWED_TOOLS,
   HOST_LOOP_TOOL_NAMES,
+  HOST_LOOP_WORKSPACE_TOOLS,
   preFilterCoworkHostFilePermission,
 } from "../coworkHostLoop/coworkHostToolPolicy";
 import type {
@@ -27,6 +32,10 @@ import type {
   CoworkPermissionMode,
   CoworkRuntimeQuery,
 } from "../coworkSessions/coworkSessionTypes";
+import {
+  preFilterCoworkRequestDirectoryPermission,
+  prepareCoworkRequestDirectoryPermissionInput,
+} from "./coworkDirectoryMcpServer";
 import {
   resolveCoworkClaudeExecutable,
   resolveCoworkDisclaimerExecutable,
@@ -76,6 +85,18 @@ function permissionResult(value: Awaited<ReturnType<CoworkQueryFactoryInput["can
   };
 }
 
+/**
+ * Official sessionStorageDir for XPA — recover from hostOutputsDir / hostClaudeConfigDir
+ * product paths (join(storage, "outputs"|".claude")).
+ */
+function sessionStorageDirFromFactoryInput(
+  input: CoworkQueryFactoryInput,
+): string | null {
+  if (input.hostOutputsDir) return path.dirname(input.hostOutputsDir);
+  if (input.hostClaudeConfigDir) return path.dirname(input.hostClaudeConfigDir);
+  return null;
+}
+
 function createCanUseTool(input: CoworkQueryFactoryInput): CanUseTool {
   return async (toolName, toolInput, options) => {
     const denied = input.hostLoopMode
@@ -85,9 +106,37 @@ function createCanUseTool(input: CoworkQueryFactoryInput): CanUseTool {
         )
       : undefined;
     if (denied) return denied;
+
+    // Official canUseTool pre-prompt for mcp__cowork__request_cowork_directory (ql):
+    // XPA internal storage + AJA protected roots before permission UI.
+    // Then strip stale _hostPath, re-run P4 (incl. Th/tG) and attach host path
+    // only when P4.ok — not a hard deny on admin roots fail.
+    const sessionStorageDir = sessionStorageDirFromFactoryInput(input);
+    const requestDirDenied = preFilterCoworkRequestDirectoryPermission(
+      toolName,
+      toolInput as Record<string, unknown> | undefined,
+      {
+        sessionStorageDir,
+        // Official a||g = sessionType agent|dispatch_child. mountSkeletonHome
+        // residual (dA false until dual-exec skeleton product).
+        sessionType: input.sessionType,
+      },
+    );
+    if (requestDirDenied) return requestDirDenied;
+
+    const preparedInput =
+      (await prepareCoworkRequestDirectoryPermissionInput(
+        toolName,
+        toolInput as Record<string, unknown> | undefined,
+        {
+          allowedWorkspaceFolders: input.allowedWorkspaceFolders,
+          sessionStorageDir,
+        },
+      )) ?? toolInput;
+
     return permissionResult(
       await input.canUseTool({
-        input: toolInput,
+        input: preparedInput,
         sessionId: input.sessionId,
         signal: options.signal,
         suggestions: options.suggestions,
@@ -119,9 +168,34 @@ export function buildCoworkSdkOptions(
   options: CoworkAgentQueryFactoryOptions = {},
 ): Options {
   const folders = hostFolders(input.userSelectedFolders);
+  const enabled = stringArray(input.enabledMcpTools) ?? [];
+  // Official UXe/V1i host-loop allowedTools:
+  // workspace MCP + mounts + Ohe(config)/plugins + memory.
+  if (input.hostLoopMode) {
+    enabled.push(...HOST_LOOP_WORKSPACE_TOOLS);
+    enabled.push(
+      ...coworkSessionMountAllowedToolRules({
+        folderPermissionPaths: folders,
+        hostOutputsDir: input.hostOutputsDir,
+        hostUploadsDir: input.hostUploadsDir,
+      }),
+    );
+    enabled.push(
+      ...coworkHostConfigAllowedToolRules({
+        hostClaudeConfigDir: input.hostClaudeConfigDir,
+        readOnlyPluginPaths: input.readOnlyPluginPaths,
+      }),
+    );
+    enabled.push(
+      ...coworkAutoMemoryAllowedToolRules(
+        input.autoMemoryDir,
+        Boolean(input.autoMemoryReadOnly),
+      ),
+    );
+  }
   const sdkOptions: Options = {
     additionalDirectories: folders.length > 0 ? folders : undefined,
-    allowedTools: stringArray(input.enabledMcpTools),
+    allowedTools: enabled.length > 0 ? enabled : undefined,
     canUseTool: createCanUseTool(input),
     cwd: hostCwd(input),
     forwardSubagentText: true,

@@ -4,7 +4,9 @@ import {
   createTestManager,
 } from "./coworkSessionTestUtils";
 
-it("stops and archives without erasing buffered replay messages", async () => {
+it("stops and archives; stop clears buffer into cachedTotalTurns (official)", async () => {
+  // Official stopSession: messageBuffer user count → cachedTotalTurns; buffer=[].
+  // Archive after stop keeps session as archived (not deleted).
   const harness = createManagerHarness();
   const manager = createTestManager(harness);
   await manager.start({ message: "hello", messageUuid: "message-1" });
@@ -12,9 +14,10 @@ it("stops and archives without erasing buffered replay messages", async () => {
   await manager.stop("local_session_1");
   expect(harness.query.closed).toBe(true);
   expect(manager.getSession("local_session_1")).toMatchObject({
-    bufferedMessages: [expect.objectContaining({ uuid: "message-1" })],
+    // Buffer cleared on stop; renderer omits empty bufferedMessages.
     isRunning: false,
   });
+  expect(manager.getSession("local_session_1")?.bufferedMessages).toBeUndefined();
   expect(harness.events).toContainEqual({
     code: 0,
     sessionId: "local_session_1",

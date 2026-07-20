@@ -44,10 +44,192 @@ const removedAllowedTools = new Set<string>([
 
 export type CoworkHostRuleBuilder = {
   edit: (path: string) => string;
+  /**
+   * Official Ohe full allow rule:
+   *   Read(Pv(join(configDir,"projects")) with tool-results suffix).
+   */
   projectsToolResults: (configDir: string) => string;
   read: (path: string) => string;
   write: (path: string) => string;
 };
+
+/**
+ * Official app.asar `Pv(e)` — host permission path glob for V1i/HUA/Ohe:
+ * strip trailing slashes, win32 drive/UNC normalize, append `/**`.
+ * Non-win32 absolute paths yield a leading `//` (faithful to minified `/${A}/**`).
+ */
+export function normalizeCoworkHostPermissionPath(
+  inputPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const stripped = inputPath.replace(/[\\/]+$/, "");
+  if (platform === "win32") {
+    if (/^[\\/]{2}/.test(inputPath)) {
+      return `${stripped.replace(/\\/g, "/")}/**`;
+    }
+    const drive = stripped.match(/^([A-Za-z]):(?:[/\\]|$)/);
+    return `/${
+      drive
+        ? `/${drive[1].toLowerCase()}${stripped.slice(2).replace(/\\/g, "/")}`
+        : stripped.replace(/\\/g, "/")
+    }/**`;
+  }
+  return `/${stripped}/**`;
+}
+
+function hostProjectsDir(configDir: string): string {
+  const base = configDir.replace(/[\\/]+$/, "");
+  return `${base}/projects`;
+}
+
+/** Official Ohe inner path after Pv + tool-results replace. */
+export function coworkHostOhePermissionPath(
+  configDir: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return normalizeCoworkHostPermissionPath(
+    hostProjectsDir(configDir),
+    platform,
+  ).replace(/\/\*\*$/, "/**/tool-results/**");
+}
+
+/** Official V1i path rule strings: Edit(Pv) / Write(Pv) / Read(Pv) / Ohe. */
+export const DEFAULT_COWORK_HOST_RULES: CoworkHostRuleBuilder = {
+  edit: (targetPath) => `Edit(${normalizeCoworkHostPermissionPath(targetPath)})`,
+  projectsToolResults: (configDir) =>
+    `Read(${coworkHostOhePermissionPath(configDir)})`,
+  read: (targetPath) => `Read(${normalizeCoworkHostPermissionPath(targetPath)})`,
+  write: (targetPath) => `Write(${normalizeCoworkHostPermissionPath(targetPath)})`,
+};
+
+/**
+ * Official UXe/V1i auto-memory host allow rules:
+ *   autoMemoryReadOnly (radar) → Read only
+ *   else → Edit + Write + Read
+ *   missing dir → []
+ */
+export function coworkAutoMemoryAllowedToolRules(
+  autoMemoryDir: string | null | undefined,
+  autoMemoryReadOnly = false,
+  rules: CoworkHostRuleBuilder = DEFAULT_COWORK_HOST_RULES,
+): string[] {
+  if (!autoMemoryDir) return [];
+  if (autoMemoryReadOnly) return [rules.read(autoMemoryDir)];
+  return [
+    rules.edit(autoMemoryDir),
+    rules.write(autoMemoryDir),
+    rules.read(autoMemoryDir),
+  ];
+}
+
+/**
+ * Official HUA(e) — flatMap path → [Edit(Pv(path)), Read(Pv(path))].
+ * Used by mountFolderForSession applyFlagSettings allow rules.
+ */
+export function coworkHUAAllowedToolRules(
+  paths: readonly string[],
+  rules: CoworkHostRuleBuilder = DEFAULT_COWORK_HOST_RULES,
+): string[] {
+  return paths.flatMap((targetPath) => [
+    rules.edit(targetPath),
+    rules.read(targetPath),
+  ]);
+}
+
+/**
+ * Official V1i host path allow rules (subset of rebuild without config/plugins):
+ *   HUA([outputs, ...folders]) → Edit+Read each
+ *   Read(uploads)
+ */
+export function coworkSessionMountAllowedToolRules(
+  options: {
+    folderPermissionPaths?: readonly string[] | null;
+    hostOutputsDir?: string | null;
+    hostUploadsDir?: string | null;
+  },
+  rules: CoworkHostRuleBuilder = DEFAULT_COWORK_HOST_RULES,
+): string[] {
+  const out: string[] = [];
+  if (options.hostOutputsDir) {
+    out.push(...coworkHUAAllowedToolRules([options.hostOutputsDir], rules));
+  }
+  for (const folder of options.folderPermissionPaths ?? []) {
+    if (!folder) continue;
+    out.push(...coworkHUAAllowedToolRules([folder], rules));
+  }
+  if (options.hostUploadsDir) {
+    out.push(rules.read(options.hostUploadsDir));
+  }
+  return out;
+}
+
+/**
+ * Official mountFolderForSession host-loop applyFlagSettings payload:
+ *   {
+ *     permissions: {
+ *       additionalDirectories: Q,                 // Q = twe(session) = Zni(resolvedFolders)
+ *       allow: HUA([this.getOutputsDir(A), ...Q]),
+ *     },
+ *   }
+ */
+export type CoworkHostLoopMountFlagSettings = {
+  permissions: {
+    additionalDirectories: string[];
+    allow: string[];
+  };
+};
+
+export function coworkHostLoopMountFlagSettings(
+  options: {
+    folderPermissionPaths: readonly string[];
+    hostOutputsDir: string;
+  },
+  rules: CoworkHostRuleBuilder = DEFAULT_COWORK_HOST_RULES,
+): CoworkHostLoopMountFlagSettings {
+  const additionalDirectories = [...options.folderPermissionPaths];
+  return {
+    permissions: {
+      additionalDirectories,
+      allow: coworkHUAAllowedToolRules(
+        [options.hostOutputsDir, ...additionalDirectories],
+        rules,
+      ),
+    },
+  };
+}
+
+/**
+ * Official V1i Ohe + plugin Read rules:
+ *   Read(<config>/projects/.../tool-results/...)
+ *   optional staged config if different
+ *   Read each readOnlyPluginPath
+ *
+ * Official getClaudeConfigDir = join(sessionStorageDir, ".claude") (+ mkdir 0o700).
+ */
+export function coworkHostConfigAllowedToolRules(
+  options: {
+    hostClaudeConfigDir?: string | null;
+    readOnlyPluginPaths?: readonly string[] | null;
+    stagedClaudeConfigDir?: string | null;
+  },
+  rules: CoworkHostRuleBuilder = DEFAULT_COWORK_HOST_RULES,
+): string[] {
+  const out: string[] = [];
+  const configDir = options.hostClaudeConfigDir;
+  if (configDir) {
+    // Official Ohe(r) is already a full Read(...) rule (not Read(Pv(inner)) twice).
+    out.push(rules.projectsToolResults(configDir));
+    const staged = options.stagedClaudeConfigDir ?? configDir;
+    if (staged && staged !== configDir) {
+      out.push(rules.projectsToolResults(staged));
+    }
+  }
+  for (const pluginPath of options.readOnlyPluginPaths ?? []) {
+    if (!pluginPath) continue;
+    out.push(rules.read(pluginPath));
+  }
+  return out;
+}
 
 export type RebuildCoworkHostToolPolicyOptions = {
   allowedTools?: readonly string[];
@@ -170,23 +352,20 @@ function appendReadRules(
 }
 
 function appendConfigRules(target: string[], options: RebuildCoworkHostToolPolicyOptions): void {
-  target.push(options.rules.read(options.rules.projectsToolResults(options.hostClaudeConfigDir)));
+  target.push(options.rules.projectsToolResults(options.hostClaudeConfigDir));
   const stagedConfig = options.stagedClaudeConfigDir ?? options.hostClaudeConfigDir;
   if (stagedConfig !== options.hostClaudeConfigDir) {
-    target.push(options.rules.read(options.rules.projectsToolResults(stagedConfig)));
+    target.push(options.rules.projectsToolResults(stagedConfig));
   }
 }
 
 function appendMemoryRules(target: string[], options: RebuildCoworkHostToolPolicyOptions): void {
-  if (!options.autoMemoryDir) return;
-  if (options.autoMemoryReadOnly) {
-    target.push(options.rules.read(options.autoMemoryDir));
-    return;
-  }
   target.push(
-    options.rules.edit(options.autoMemoryDir),
-    options.rules.write(options.autoMemoryDir),
-    options.rules.read(options.autoMemoryDir),
+    ...coworkAutoMemoryAllowedToolRules(
+      options.autoMemoryDir,
+      options.autoMemoryReadOnly,
+      options.rules,
+    ),
   );
 }
 

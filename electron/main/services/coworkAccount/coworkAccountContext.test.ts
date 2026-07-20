@@ -21,6 +21,29 @@ it("stores the renderer account details and exposes the Cowork identity", () => 
   });
 });
 
+it("preserves optional isRaven for official K2 (isRaven ?? true)", () => {
+  const context = new CoworkAccountContext();
+  context.setAccountDetails({
+    accountUuid: "account-1",
+    isLoggedOut: false,
+  });
+  expect(context.getAccountDetails()?.isRaven).toBeUndefined();
+
+  context.setAccountDetails({
+    accountUuid: "account-1",
+    isLoggedOut: false,
+    isRaven: false,
+  });
+  expect(context.getAccountDetails()?.isRaven).toBe(false);
+
+  context.setAccountDetails({
+    accountUuid: "account-1",
+    isLoggedOut: false,
+    isRaven: true,
+  });
+  expect(context.getAccountDetails()?.isRaven).toBe(true);
+});
+
 it("loads organization identity after the official five second wait", async () => {
   vi.useFakeTimers();
   const context = new CoworkAccountContext({

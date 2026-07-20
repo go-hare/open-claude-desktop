@@ -14,6 +14,10 @@ import { LocalLaunchManager } from "../services/launch/localLaunchManager";
 import { getLocalSkillFiles, listLocalSkills } from "../services/localSessions/localAgentAssets";
 import { mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
 import { listOpenDocuments, readOpenDocumentAsBase64 } from "../services/openDocuments/openDocumentsStore";
+import {
+  coworkAccountStorageDir,
+  resolveCoworkAutoMemoryDir,
+} from "../services/coworkSessions/coworkAutoMemoryPaths";
 import { getComputerUseTccState, openTccSystemSettings, requestAccessibilityGrant, requestScreenRecordingGrant } from "../services/tcc/computerUseTcc";
 import type { IpcHandlerContext } from "./context";
 import { originalEventSurface } from "./originalEventSurface";
@@ -124,14 +128,6 @@ async function listSimulatorDevices(): Promise<Array<Record<string, unknown>>> {
   }
 
   return devices;
-}
-
-function currentTccGrants() {
-  const state = getComputerUseTccState();
-  return [
-    { id: "accessibility", name: "Accessibility", status: state.accessibility, granted: state.accessibility === "granted" },
-    { id: "screen-recording", name: "Screen Recording", status: state.screenRecording, granted: state.screenRecording === "granted" },
-  ];
 }
 
 function pluginShimOps(plugins: Array<Record<string, unknown>>) {
@@ -550,14 +546,62 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     },
     ComputerUseTcc: {
       getState: async () => getComputerUseTccState(),
-      getCurrentSessionGrants: async () => currentTccGrants(),
+      /**
+       * Official ComputerUseTcc.getCurrentSessionGrants(sessionId):
+       *   ai.getComputerUseGrants(e).map({bundleId,displayName,grantedAt})
+       * Not TCC accessibility status (that is getState).
+       */
+      getCurrentSessionGrants: async (_event, sessionId) => {
+        const id = asString(sessionId);
+        if (!id) {
+          throw new Error(
+            'Argument "sessionId" at position 0 to method "getCurrentSessionGrants" in interface "ComputerUseTcc" failed to pass validation',
+          );
+        }
+        return context.localAgentModeSessions
+          .getComputerUseGrants(id)
+          .map((app) => ({
+            bundleId: app.bundleId,
+            displayName: app.displayName,
+            grantedAt: app.grantedAt,
+          }));
+      },
       listInstalledApps: async () => listApplications(),
       openSystemSettings: async (_event, pane) => {
         return openTccSystemSettings(asString(pane) ?? "Privacy_Accessibility");
       },
       requestAccessibility: async () => requestAccessibilityGrant(),
       requestScreenRecording: async () => requestScreenRecordingGrant(),
-      revokeGrant: async () => true,
+      /**
+       * Official ComputerUseTcc.revokeGrant(sessionId, bundleId) →
+       * ai.revokeComputerUseGrant; logs success/warn (no return body required).
+       */
+      revokeGrant: async (_event, sessionId, bundleId) => {
+        const id = asString(sessionId);
+        const bundle = asString(bundleId);
+        if (!id) {
+          throw new Error(
+            'Argument "sessionId" at position 0 to method "revokeGrant" in interface "ComputerUseTcc" failed to pass validation',
+          );
+        }
+        if (!bundle) {
+          throw new Error(
+            'Argument "bundleId" at position 1 to method "revokeGrant" in interface "ComputerUseTcc" failed to pass validation',
+          );
+        }
+        const okRevoke =
+          context.localAgentModeSessions.revokeComputerUseGrant(id, bundle);
+        if (okRevoke) {
+          console.info(
+            `[computer-use] Revoked grant for "${bundle}" in session ${id}`,
+          );
+        } else {
+          console.warn(
+            `[computer-use] revokeGrant: session ${id} not found or "${bundle}" not in allowlist`,
+          );
+        }
+        return okRevoke;
+      },
     },
     CoworkArtifacts: {
       getAllArtifacts: async () => Array.from(artifacts.values()),
@@ -737,7 +781,25 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       listFolderContents: async (_event, folderPath) => {
         try { return await fs.readdir(String(folderPath)); } catch { return []; }
       },
-      getAutoMemoryDir: async () => path.join(app.getPath("userData"), "cowork-memory"),
+      /**
+       * Official CoworkSpaces.getAutoMemoryDir(spaceId):
+       *   spaces.has(spaceId) ? ZrA(accountId, orgId, spaceId) : null
+       * (was inventing userData/cowork-memory — corrected to product path).
+       */
+      getAutoMemoryDir: async (_event, spaceId) => {
+        const id = asString(spaceId);
+        if (!id || !spaces.has(id)) return null;
+        const identity = context.coworkAccount.getIdentity();
+        if (!identity?.accountUuid || !identity?.organizationUuid) return null;
+        return resolveCoworkAutoMemoryDir(
+          coworkAccountStorageDir(
+            app.getPath("userData"),
+            identity.accountUuid,
+            identity.organizationUuid,
+          ),
+          { spaceId: id },
+        );
+      },
       openFile: async (_event, filePath) => {
         const target = asString(filePath);
         if (!target) return false;
