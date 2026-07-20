@@ -24,6 +24,9 @@ function manager() {
     replaceRemoteMcpServers: vi.fn(async () => ({
       enabledMcpTools: { "local:demo:tool": true },
     })),
+    setMcpServers: vi.fn(async () => ({
+      enabledMcpTools: { "local:demo:tool": true },
+    })),
     setDraftSessionFolders: vi.fn(),
     openOutputsDir: vi.fn(async () => undefined),
     setFocusedSession: vi.fn(),
@@ -186,6 +189,24 @@ it("forwards replaceRemoteMcpServers sessionId + servers array", async () => {
     "session-1",
     servers,
   );
+});
+
+it("forwards setMcpServers sessionId + servers array", async () => {
+  const instance = manager();
+  const handlers = createCoworkSessionHandlers(instance);
+  const servers = [
+    {
+      enabled: true,
+      name: "remote-demo",
+      toolKeys: ["t1"],
+      uuid: "uuid-1",
+    },
+  ];
+
+  await expect(
+    handlers.setMcpServers?.(event, "session-1", servers),
+  ).resolves.toEqual({ enabledMcpTools: { "local:demo:tool": true } });
+  expect(instance.setMcpServers).toHaveBeenCalledWith("session-1", servers);
 });
 
 it("forwards setDraftSessionFolders string array and rejects non-strings", async () => {

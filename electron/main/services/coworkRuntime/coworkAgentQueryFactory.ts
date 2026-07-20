@@ -40,6 +40,8 @@ import {
   resolveCoworkClaudeExecutable,
   resolveCoworkDisclaimerExecutable,
 } from "./coworkClaudeExecutable";
+import { resolveCoworkChromeCicCanUseTool } from "../coworkSessions/coworkChromeCicCanUseTool";
+import type { CoworkChromePermissionMode } from "../coworkSessions/coworkSessionTypes";
 
 export type CoworkSdkQuery = (params: {
   options?: Options;
@@ -106,6 +108,42 @@ function createCanUseTool(input: CoworkQueryFactoryInput): CanUseTool {
         )
       : undefined;
     if (denied) return denied;
+
+    // Official aze canUseTool CIC residual (before generic permission UI).
+    // Non-CIC tools return undefined and fall through.
+    const cic = input.cicCanUseTool;
+    if (cic) {
+      const cicResult = await resolveCoworkChromeCicCanUseTool(
+        toolName,
+        toolInput as Record<string, unknown> | undefined,
+        {
+          allowSkipAllOutsideUnsupervised:
+            cic.allowSkipAllOutsideUnsupervised === true,
+          hooks: {
+            clearCicOnceApproved: cic.clearCicOnceApproved,
+            getCicOnceApproved: cic.getCicOnceApproved,
+            getCurrentBrowserDeviceId: cic.getCurrentBrowserDeviceId,
+            getSessionAfterPrompt: cic.getSessionAfterPrompt,
+            queryTabUrl: cic.queryTabUrl,
+            setCicOnceApproved: cic.setCicOnceApproved,
+            showBrowserPermissionCard: cic.showBrowserPermissionCard,
+            updateChromePermission: cic.updateChromePermission
+              ? (mode, domains) =>
+                  cic.updateChromePermission?.(
+                    mode as CoworkChromePermissionMode,
+                    domains,
+                  )
+              : undefined,
+          },
+          session: cic.session,
+          sessionId: input.sessionId,
+          signal: options.signal,
+        },
+      );
+      if (cicResult) {
+        return permissionResult(cicResult);
+      }
+    }
 
     // Official canUseTool pre-prompt for mcp__cowork__request_cowork_directory (ql):
     // XPA internal storage + AJA protected roots before permission UI.

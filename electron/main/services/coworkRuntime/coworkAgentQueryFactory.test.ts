@@ -354,3 +354,36 @@ it("creates the SDK query with the AsyncIterable prompt", () => {
     expect.objectContaining({ prompt: factoryInput.prompt }),
   );
 });
+
+it("aze CIC canUseTool residual short-circuits Claude_in_Chrome tools", async () => {
+  const canUseTool = vi.fn(async () => ({ behavior: "allow" as const }));
+  const options = buildCoworkSdkOptions(
+    input({
+      canUseTool,
+      cicCanUseTool: {
+        session: {},
+      },
+      hostLoopMode: false,
+    }),
+    { executable: "/opt/claude" },
+  );
+  await expect(
+    options.canUseTool?.(
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      { x: 1 },
+      { signal: new AbortController().signal, toolUseID: "cic-1" },
+    ),
+  ).resolves.toMatchObject({ behavior: "allow", updatedInput: { x: 1 } });
+  // Generic permission broker not called for permissionless CIC.
+  expect(canUseTool).not.toHaveBeenCalled();
+
+  // Non-CIC falls through to generic canUseTool.
+  await expect(
+    options.canUseTool?.(
+      "Bash",
+      { command: "ls" },
+      { signal: new AbortController().signal, toolUseID: "bash-1" },
+    ),
+  ).resolves.toMatchObject({ behavior: "allow" });
+  expect(canUseTool).toHaveBeenCalled();
+});

@@ -1,31 +1,79 @@
 import { expect, it } from "vitest";
-import { getCoworkSupportedCommands } from "./coworkSessionCommands";
+import {
+  extractCoworkSlashCommandNames,
+  getCoworkSupportedCommands,
+  mergeCoworkSupportedCommands,
+} from "./coworkSessionCommands";
 import type { CoworkSessionRuntimeState } from "./coworkSessionTypes";
 
-it("combines live CLI commands with the official Cowork commands", async () => {
-  const session = {
-    query: {
-      supportedCommands: async () => [
-        { description: "CLI context", name: "context" },
-        { description: "Open config", name: "config" },
-      ],
-    },
-  } as CoworkSessionRuntimeState;
+it("extractCoworkSlashCommandNames keeps strings, drops junk, first-wins order", () => {
+  expect(
+    extractCoworkSlashCommandNames([
+      "help",
+      "",
+      "  ",
+      "help",
+      12,
+      "config",
+      null,
+      "compact",
+    ]),
+  ).toEqual(["help", "config", "compact"]);
+  expect(extractCoworkSlashCommandNames(undefined)).toEqual([]);
+  expect(extractCoworkSlashCommandNames("nope")).toEqual([]);
+});
 
-  const commands = await getCoworkSupportedCommands(session);
-
-  expect(commands.map((command) => command.name)).toEqual([
-    "context",
+it("mergeCoworkSupportedCommands is session slash → RT → K2e (official order)", () => {
+  const names = mergeCoworkSupportedCommands(["help", "config"]).map(
+    (c) => c.name,
+  );
+  expect(names).toEqual([
+    "help",
     "config",
     "schedule",
     "setup-cowork",
     "consolidate-memory",
+    "context",
   ]);
-  // CLI may omit scope; host still stamps cowork for Built-in skills (aRe filter).
-  expect(commands.find((command) => command.name === "context")).toEqual({
-    description: "CLI context",
-    name: "context",
-    scope: "cowork",
+  expect(mergeCoworkSupportedCommands(["help"])[0]).toEqual({
+    name: "help",
+    description: "help",
   });
-  expect(commands.find((command) => command.name === "consolidate-memory")?.scope).toBe("cowork");
+  expect(
+    mergeCoworkSupportedCommands(undefined).find((c) => c.name === "schedule")
+      ?.scope,
+  ).toBe("cowork");
+});
+
+it("getCoworkSupportedCommands uses session.slashCommands not live query", async () => {
+  // Official LAM: slashCommands map + RT + K2e — not query.supportedCommands
+  // (Code LocalSessions residual).
+  const session = {
+    slashCommands: ["help", "compact"],
+    query: {
+      supportedCommands: async () => [
+        { description: "should not appear first alone", name: "config" },
+      ],
+    },
+  } as unknown as CoworkSessionRuntimeState;
+
+  const commands = await getCoworkSupportedCommands(session);
+  expect(commands.map((c) => c.name)).toEqual([
+    "help",
+    "compact",
+    "schedule",
+    "setup-cowork",
+    "consolidate-memory",
+    "context",
+  ]);
+});
+
+it("getCoworkSupportedCommands without session returns RT+K2e only", async () => {
+  const commands = await getCoworkSupportedCommands();
+  expect(commands.map((c) => c.name)).toEqual([
+    "schedule",
+    "setup-cowork",
+    "consolidate-memory",
+    "context",
+  ]);
 });

@@ -116,6 +116,58 @@ export type CoworkQueryFactoryInput = {
   sessionType?: string | null;
   systemPrompt?: string;
   userSelectedFolders: string[];
+  /**
+   * Official aze canUseTool CIC residual hooks.
+   * When unset, factory still runs pure aze with session snapshot only
+   * (permissionless / skip_all / session grant / deny without card).
+   * Product wires showBrowserPermissionCard → handleBrowserPermissionRequest.
+   */
+  cicCanUseTool?: {
+    allowSkipAllOutsideUnsupervised?: boolean;
+    getCurrentBrowserDeviceId?: () => string | null | undefined;
+    queryTabUrl?: (
+      query: { checkUrl?: string; tabId?: number },
+      ctx: {
+        displayName?: string | null;
+        sessionId: string;
+        tabGroupId?: number | string | null;
+      },
+    ) =>
+      | Promise<{ storageDecision?: string | null; url: string } | null | undefined>
+      | { storageDecision?: string | null; url: string }
+      | null
+      | undefined;
+    session?: {
+      chromeAllowedDomains?: string[] | null;
+      chromePermissionMode?: string | null;
+      chromeTabGroupId?: number | string | null;
+      cicOnceApproved?: Set<string> | null;
+      permissionMode?: string | null;
+      title?: string | null;
+    } | null;
+    clearCicOnceApproved?: () => void;
+    getCicOnceApproved?: () => Set<string> | null | undefined;
+    getSessionAfterPrompt?: () => {
+      chromeAllowedDomains?: string[] | null;
+      chromePermissionMode?: string | null;
+      permissionMode?: string | null;
+    } | null | undefined;
+    setCicOnceApproved?: (host: string) => void;
+    showBrowserPermissionCard?: (
+      request: {
+        actionData?: Record<string, unknown>;
+        requestId: string;
+        toolType: string;
+        toolUseId: string;
+        url?: string;
+      },
+      signal?: AbortSignal,
+    ) => Promise<{ allowed: boolean; always?: boolean; allSites?: boolean }>;
+    updateChromePermission?: (
+      mode: "ask" | "skip_all_permission_checks" | "follow_a_plan",
+      domains: string[],
+    ) => void;
+  };
 };
 
 export type CoworkQueryFactory = (
@@ -239,8 +291,100 @@ export type CoworkSessionManagerOptions = {
    * Official LocalAgentModeSessionManager EventEmitter "focusedSessionChanged"
    * after setFocusedSession when value changes. Main process uses this to close
    * idle / AskUserQuestion / scheduled notifications (Ds residual).
+   * When desktopNotificationService is set, manager also calls
+   * handleFocusedSessionChanged on the service (same official close trio).
    */
   onFocusedSessionChanged?: (sessionId: string | null) => void;
+  /**
+   * Official Ds NotificationService (class fir) residual inject.
+   * Manager wires focusedSessionChanged close + queryCompleted idle show gates.
+   * Backend (Electron/Swift) is adapter-only — no full product store invent.
+   */
+  desktopNotificationService?: {
+    handleFocusedSessionChanged: (sessionId: string | null | undefined) => void;
+    showIdleNotification: (input: {
+      onClick?: () => void;
+      sessionId: string;
+      sessionTitle?: string | null;
+    }) => void;
+  } | null;
+  /**
+   * Official queryCompleted idle onClick → dispatchNavigate(`/local_sessions/${id}`)
+   * + yz() focus residual. Product inject only — no full XC dispatcher invent.
+   */
+  navigateToLocalSession?: (sessionId: string) => void;
+  /**
+   * Official stopSession tail: this.mcpCoordinator.unregisterRootsProvider(A).
+   * Product inject residual — default no-op. Do not invent full mcpCoordinator
+   * product (roots map / notifyRootsChanged / isolationExempt).
+   */
+  unregisterRootsProvider?: (sessionId: string) => void;
+  /**
+   * Official startSession mcpCoordinator.registerRootsProvider(sessionId, getter).
+   * Getter returns `_c` userSelectedFolders + optional session uploads dir when
+   * present. Product inject residual — default no-op. Do not invent full
+   * mcpCoordinator roots map / notifyRootsChanged / createAllServers product.
+   */
+  registerRootsProvider?: (
+    sessionId: string,
+    getRoots: () => Promise<string[]> | string[],
+  ) => void;
+  /**
+   * Official wr("1978029737","idleGraceMs",0,ni()) for transitionTo idle arm.
+   * Default 0 when unset (Statsig residual — do not invent product gate value).
+   * When >0 and arm gates pass, product keeps query warm; when >0 and gates fail,
+   * teardownIdleProcess. When 0, product residual keeps warm query (existing
+   * resume path) instead of official immediate teardown.
+   */
+  getIdleGraceMs?: () => number;
+  /**
+   * Official ft("2800354941") residual for rwA key-sort of setMcpServers payload.
+   * Default false (identity).
+   */
+  sortMcpServersKeys?: () => boolean;
+  /**
+   * Official mcpCoordinator.createRemoteServers residual inject for
+   * replaceRemoteMcpServers query branch. Default {}.
+   */
+  createRemoteMcpServers?: (
+    sessionId: string,
+    input: {
+      enabledMcpTools?: unknown;
+      remoteMcpServers: Array<{
+        name: string;
+        tools: Array<{ name: string } | string>;
+        type?: string;
+        uuid: string;
+      }>;
+    },
+  ) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  /**
+   * Official mcpCoordinator.createMcpServer residual inject for setMcpServers.
+   * Default null (skip add). Returns {key, server} like official.
+   */
+  createMcpServer?: (
+    sessionId: string,
+    server: {
+      enabled: boolean;
+      name: string;
+      toolKeys?: string[];
+      tools?: Array<{ name: string } | string>;
+      type?: string;
+      uuid: string;
+    },
+  ) =>
+    | { key: string; server: unknown }
+    | null
+    | undefined
+    | Promise<{ key: string; server: unknown } | null | undefined>;
+  /**
+   * Official bridge activeSessions.get(remoteSessionId) for
+   * handleInboundControlRequest interrupt residual.
+   * Product inject — default no-op (no full remote bridge product invent).
+   */
+  getBridgeActiveSession?: (
+    remoteSessionId: string,
+  ) => { localSessionId?: string | null } | null | undefined;
   /**
    * Official gA.shell.showItemInFolder for transcript feedback iXi bundle.
    * Product injects Electron shell.showItemInFolder in registerDesktopIpc.

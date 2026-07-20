@@ -186,6 +186,13 @@ export function createCoworkSessionHandlers(manager: CoworkSessionManager): Inte
       manager.replaceRemoteMcpServers(sessionId(id), servers),
     ),
     /**
+     * Official LocalAgentModeSessions.setMcpServers(sessionId, servers[]).
+     * createMcpServer residual inject; applyMcpServersIfIdle dirty/defer product.
+     */
+    setMcpServers: secured(async (_event, id, servers) =>
+      manager.setMcpServers(sessionId(id), servers),
+    ),
+    /**
      * Official LocalAgentModeSessions.setDraftSessionFolders(folders: string[]).
      * Manager eBe-filters via Th inject residual.
      */

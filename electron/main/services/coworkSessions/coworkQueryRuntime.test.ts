@@ -240,3 +240,59 @@ it("success result without grace inject idles immediately (default)", async () =
   expect(session.lifecycleState).toBe("idle");
   expect(session._suggestionTimeout).toBeUndefined();
 });
+
+it("system init slash_commands assigns session.slashCommands (official)", async () => {
+  // Official: `"slash_commands"in D && D.slash_commands` → assign + save.
+  const query = new TestCoworkQuery();
+  const session = runningSession();
+  session.query = query;
+  const saved: string[][] = [];
+  const runtime = new CoworkQueryRuntime({
+    emit: () => undefined,
+    isCurrent: () => true,
+    now: () => 200,
+    onClosed: () => undefined,
+    query,
+    save: (s) => {
+      if (s.slashCommands) saved.push([...s.slashCommands]);
+    },
+    session,
+  });
+  const running = runtime.run();
+  query.push({
+    session_id: "cli-abc",
+    slash_commands: ["help", "", "config", "help"],
+    subtype: "init",
+    type: "system",
+  });
+  query.finish();
+  await running;
+  expect(session.cliSessionId).toBe("cli-abc");
+  expect(session.slashCommands).toEqual(["help", "config"]);
+  expect(saved.some((names) => names.join() === "help,config")).toBe(true);
+});
+
+it("system init without slash_commands key leaves prior slashCommands", async () => {
+  const query = new TestCoworkQuery();
+  const session = runningSession();
+  session.query = query;
+  session.slashCommands = ["prior"];
+  const runtime = new CoworkQueryRuntime({
+    emit: () => undefined,
+    isCurrent: () => true,
+    now: () => 200,
+    onClosed: () => undefined,
+    query,
+    save: () => undefined,
+    session,
+  });
+  const running = runtime.run();
+  query.push({
+    session_id: "cli-2",
+    subtype: "init",
+    type: "system",
+  });
+  query.finish();
+  await running;
+  expect(session.slashCommands).toEqual(["prior"]);
+});

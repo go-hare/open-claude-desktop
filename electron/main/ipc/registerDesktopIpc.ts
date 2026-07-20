@@ -19,6 +19,10 @@ import {
 } from "../services/coworkRuntime/coworkSkillsSlashBridge";
 import { createCoworkTranscriptReader } from "../services/coworkRuntime/coworkTranscriptReader";
 import { FeatureStateStore } from "../services/featureState/featureStateStore";
+import {
+  CoworkDesktopNotificationService,
+  createElectronCoworkDesktopNotificationBackend,
+} from "../services/coworkSessions/coworkDesktopNotificationService";
 import { CoworkSessionManager } from "../services/coworkSessions/coworkSessionManager";
 import { CoworkSessionPersistence } from "../services/coworkSessions/coworkSessionPersistence";
 import { ScheduledTaskStore } from "../services/scheduledTasks/scheduledTaskStore";
@@ -66,8 +70,23 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
   // Shared SettingsStore so xn allowAllBrowserActions and AppPreferences IPC
   // see the same preference bag (official Xo()/F_ preferences).
   const settings = new SettingsStore();
+  // Official Ds NotificationService (class fir) residual — Electron adapter only.
+  // Swift UNUserNotificationCenter / ze analytics / dock bounce not product.
+  const desktopNotificationService = new CoworkDesktopNotificationService({
+    backend: createElectronCoworkDesktopNotificationBackend(),
+  });
   const localAgentModeSessions = new CoworkSessionManager({
     accountContext: coworkAccount,
+    desktopNotificationService,
+    // Official idle onClick: yz() focus main + dispatchNavigate residual.
+    // Full XC.getDispatcher product not invented — focus main window only.
+    navigateToLocalSession: (_sessionId) => {
+      const main = windows.mainWindow;
+      if (main && !main.isDestroyed()) {
+        main.show();
+        main.focus();
+      }
+    },
     createPersistence: (identity) => {
       coworkPersistence = new CoworkSessionPersistence({
         accountId: identity.accountUuid,

@@ -21,6 +21,7 @@ import { CoworkAsyncInputQueue } from "./coworkAsyncInputQueue";
 import { CoworkQueryRuntime } from "./coworkQueryRuntime";
 import type {
   CoworkQueryFactory,
+  CoworkQueryFactoryInput,
   CoworkSessionEvent,
 } from "./coworkSessionManagerTypes";
 import { clearCoworkSessionEphemeralsOnLeavingRunning } from "./coworkSessionNotifications";
@@ -127,7 +128,21 @@ type CoworkSessionRuntimeControllerOptions = {
     session: CoworkSessionRuntimeState,
   ) => readonly string[] | null | undefined;
   now: () => number;
+  /**
+   * Official transitionTo("idle") idle-grace arm residual from manager.
+   */
+  onBecameIdle?: (
+    sessionId: string,
+    options?: { fromRunning?: boolean; hasError?: boolean },
+  ) => void;
   onQueryCompleted?: (sessionId: string) => void;
+  /**
+   * Official aze CIC canUseTool residual builder.
+   * When unset, factory skips CIC branch (no Chrome MCP invent).
+   */
+  buildCicCanUseTool?: (
+    session: CoworkSessionRuntimeState,
+  ) => CoworkQueryFactoryInput["cicCanUseTool"];
   queryFactory: CoworkQueryFactory;
   requestPermission: (
     session: CoworkSessionRuntimeState,
@@ -153,7 +168,9 @@ export class CoworkSessionRuntimeController {
   private readonly mountSessionFolder?: CoworkSessionRuntimeControllerOptions["mountSessionFolder"];
   private readonly notifySession?: CoworkSessionRuntimeControllerOptions["notifySession"];
   private readonly now: () => number;
+  private readonly onBecameIdle?: CoworkSessionRuntimeControllerOptions["onBecameIdle"];
   private readonly onQueryCompleted?: (sessionId: string) => void;
+  private readonly buildCicCanUseTool?: CoworkSessionRuntimeControllerOptions["buildCicCanUseTool"];
   private readonly pickDirectory?: CoworkSessionRuntimeControllerOptions["pickDirectory"];
   private readonly queryFactory: CoworkQueryFactory;
   private readonly recordDetectedFile?: CoworkSessionRuntimeControllerOptions["recordDetectedFile"];
@@ -183,6 +200,8 @@ export class CoworkSessionRuntimeController {
     this.mountSessionFolder = options.mountSessionFolder;
     this.notifySession = options.notifySession;
     this.now = options.now;
+    this.onBecameIdle = options.onBecameIdle;
+    this.buildCicCanUseTool = options.buildCicCanUseTool;
     this.onMarkTaskComplete = options.onMarkTaskComplete;
     this.onQueryCompleted = options.onQueryCompleted;
     this.pickDirectory = options.pickDirectory;
@@ -313,6 +332,8 @@ export class CoworkSessionRuntimeController {
       autoMemoryDir,
       autoMemoryReadOnly: session.sessionType === "radar",
       canUseTool: (request) => this.requestPermission(session, request),
+      // Official aze CIC canUseTool residual — product wires browser card hooks.
+      cicCanUseTool: this.buildCicCanUseTool?.(session),
       cwd: session.cwd,
       // Official a||g path-required gate uses session.sessionType.
       sessionType: session.sessionType ?? null,
@@ -443,6 +464,7 @@ export class CoworkSessionRuntimeController {
       enablePromptSuggestionGrace: this.enablePromptSuggestionGrace,
       isCurrent: () => session.query === query,
       now: this.now,
+      onBecameIdle: this.onBecameIdle,
       onClosed: () => this.onQueryClosed(session, query),
       onQueryCompleted: this.onQueryCompleted,
       query,

@@ -45,6 +45,27 @@ import {
   prepareCoworkSendMessageSuggestionClear,
 } from "./coworkPromptSuggestionHelpers";
 import {
+  buildCoworkSessionArchivedProps,
+  buildCoworkSessionStoppedProps,
+  resolveCoworkTranscriptSizeBytes,
+  shouldTrackCoworkSessionStopped,
+  trackCoworkSessionLifecycleAnalytics,
+} from "./coworkSessionLifecycleAnalytics";
+import {
+  handleCoworkBridgeInterruptControlRequest,
+  type CoworkBridgeInterruptAnalyticsProps,
+  type CoworkBridgeInterruptOutcome,
+} from "./coworkBridgeControlRequest";
+import {
+  armCoworkIdleGraceTimer,
+  buildCoworkIdleGraceExpiredProps,
+  buildCoworkIdleGraceHitProps,
+  clearCoworkIdleGraceTimer,
+  hasCoworkIdleGraceTimer,
+  resolveCoworkIdleGraceArm,
+  shouldTeardownOnCoworkIdleGraceFire,
+} from "./coworkIdleGraceHelpers";
+import {
   applyCowork1mContextModelSuffix,
   resolveCoworkSetModelChange,
   type CoworkModelConfig,
@@ -52,9 +73,18 @@ import {
 import {
   resolveCoworkReplaceEnabledMcpToolsChange,
   resolveCoworkReplaceRemoteMcpServersChange,
+  resolveCoworkRemoteMcpServerKey,
   type CoworkEnabledMcpToolsMap,
   type CoworkRemoteMcpServerConfig,
 } from "./coworkMcpToolsState";
+import {
+  mergeCoworkActiveMcpServersAfterRemoteReplace,
+  removeCoworkActiveMcpServerKeys,
+  resolveCoworkApplyMcpServersIfIdle,
+  resolveCoworkSetMcpServersChange,
+  shouldFlushCoworkDeferredMcpServers,
+  type CoworkSetMcpServerItem,
+} from "./coworkMcpApplyHelpers";
 import {
   isCoworkTranscriptFeedback,
   readCoworkTranscriptFeedback,
@@ -75,6 +105,7 @@ import {
   resolveCoworkPermissionSessionId,
   type CoworkBrowserPermissionRequestInput,
 } from "./coworkChromeCicHelpers";
+import { shouldShowCoworkIdleNotification } from "./coworkDesktopNotificationService";
 import {
   COWORK_DISPATCH_CU_GRANT_TTL_MS,
   isCoworkSessionTurnAborted,
@@ -124,6 +155,56 @@ export class CoworkSessionManager {
    * Statsig residual: default false.
    */
   private readonly enablePromptSuggestionGrace: () => boolean;
+  /**
+   * Official stopSession tail mcpCoordinator.unregisterRootsProvider.
+   * Inject residual — default no-op (no full mcpCoordinator invent).
+   */
+  private readonly unregisterRootsProvider: (sessionId: string) => void;
+  /**
+   * Official startSession mcpCoordinator.registerRootsProvider(sessionId, getter).
+   * Inject residual — default no-op (no full mcpCoordinator invent).
+   */
+  private readonly registerRootsProvider: (
+    sessionId: string,
+    getRoots: () => Promise<string[]> | string[],
+  ) => void;
+  /**
+   * Official wr("1978029737","idleGraceMs",0,ni()) for transitionTo idle arm.
+   * Statsig residual — default 0.
+   */
+  private readonly getIdleGraceMs: () => number;
+  /** Official ft("2800354941") residual for rwA. Default false. */
+  private readonly sortMcpServersKeys: () => boolean;
+  /**
+   * Official mcpCoordinator.createRemoteServers inject residual.
+   * Default empty map — no full coordinator invent.
+   */
+  private readonly createRemoteMcpServers: (
+    sessionId: string,
+    input: {
+      enabledMcpTools?: unknown;
+      remoteMcpServers: CoworkRemoteMcpServerConfig[];
+    },
+  ) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  /**
+   * Official mcpCoordinator.createMcpServer inject residual.
+   * Default null — no full coordinator invent.
+   */
+  private readonly createMcpServer: (
+    sessionId: string,
+    server: CoworkSetMcpServerItem,
+  ) =>
+    | { key: string; server: unknown }
+    | null
+    | undefined
+    | Promise<{ key: string; server: unknown } | null | undefined>;
+  /**
+   * Official bridge activeSessions lookup for inbound control_request interrupt.
+   * Inject residual — default null (no full remote bridge invent).
+   */
+  private readonly getBridgeActiveSession: (
+    remoteSessionId: string,
+  ) => { localSessionId?: string | null } | null | undefined;
   private readonly preferSessionNotifications: () => boolean;
   private readonly getAllowedWorkspaceFolders?: () =>
     | readonly string[]
@@ -133,6 +214,21 @@ export class CoworkSessionManager {
   private readonly onFocusedSessionChanged?: (
     sessionId: string | null,
   ) => void;
+  /**
+   * Official Ds NotificationService residual (idle show + focus close).
+   */
+  private readonly desktopNotificationService?: {
+    handleFocusedSessionChanged: (sessionId: string | null | undefined) => void;
+    showIdleNotification: (input: {
+      onClick?: () => void;
+      sessionId: string;
+      sessionTitle?: string | null;
+    }) => void;
+  } | null;
+  /**
+   * Official idle notification onClick → navigate `/local_sessions/${id}` residual.
+   */
+  private readonly navigateToLocalSession?: (sessionId: string) => void;
   private readonly showItemInFolder?: (target: string) => void;
   private readonly getDownloadsDir?: () => string;
   private readonly getLogsDir?: () => string | null | undefined;
@@ -198,12 +294,31 @@ export class CoworkSessionManager {
     // Official ft("1942781881") residual: default off (do not invent product gate on).
     this.enablePromptSuggestionGrace =
       options.enablePromptSuggestionGrace ?? (() => false);
+    // Official stopSession tail mcpCoordinator.unregisterRootsProvider — inject only.
+    this.unregisterRootsProvider =
+      options.unregisterRootsProvider ?? (() => undefined);
+    // Official startSession registerRootsProvider — inject only.
+    this.registerRootsProvider =
+      options.registerRootsProvider ?? (() => undefined);
+    // Official wr idleGraceMs — Statsig residual default 0.
+    this.getIdleGraceMs = options.getIdleGraceMs ?? (() => 0);
+    this.sortMcpServersKeys = options.sortMcpServersKeys ?? (() => false);
+    this.createRemoteMcpServers =
+      options.createRemoteMcpServers ?? (async () => ({}));
+    this.createMcpServer = options.createMcpServer ?? (async () => null);
+    // Official bridge activeSessions.get for control_request interrupt — inject only.
+    this.getBridgeActiveSession =
+      options.getBridgeActiveSession ?? (() => null);
     // Official Th() inject for setDraftSessionFolders eBe — Settings residual.
     this.getAllowedWorkspaceFolders = options.getAllowedWorkspaceFolders;
     // Official gA.shell.openPath for openOutputsDir.
     this.openPath = options.openPath;
     // Official EventEmitter "focusedSessionChanged" residual inject.
     this.onFocusedSessionChanged = options.onFocusedSessionChanged;
+    // Official Ds NotificationService residual inject (class fir).
+    this.desktopNotificationService = options.desktopNotificationService;
+    // Official idle onClick dispatchNavigate residual.
+    this.navigateToLocalSession = options.navigateToLocalSession;
     // Official gA.shell.showItemInFolder + nB("downloads") for tXi/iXi.
     this.showItemInFolder = options.showItemInFolder;
     this.getDownloadsDir = options.getDownloadsDir;
@@ -315,6 +430,9 @@ export class CoworkSessionManager {
     // Official drainPendingStartMessages → startFileWatching(userSelectedFolders) after init.
     // Our path starts the query async; start watching host folders immediately (same dirs).
     this.startFileWatching(sessionId);
+    // Official startSession: mcpCoordinator.registerRootsProvider(A, getter)
+    // after path/vm context — before createAllServers. Product inject residual.
+    this.registerRootsProviderForSession(sessionId);
     void this.runtime.start(session, startInfo).catch(() => undefined);
     return sessionId;
   }
@@ -392,8 +510,13 @@ export class CoworkSessionManager {
       return;
     }
     // Official sendMessage head: clearTimeout(_suggestionTimeout) + promptSuggestion=void 0
-    // + isAgentCompleted=false. Residual: cancelIdleGrace product not wired.
+    // + isAgentCompleted=false + cancelIdleGrace({teardown:false}) when timer set.
     const suggestionClear = prepareCoworkSendMessageSuggestionClear(session);
+    const hadIdleGrace = hasCoworkIdleGraceTimer(session);
+    if (hadIdleGrace) {
+      // Official: cancelIdleGrace(s,{teardown:!1}) then transitionTo running.
+      this.cancelIdleGrace(session, { teardown: false });
+    }
     if (!session.query || !session.inputStream) {
       await this.start(
         createResumeInput(
@@ -412,10 +535,12 @@ export class CoworkSessionManager {
     // Official setLifecycle → running && tv(sessionType): pwe prune CU grants.
     session.lifecycleState = "running";
     session.error = undefined;
+    session.lastActivityAt = this.now();
+    session.isFirstTurn = false;
     pruneCoworkSessionCuGrantsOnTurnStart(session, this.now());
-    // Official (g||c||I) session_updated when suggestion timeout / agent completed /
-    // idle grace was cleared — product always emits via saveAndEmitUpdate below.
+    // Official (g||c||I) session_updated when suggestion / agent completed / idle grace.
     void suggestionClear;
+    void hadIdleGrace;
     this.saveAndEmitUpdate(session);
     this.runtime.enqueueMessage(
       session,
@@ -425,6 +550,191 @@ export class CoworkSessionManager {
       messageUuid,
       _toolStates,
     );
+  }
+
+  /**
+   * Official cancelIdleGrace(session, {teardown}).
+   * teardown:true → teardownIdleProcess (stop keep-alive query).
+   * teardown:false → reuse process (lam_idle_grace_hit residual log).
+   */
+  private cancelIdleGrace(
+    session: {
+      sessionId: string;
+      _idleGraceTimer?: ReturnType<typeof setTimeout>;
+      _idleGraceStartedAt?: number;
+      query: CoworkSessionRuntimeState["query"];
+      inputStream: CoworkSessionRuntimeState["inputStream"];
+    },
+    options: { teardown: boolean },
+  ): void {
+    if (!session._idleGraceTimer) return;
+    const { graceElapsedMs } = clearCoworkIdleGraceTimer(session, this.now);
+    if (options.teardown) {
+      this.teardownIdleProcess(session.sessionId);
+      return;
+    }
+    // Official: reuse process + je("lam_idle_grace_hit", …).
+    console.info(
+      `[Lifecycle] Idle grace hit for session ${session.sessionId} after ${graceElapsedMs ?? "?"}ms — reusing process`,
+      buildCoworkIdleGraceHitProps(session.sessionId, graceElapsedMs),
+    );
+  }
+
+  /**
+   * Official teardownIdleProcess:
+   *   query.close(); query=null; inputStream=null; stopFileWatching.
+   * Residual: persistGrowthBookCache / vmProcessId / _priorVmProcessId not product.
+   */
+  private teardownIdleProcess(sessionId: string): void {
+    const session = this.repository.get(sessionId);
+    if (!session) return;
+    if (session.query) {
+      try {
+        session.query.close();
+      } catch (error) {
+        console.warn(
+          `[Lifecycle] Failed to close query for session ${sessionId}:`,
+          error,
+        );
+      }
+    }
+    session.query = null;
+    session.inputStream = null;
+    this.stopFileWatching(sessionId);
+  }
+
+  /**
+   * Official transitionTo("idle") idle-grace arm residual.
+   * Call when product enters idle from a successful running turn with live query.
+   * Statsig idleGraceMs inject default 0 → residual keeps warm query (no arm, no
+   * forced teardown) so existing resume path still works without inventing gate.
+   */
+  maybeArmIdleGraceAfterIdle(
+    sessionId: string,
+    options?: { fromRunning?: boolean; hasError?: boolean },
+  ): void {
+    const session = this.repository.get(sessionId);
+    if (!session) return;
+    if (session.lifecycleState !== "idle") return;
+    session._lastIdleAt = this.now();
+    const decision = resolveCoworkIdleGraceArm({
+      graceMs: this.getIdleGraceMs(),
+      fromRunning: options?.fromRunning !== false,
+      hasError: options?.hasError === true || Boolean(session.error),
+      hasQuery: session.query !== null,
+      hasInputStream: session.inputStream !== null,
+      sessionType: session.sessionType,
+    });
+    if (!decision.arm) {
+      // Official else branch: teardownIdleProcess. Product residual when ms_zero:
+      // keep warm query for resume (matches pre-#124 behavior). Other fail reasons
+      // (error / no process / skip type) still tear down when a process is live.
+      if (
+        decision.reason !== "ms_zero" &&
+        (session.query || session.inputStream)
+      ) {
+        this.teardownIdleProcess(sessionId);
+      }
+      return;
+    }
+    console.info(
+      `[Lifecycle] Starting ${decision.graceMs}ms idle grace for session ${sessionId} — process kept alive for warm resume`,
+    );
+    armCoworkIdleGraceTimer(session, {
+      graceMs: decision.graceMs,
+      now: this.now,
+      onFire: () => {
+        const current = this.repository.get(sessionId);
+        if (!current) return;
+        const graceElapsedMs =
+          current._lastIdleAt !== undefined
+            ? Math.max(0, this.now() - current._lastIdleAt)
+            : undefined;
+        if (!shouldTeardownOnCoworkIdleGraceFire(current.lifecycleState)) {
+          console.info(
+            `[Lifecycle] Idle grace timer fired but session ${sessionId} is ${current.lifecycleState} — skipping teardown`,
+          );
+          return;
+        }
+        console.info(
+          `[Lifecycle] Idle grace expired for session ${sessionId}, tearing down process`,
+          buildCoworkIdleGraceExpiredProps(sessionId, graceElapsedMs),
+        );
+        this.teardownIdleProcess(sessionId);
+        this.saveAndEmitUpdate(current);
+      },
+    });
+    // Official warm-arm branch: flush deferred setMcpServers when dirty.
+    this.flushDeferredMcpServersOnIdleGraceArm(session);
+  }
+
+  /**
+   * Official idle-grace warm arm tail:
+   *   mcpServersDirty && activeMcpServers → dirty=false;
+   *   query.setMcpServers(rwA(active)).catch(warn)
+   */
+  private flushDeferredMcpServersOnIdleGraceArm(
+    session: CoworkSessionRuntimeState,
+  ): void {
+    if (
+      !shouldFlushCoworkDeferredMcpServers({
+        activeMcpServers: session.activeMcpServers,
+        mcpServersDirty: session.mcpServersDirty,
+      })
+    ) {
+      return;
+    }
+    session.mcpServersDirty = false;
+    const servers = session.activeMcpServers ?? {};
+    const payload = resolveCoworkApplyMcpServersIfIdle({
+      hasQuery: Boolean(session.query?.setMcpServers),
+      lifecycleState: "idle",
+      servers,
+      sortKeys: this.sortMcpServersKeys(),
+    });
+    if (payload.action !== "apply" || !session.query?.setMcpServers) return;
+    void session.query.setMcpServers(payload.servers).catch((error) => {
+      console.warn(
+        `[LAM] Deferred setMcpServers failed for ${session.sessionId}:`,
+        error,
+      );
+    });
+  }
+
+  /**
+   * Official applyMcpServersIfIdle(session, servers):
+   *   !query || Wl → (Wl → dirty=true) return
+   *   else dirty=false; await query.setMcpServers(rwA(servers))
+   */
+  private async applyMcpServersIfIdle(
+    session: CoworkSessionRuntimeState,
+    servers: Record<string, unknown>,
+  ): Promise<void> {
+    const decision = resolveCoworkApplyMcpServersIfIdle({
+      hasQuery: Boolean(session.query?.setMcpServers),
+      lifecycleState: session.lifecycleState,
+      servers,
+      sortKeys: this.sortMcpServersKeys(),
+    });
+    if (decision.action === "defer") {
+      session.mcpServersDirty = true;
+      console.debug(
+        `[LAM] Deferring setMcpServers for ${session.sessionId} — ${decision.lifecycleState}`,
+      );
+      return;
+    }
+    if (decision.action === "skip_no_query") {
+      return;
+    }
+    session.mcpServersDirty = false;
+    try {
+      await session.query?.setMcpServers?.(decision.servers);
+    } catch (error) {
+      console.warn(
+        `[LAM] setMcpServers failed for ${session.sessionId}:`,
+        error,
+      );
+    }
   }
 
   /**
@@ -455,9 +765,16 @@ export class CoworkSessionManager {
       return { enabledMcpTools: decision.enabledMcpTools };
     }
 
-    // Official query branch residual: d6e + mcpCoordinator.reconcileServers +
-    // applyMcpServersIfIdle — not product-wired (no invent full coordinator).
+    // Official query branch residual: d6e + mcpCoordinator.reconcileServers not
+    // product-wired (no invent full coordinator). When query present, apply
+    // current activeMcpServers via applyMcpServersIfIdle (dirty/defer/set).
     session.enabledMcpTools = decision.nextEnabledMcpTools;
+    if (session.query) {
+      await this.applyMcpServersIfIdle(
+        session,
+        session.activeMcpServers ?? {},
+      );
+    }
     this.saveAndEmitUpdate(session);
 
     // Official: save then ft ? clear builtLocal only : full invalidate.
@@ -500,9 +817,28 @@ export class CoworkSessionManager {
       return { enabledMcpTools: decision.enabledMcpTools };
     }
 
-    // Official query branch residual: mcpCoordinator.createRemoteServers +
-    // activeMcpServers merge/delete + applyMcpServersIfIdle.
+    // Official query branch: createRemoteServers inject + active merge + apply.
+    const previousRemote = (session.remoteMcpServersConfig ??
+      []) as CoworkRemoteMcpServerConfig[];
     session.remoteMcpServersConfig = decision.nextRemoteServers;
+    if (session.query) {
+      const nextKeys = new Set(
+        decision.nextRemoteServers.map((s) =>
+          resolveCoworkRemoteMcpServerKey(s),
+        ),
+      );
+      const created = await this.createRemoteMcpServers(sessionId, {
+        enabledMcpTools: session.enabledMcpTools,
+        remoteMcpServers: decision.nextRemoteServers,
+      });
+      session.activeMcpServers = mergeCoworkActiveMcpServersAfterRemoteReplace({
+        activeMcpServers: session.activeMcpServers,
+        createdRemoteServers: created,
+        nextRemoteKeys: nextKeys,
+        previousRemote,
+      });
+      await this.applyMcpServersIfIdle(session, session.activeMcpServers);
+    }
     this.saveAndEmitUpdate(session);
 
     if (this.preferSessionNotifications()) {
@@ -524,6 +860,66 @@ export class CoworkSessionManager {
    *   → ft notify Model switched to ${o?t:s} + CU suffix.
    * Product injects kI/ft gates; residual: je analytics, full UXe rebuild.
    */
+
+  /**
+   * Official setMcpServers(A, t):
+   *   tv → skip return current enabled
+   *   for each item: enable → createMcpServer inject + remote push; disable → drop
+   *   active + toolKeys; applyMcpServersIfIdle; save; invalidate; return enabled
+   * Product: pure merge + inject residual createMcpServer (default null).
+   */
+  async setMcpServers(
+    sessionId: string,
+    servers: unknown,
+  ): Promise<{ enabledMcpTools: CoworkEnabledMcpToolsMap }> {
+    const session = this.repository.require(sessionId);
+    const requested = Array.isArray(servers)
+      ? (servers as CoworkSetMcpServerItem[])
+      : [];
+    const decision = resolveCoworkSetMcpServersChange({
+      activeMcpServers: session.activeMcpServers,
+      currentEnabledMcpTools: session.enabledMcpTools as
+        | CoworkEnabledMcpToolsMap
+        | null
+        | undefined,
+      currentRemoteServers: (session.remoteMcpServersConfig ??
+        null) as CoworkRemoteMcpServerConfig[] | null,
+      requested,
+      sessionType: session.sessionType,
+    });
+    if (decision.action === "skip_dispatch") {
+      console.info(
+        `[setMcpServers] skipping for dispatch session ${sessionId} (type=${session.sessionType})`,
+      );
+      return { enabledMcpTools: decision.enabledMcpTools };
+    }
+
+    let active = removeCoworkActiveMcpServerKeys(
+      session.activeMcpServers,
+      decision.removedActiveKeys,
+    );
+    for (const item of decision.toCreate) {
+      const created = await this.createMcpServer(sessionId, item);
+      if (created?.key) {
+        active[created.key] = created.server as unknown;
+      }
+    }
+    session.activeMcpServers = active;
+    session.remoteMcpServersConfig = decision.remoteMcpServersConfig;
+    session.enabledMcpTools = decision.enabledMcpTools;
+    await this.applyMcpServersIfIdle(session, active);
+    this.saveAndEmitUpdate(session);
+    if (this.preferSessionNotifications()) {
+      session.builtLocalMcpServers = undefined;
+    } else {
+      invalidateCoworkBuiltPromptAndTools(session);
+    }
+    return {
+      enabledMcpTools:
+        (session.enabledMcpTools as CoworkEnabledMcpToolsMap | undefined) ?? {},
+    };
+  }
+
   async setModel(sessionId: string, model: unknown): Promise<void> {
     const session = this.repository.require(sessionId);
     const decision = resolveCoworkSetModelChange({
@@ -657,15 +1053,53 @@ export class CoworkSessionManager {
    *   previous = focusedSessionId; focusedSessionId = A;
    *   if previous !== A → emit("focusedSessionChanged", A).
    * Product maps EventEmitter emit → onFocusedSessionChanged inject residual.
-   * Full Ds NotificationService close on focus (idle/AskUserQuestion/scheduled)
-   * not product-wired (#109 closed only leavingRunning CU ephemerals).
+   * Official Ds close trio on truthy focus (idle / AskUserQuestion / scheduled-*).
    */
   setFocusedSession(sessionId: string | null): void {
     const previous = this.focusedSessionId;
     this.focusedSessionId = sessionId;
     if (previous !== sessionId) {
+      this.desktopNotificationService?.handleFocusedSessionChanged(sessionId);
       this.onFocusedSessionChanged?.(sessionId);
     }
+  }
+
+  /**
+   * Official isHiddenSession(A) = iv(sessions.get(A)?.sessionType)
+   * (agent | dispatch_child | radar). Used by queryCompleted idle gate.
+   */
+  isHiddenSession(sessionId: string): boolean {
+    const session = this.repository.get(sessionId);
+    return isCoworkHiddenSessionType(session?.sessionType);
+  }
+
+  /**
+   * Official ai.on("queryCompleted") Ds idle show body:
+   *   if isHiddenSession → skip
+   *   if scheduledTaskId → skip
+   *   if focused === sessionId → skip
+   *   else showIdleNotification({sessionId, sessionTitle, onClick navigate})
+   */
+  private handleQueryCompletedDesktopNotification(sessionId: string): void {
+    if (!this.desktopNotificationService) return;
+    const session = this.repository.get(sessionId);
+    if (
+      !shouldShowCoworkIdleNotification({
+        focusedSessionId: this.focusedSessionId,
+        isHiddenSession: this.isHiddenSession(sessionId),
+        scheduledTaskId: session?.scheduledTaskId,
+        sessionId,
+      })
+    ) {
+      return;
+    }
+    this.desktopNotificationService.showIdleNotification({
+      onClick: this.navigateToLocalSession
+        ? () => this.navigateToLocalSession?.(sessionId)
+        : undefined,
+      sessionId,
+      sessionTitle: session?.title,
+    });
   }
 
   /**
@@ -1182,12 +1616,57 @@ export class CoworkSessionManager {
     }
   }
 
-  async stop(sessionId: string): Promise<void> {
+  /**
+   * Official bridge handleInboundControlRequest interrupt residual:
+   *   subtype!==interrupt → no-op
+   *   else resolve activeSessions → interruptTurn(localSessionId)
+   *   je("lam_bridge_interrupt_received", …) via optional track sink residual
+   * Full remote bridge transport / activeSessions map product not invented —
+   * product injects getBridgeActiveSession only.
+   */
+  async handleInboundControlRequest(
+    remoteSessionId: string,
+    message: unknown,
+    options?: {
+      track?: (props: CoworkBridgeInterruptAnalyticsProps) => void;
+    },
+  ): Promise<CoworkBridgeInterruptOutcome> {
+    return handleCoworkBridgeInterruptControlRequest({
+      remoteSessionId,
+      message,
+      getActiveSession: this.getBridgeActiveSession,
+      interruptTurn: (localSessionId) => this.interruptTurn(localSessionId),
+      track: options?.track,
+    });
+  }
+
+  /**
+   * Official stopSession(A, force=false).
+   * force=true (archive path) skips lam_session_stopped je.
+   */
+  async stop(
+    sessionId: string,
+    options?: { force?: boolean },
+  ): Promise<void> {
     const session = this.repository.get(sessionId);
     if (!session) return;
     // Official stopSession head: clearTimeout(_suggestionTimeout) + promptSuggestion=void 0.
     clearCoworkPromptSuggestionState(session);
+    // Official stopSession early: this.cancelIdleGrace(i,{teardown:!0}).
+    try {
+      this.cancelIdleGrace(session, { teardown: true });
+    } catch (error) {
+      console.warn(
+        `[stop] cancelIdleGrace failed for session ${sessionId}:`,
+        error,
+      );
+    }
+    // Official r = Wl(i)||i.query before teardown (for je gate).
+    // Wl = lifecycleState !== "idle" && !== "archived".
     const hadQuery = session.query !== null;
+    const preStopLifecycleState = session.lifecycleState;
+    const force = options?.force === true;
+    const createdAt = session.createdAt;
     session.lifecycleState = "stopping";
     session.inputStream?.done();
     session.query?.close();
@@ -1206,16 +1685,57 @@ export class CoworkSessionManager {
     this.saveAndEmitUpdate(session);
     await this.repository.flush(sessionId);
     if (hadQuery) this.emit({ code: 0, sessionId, type: "close" });
+    // Official: if (r && !force) je("lam_session_stopped", …) before unregister.
+    if (
+      shouldTrackCoworkSessionStopped({
+        force,
+        hadQuery,
+        wasRunning: preStopLifecycleState !== "idle" &&
+          preStopLifecycleState !== "archived",
+        lifecycleState: preStopLifecycleState,
+      })
+    ) {
+      const totalTurns = session.cachedTotalTurns ?? 0;
+      const sessionDurationMs = Math.max(0, this.now() - createdAt);
+      const transcriptSizeBytes = await resolveCoworkTranscriptSizeBytes(
+        session,
+        {
+          sessionStorageDir: this.repository.getSessionStorageDir(session),
+        },
+      );
+      trackCoworkSessionLifecycleAnalytics(
+        "lam_session_stopped",
+        buildCoworkSessionStoppedProps({
+          sessionId,
+          cliSessionId: session.cliSessionId,
+          sessionType: session.sessionType,
+          totalTurns,
+          sessionDurationMs,
+          transcriptSizeBytes,
+        }),
+      );
+    }
+    // Official stopSession tail: this.mcpCoordinator.unregisterRootsProvider(A).
+    // Product inject residual — default no-op (no full mcpCoordinator invent).
+    try {
+      this.unregisterRootsProvider(sessionId);
+    } catch (error) {
+      console.warn(
+        `[stop] unregisterRootsProvider failed for session ${sessionId}:`,
+        error,
+      );
+    }
   }
 
   async archive(sessionId: string, _options?: unknown): Promise<void> {
     const session = this.repository.get(sessionId);
     if (!session) return;
-    // Official archiveSession: stopSession(A, true) then rm storage/uploads.
-    await this.stop(sessionId);
+    // Official archiveSession: duration from createdAt before stopSession(A, true).
+    const sessionDurationMs = Math.max(0, this.now() - session.createdAt);
+    // Official: stopSession(A, true) — force skips lam_session_stopped.
+    await this.stop(sessionId, { force: true });
     // Official: n=getSessionStorageDir(A); if(n) JA.rm(join(n,"uploads"),{recursive,force})
-    // Residual not invented: sessionAuditLoggers close, dispatchCoordinator.detach,
-    // je("lam_session_archived") analytics.
+    // Residual not invented: sessionAuditLoggers close, dispatchCoordinator.detach.
     const storage = this.repository.getSessionStorageDir(session);
     if (storage) {
       const uploads = join(storage, "uploads");
@@ -1231,6 +1751,22 @@ export class CoworkSessionManager {
       "Session was archived.",
     );
     session.lifecycleState = "archived";
+    // Official: total_turns = cachedTotalTurns after stop accumulate.
+    const totalTurns = session.cachedTotalTurns ?? 0;
+    const transcriptSizeBytes = await resolveCoworkTranscriptSizeBytes(
+      session,
+      { sessionStorageDir: storage },
+    );
+    trackCoworkSessionLifecycleAnalytics(
+      "lam_session_archived",
+      buildCoworkSessionArchivedProps({
+        sessionId,
+        cliSessionId: session.cliSessionId,
+        totalTurns,
+        sessionDurationMs,
+        transcriptSizeBytes,
+      }),
+    );
     this.repository.save(session);
     await this.repository.flush(sessionId);
     this.emit({ sessionId, type: "archived" });
@@ -1363,6 +1899,54 @@ export class CoworkSessionManager {
       preferSessionNotifications: () => this.preferSessionNotifications(),
       // Official ft("1942781881") residual for success-result suggestion grace.
       enablePromptSuggestionGrace: () => this.enablePromptSuggestionGrace(),
+      // Official transitionTo idle → idle grace arm residual.
+      onBecameIdle: (sessionId, armOptions) =>
+        this.maybeArmIdleGraceAfterIdle(sessionId, armOptions),
+      // Official aze CIC canUseTool residual — session + browser card hooks.
+      buildCicCanUseTool: (session) => ({
+        allowSkipAllOutsideUnsupervised:
+          this.allowSkipAllOutsideUnsupervised(),
+        session: {
+          chromeAllowedDomains: session.chromeAllowedDomains,
+          chromePermissionMode: session.chromePermissionMode,
+          chromeTabGroupId: session.chromeTabGroupId,
+          cicOnceApproved: session.cicOnceApproved,
+          permissionMode: session.permissionMode,
+          title: session.title,
+        },
+        clearCicOnceApproved: () => {
+          session.cicOnceApproved = undefined;
+        },
+        getCicOnceApproved: () => session.cicOnceApproved,
+        getSessionAfterPrompt: () => {
+          const current = this.repository.get(session.sessionId) ?? session;
+          return {
+            chromeAllowedDomains: current.chromeAllowedDomains,
+            chromePermissionMode: current.chromePermissionMode,
+            permissionMode: current.permissionMode,
+          };
+        },
+        setCicOnceApproved: (host) => {
+          const current = this.repository.get(session.sessionId) ?? session;
+          if (!current.cicOnceApproved) {
+            current.cicOnceApproved = new Set();
+          }
+          current.cicOnceApproved.add(host);
+        },
+        showBrowserPermissionCard: async (request, signal) =>
+          this.handleBrowserPermissionRequest(
+            session.sessionId,
+            {
+              actionData: request.actionData,
+              toolType: request.toolType,
+              url: request.url,
+            },
+            signal,
+          ),
+        updateChromePermission: (mode, domains) =>
+          this.updateChromePermission(session.sessionId, mode, domains),
+        // Residual: queryTabUrl extension bridge + getCurrentBrowserDeviceId not product.
+      }),
       // Official P4 dialog when request_cowork_directory omits path.
       pickDirectory: options.pickDirectory,
       // Official mountFolderForSession → addUserSelectedFolder(Mh kind) + host watch restart.
@@ -1383,7 +1967,11 @@ export class CoworkSessionManager {
       onMarkTaskComplete: (sessionId) => this.markTaskComplete(sessionId),
       hasMarkTaskComplete: true,
       now: this.now,
-      onQueryCompleted: options.onQueryCompleted,
+      // Official ai.on("queryCompleted") → Ds.showIdle gate, then external inject.
+      onQueryCompleted: (sessionId) => {
+        this.handleQueryCompletedDesktopNotification(sessionId);
+        options.onQueryCompleted?.(sessionId);
+      },
       queryFactory: options.queryFactory,
       requestPermission: (session, request) =>
         this.permissions.requestPermission({
@@ -1551,6 +2139,41 @@ export class CoworkSessionManager {
       this.homePath,
       this.folderExists,
     );
+  }
+
+  /**
+   * Official startSession: this.mcpCoordinator.registerRootsProvider(A, async () => {
+   *   const session = sessions.get(A); if (!session) return [];
+   *   const folders = _c(session);
+   *   const storage = getSessionStorageDir(A);
+   *   if (storage) { uploads = join(storage,"uploads"); await access → push }
+   *   return folders;
+   * }).
+   * Product inject residual — default no-op (no full mcpCoordinator invent).
+   */
+  private registerRootsProviderForSession(sessionId: string): void {
+    try {
+      this.registerRootsProvider(sessionId, async () => {
+        const session = this.repository.get(sessionId);
+        if (!session) return [];
+        // Official _c(De) userSelectedFolders.
+        const folders = [
+          ...coworkUserSelectedFolderPaths(session.resolvedFolders),
+        ].filter(Boolean);
+        const storage = this.repository.getSessionStorageDir(session);
+        if (storage) {
+          const uploads = join(storage, "uploads");
+          // Official await JA.access(uploads); product sync residual for inject getter.
+          if (existsSync(uploads)) folders.push(uploads);
+        }
+        return folders;
+      });
+    } catch (error) {
+      console.warn(
+        `[start] registerRootsProvider failed for session ${sessionId}:`,
+        error,
+      );
+    }
   }
 
   /**

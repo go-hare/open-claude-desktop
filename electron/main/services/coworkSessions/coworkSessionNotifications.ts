@@ -256,17 +256,23 @@ export function appendCoworkPreUserMessageHints(
  * Official leavingRunning CU ephemerals (product-owned subset):
  *   A.cuMentionedWindows = void 0
  *   A.widgetToolStates = void 0
+ *   A.cicOnceApproved = void 0 (finishTurnCleanup / leavingRunning)
  * Residual not invented: cuHiddenDuringTurn/auto-unhide, cuHiddenPendingNote,
  * cuClipboardStash restore, teachMode exit, full Ds NotificationService.
  */
 export function clearCoworkSessionEphemeralsOnLeavingRunning(
   session: Pick<
     CoworkSessionRuntimeState,
-    "_turnInterruptRequested" | "cuMentionedWindows" | "widgetToolStates"
+    | "_turnInterruptRequested"
+    | "cicOnceApproved"
+    | "cuMentionedWindows"
+    | "widgetToolStates"
   >,
 ): void {
   session.cuMentionedWindows = undefined;
   session.widgetToolStates = undefined;
+  // Official finishTurnCleanup / leavingRunning: cicOnceApproved=void 0
+  session.cicOnceApproved = undefined;
   // Official transitionTo("idle"): A._turnInterruptRequested=void 0
   session._turnInterruptRequested = undefined;
 }

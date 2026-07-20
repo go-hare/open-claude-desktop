@@ -10,6 +10,7 @@ import {
   clearCoworkPromptSuggestionTimeout,
   coworkPromptSuggestionText,
 } from "./coworkPromptSuggestionHelpers";
+import { extractCoworkSlashCommandNames } from "./coworkSessionCommands";
 
 type CoworkQueryRuntimeOptions = {
   emit: (event: CoworkSessionEvent) => void;
@@ -30,6 +31,14 @@ type CoworkQueryRuntimeOptions = {
    * Default false (Statsig residual — do not invent product gate on).
    */
   enablePromptSuggestionGrace?: () => boolean;
+  /**
+   * Official transitionTo("idle") idle-grace arm residual.
+   * Called when product sets lifecycleState idle with optional error flag.
+   */
+  onBecameIdle?: (
+    sessionId: string,
+    options?: { fromRunning?: boolean; hasError?: boolean },
+  ) => void;
 };
 
 const maximumBufferedMessages = 1_100;
@@ -60,6 +69,7 @@ export class CoworkQueryRuntime {
   private readonly enablePromptSuggestionGrace: () => boolean;
   private readonly isCurrent: () => boolean;
   private readonly now: () => number;
+  private readonly onBecameIdle?: CoworkQueryRuntimeOptions["onBecameIdle"];
   private readonly onClosed: () => void;
   private readonly onQueryCompleted?: (sessionId: string) => void;
   private readonly query: CoworkRuntimeQuery;
@@ -73,12 +83,21 @@ export class CoworkQueryRuntime {
       options.enablePromptSuggestionGrace ?? (() => false);
     this.isCurrent = options.isCurrent;
     this.now = options.now;
+    this.onBecameIdle = options.onBecameIdle;
     this.onClosed = options.onClosed;
     this.onQueryCompleted = options.onQueryCompleted;
     this.query = options.query;
     this.save = options.save;
     this.session = options.session;
     this.translateMessage = options.translateMessage;
+  }
+
+  /** Official transitionTo idle residual hook (idle grace arm). */
+  private notifyBecameIdle(options?: {
+    fromRunning?: boolean;
+    hasError?: boolean;
+  }): void {
+    this.onBecameIdle?.(this.session.sessionId, options);
   }
 
   async run(): Promise<void> {
@@ -179,6 +198,13 @@ export class CoworkQueryRuntime {
     if (cliSessionId && /^[a-zA-Z0-9_-]+$/.test(cliSessionId)) {
       this.session.cliSessionId = cliSessionId;
     }
+    // Official: `"slash_commands"in D && D.slash_commands` → assign + saveSession.
+    // Product: assign when key present; empty array clears; missing key leaves prior.
+    if ("slash_commands" in message) {
+      this.session.slashCommands = extractCoworkSlashCommandNames(
+        message.slash_commands,
+      );
+    }
     this.emit({
       initializationStatus: { isComplete: true, message: "", step: "complete" },
       sessionId: this.session.sessionId,
@@ -249,6 +275,7 @@ export class CoworkQueryRuntime {
               sessionId: this.session.sessionId,
               type: "session_updated",
             });
+            this.notifyBecameIdle({ fromRunning: true, hasError: false });
           }
         },
       });
@@ -266,6 +293,9 @@ export class CoworkQueryRuntime {
     }
     this.save(this.session);
     this.emit({ sessionId: this.session.sessionId, type: "session_updated" });
+    if (this.session.lifecycleState === "idle") {
+      this.notifyBecameIdle({ fromRunning: true, hasError: failed });
+    }
     if (failed) this.emitError(this.session.error ?? "Turn failed");
     this.onQueryCompleted?.(this.session.sessionId);
   }

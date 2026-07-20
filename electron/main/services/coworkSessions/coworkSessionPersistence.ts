@@ -127,6 +127,10 @@ function optionalMetadata(
     pendingSystemReminder: session.pendingSystemReminder,
     permissionMode: session.permissionMode,
     promptSuggestion: session.promptSuggestion,
+    slashCommands:
+      session.slashCommands && session.slashCommands.length > 0
+        ? [...session.slashCommands]
+        : undefined,
     remoteMcpServersConfig: session.remoteMcpServersConfig,
     scheduledTaskId: session.scheduledTaskId,
     sessionType: session.sessionType,

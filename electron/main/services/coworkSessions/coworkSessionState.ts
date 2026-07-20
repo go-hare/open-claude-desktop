@@ -297,6 +297,10 @@ export function toRendererSession(
       pendingToolPermissions.length > 0 ? pendingToolPermissions : undefined,
     permissionMode: session.permissionMode,
     promptSuggestion: session.promptSuggestion,
+    slashCommands:
+      session.slashCommands && session.slashCommands.length > 0
+        ? [...session.slashCommands]
+        : undefined,
     scheduledTaskId: session.scheduledTaskId,
     sessionId: session.sessionId,
     sessionType: session.sessionType,

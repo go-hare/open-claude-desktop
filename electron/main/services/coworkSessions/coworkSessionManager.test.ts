@@ -17,10 +17,15 @@ import {
 } from "./coworkSessionTestUtils";
 import type { CoworkQueryFactoryInput } from "./coworkSessionManagerTypes";
 import type { CoworkSdkUserMessage } from "./coworkSessionTypes";
+import {
+  clearCoworkSessionLifecycleAnalyticsForTests,
+  setCoworkSessionLifecycleAnalyticsSink,
+} from "./coworkSessionLifecycleAnalytics";
 
 const managerTemps: string[] = [];
 
 afterEach(() => {
+  clearCoworkSessionLifecycleAnalyticsForTests();
   for (const dir of managerTemps.splice(0)) {
     try {
       rmSync(dir, { force: true, recursive: true });
@@ -892,6 +897,149 @@ it("stop clears promptSuggestion (official stopSession head)", async () => {
 
   await manager.stop("local_session_1");
   expect(manager.getSession("local_session_1")?.promptSuggestion).toBeUndefined();
+});
+
+it("start calls registerRootsProvider inject (official startSession)", async () => {
+  // Official: mcpCoordinator.registerRootsProvider(A, getter) after path context.
+  // Product: inject residual — default no-op; no full mcpCoordinator invent.
+  const registerRootsProvider = vi.fn();
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+    registerRootsProvider,
+  });
+  const sessionId = await manager.start({
+    message: "hello",
+    messageUuid: "message-1",
+    userSelectedFolders: ["/Users/apple/work-py/AppAgent"],
+  });
+  expect(registerRootsProvider).toHaveBeenCalledTimes(1);
+  expect(registerRootsProvider).toHaveBeenCalledWith(
+    sessionId,
+    expect.any(Function),
+  );
+  const getRoots = registerRootsProvider.mock.calls[0][1] as () => Promise<
+    string[]
+  >;
+  const roots = await getRoots();
+  expect(roots).toContain("/Users/apple/work-py/AppAgent");
+  // Official getter is live: stop leaves session in map → still returns folders.
+  // Missing session → [] (delete path).
+  await manager.stop(sessionId);
+  expect(await getRoots()).toContain("/Users/apple/work-py/AppAgent");
+  await manager.delete(sessionId);
+  expect(await getRoots()).toEqual([]);
+});
+
+it("start continues when registerRootsProvider throws", async () => {
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+    registerRootsProvider: () => {
+      throw new Error("roots map missing");
+    },
+  });
+  await expect(
+    manager.start({
+      message: "hello",
+      messageUuid: "message-1",
+    }),
+  ).resolves.toMatch(/^local_/);
+});
+
+it("stop calls unregisterRootsProvider inject (official stopSession tail)", async () => {
+  // Official: this.mcpCoordinator.unregisterRootsProvider(A) after stop body.
+  // Product: inject residual — default no-op; no full mcpCoordinator invent.
+  const unregisterRootsProvider = vi.fn();
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+    unregisterRootsProvider,
+  });
+  const sessionId = await manager.start({
+    message: "hello",
+    messageUuid: "message-1",
+  });
+  await vi.waitFor(() => {
+    expect(manager.getSession(sessionId)?.isRunning).toBe(true);
+  });
+  await manager.stop(sessionId);
+  expect(unregisterRootsProvider).toHaveBeenCalledWith(sessionId);
+  expect(unregisterRootsProvider).toHaveBeenCalledTimes(1);
+});
+
+it("stop continues when unregisterRootsProvider throws", async () => {
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+    unregisterRootsProvider: () => {
+      throw new Error("roots map missing");
+    },
+  });
+  const sessionId = await manager.start({
+    message: "hello",
+    messageUuid: "message-1",
+  });
+  await vi.waitFor(() => {
+    expect(manager.getSession(sessionId)?.isRunning).toBe(true);
+  });
+  await expect(manager.stop(sessionId)).resolves.toBeUndefined();
+  expect(manager.getSession(sessionId)?.isRunning).toBe(false);
+});
+
+it("stop cancels idle grace with teardown and unregisters roots", async () => {
+  // Official: after suggestion clear, cancelIdleGrace({teardown:!0}) then
+  // stop tail unregisterRootsProvider. Product owns cancelIdleGrace (no inject).
+  const unregisterRootsProvider = vi.fn();
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    getIdleGraceMs: () => 60_000,
+    resolveHostLoopMode: () => true,
+    unregisterRootsProvider,
+  });
+  const sessionId = await manager.start({
+    message: "hello",
+    messageUuid: "message-1",
+  });
+  await vi.waitFor(() => {
+    expect(manager.getSession(sessionId)?.isRunning).toBe(true);
+  });
+  // Arm grace while still "running" process, then force idle + arm.
+  (
+    manager as unknown as {
+      maybeArmIdleGraceAfterIdle: (
+        id: string,
+        o?: { fromRunning?: boolean },
+      ) => void;
+    }
+  ).maybeArmIdleGraceAfterIdle(sessionId, { fromRunning: true });
+  // Force lifecycle idle so arm gate sees idle; re-arm after setting state.
+  const runtime = (
+    manager as unknown as {
+      repository: {
+        get: (id: string) => {
+          lifecycleState: string;
+          _idleGraceTimer?: unknown;
+          query: unknown;
+          inputStream: unknown;
+        } | undefined;
+      };
+    }
+  ).repository.get(sessionId)!;
+  runtime.lifecycleState = "idle";
+  (
+    manager as unknown as {
+      maybeArmIdleGraceAfterIdle: (
+        id: string,
+        o?: { fromRunning?: boolean },
+      ) => void;
+    }
+  ).maybeArmIdleGraceAfterIdle(sessionId, { fromRunning: true });
+  expect(runtime._idleGraceTimer).toBeDefined();
+  await manager.stop(sessionId);
+  expect(runtime._idleGraceTimer).toBeUndefined();
+  expect(unregisterRootsProvider).toHaveBeenCalledWith(sessionId);
+  expect(manager.getSession(sessionId)?.isRunning).toBe(false);
 });
 
 it("stop clears armed _suggestionTimeout (official stopSession head)", async () => {
@@ -2689,4 +2837,534 @@ it("handleBrowserPermissionRequest gLi+nXi routes via broker and cLi maps", asyn
     always: false,
     allSites: false,
   });
+});
+
+it("stop tracks lam_session_stopped when had query (official je)", async () => {
+  const sink = vi.fn();
+  setCoworkSessionLifecycleAnalyticsSink(sink);
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+  });
+  const sessionId = await manager.start({
+    message: "hello",
+    messageUuid: "message-1",
+  });
+  await vi.waitFor(() => {
+    expect(manager.getSession(sessionId)?.isRunning).toBe(true);
+  });
+  // Official session.cliSessionId optional on props.
+  const runtime = (
+    manager as unknown as {
+      repository: { get: (id: string) => { cliSessionId?: string } };
+    }
+  ).repository.get(sessionId);
+  if (runtime) runtime.cliSessionId = "cli-stop-1";
+  await manager.stop(sessionId);
+  expect(sink).toHaveBeenCalledWith({
+    name: "lam_session_stopped",
+    props: expect.objectContaining({
+      session_id: sessionId,
+      cli_session_id: "cli-stop-1",
+      total_turns: expect.any(Number),
+      session_duration_ms: expect.any(Number),
+    }),
+  });
+  const props = sink.mock.calls[0][0].props;
+  expect(props.vm_instance_id).toEqual(expect.any(String));
+  expect("session_type" in props).toBe(true);
+});
+
+it("archive force-skips stopped and tracks lam_session_archived", async () => {
+  const sink = vi.fn();
+  setCoworkSessionLifecycleAnalyticsSink(sink);
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+  });
+  const sessionId = await manager.start({
+    message: "hello",
+    messageUuid: "message-1",
+  });
+  await vi.waitFor(() => {
+    expect(manager.getSession(sessionId)?.isRunning).toBe(true);
+  });
+  await manager.archive(sessionId);
+  const names = sink.mock.calls.map((c) => c[0].name);
+  expect(names).not.toContain("lam_session_stopped");
+  expect(names).toContain("lam_session_archived");
+  const archived = sink.mock.calls.find(
+    (c) => c[0].name === "lam_session_archived",
+  )![0].props;
+  expect(archived.session_id).toBe(sessionId);
+  expect("session_type" in archived).toBe(false);
+});
+
+it("handleInboundControlRequest interrupt routes to interruptTurn (bridge residual)", async () => {
+  // Official: control_request subtype interrupt → sessionManager.interruptTurn(local).
+  // Product: inject getBridgeActiveSession; no full remote bridge invent.
+  const harness = createManagerHarness();
+  const localIdHolder = { id: "" as string };
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+    getBridgeActiveSession: (remote) =>
+      remote === "remote-1" ? { localSessionId: localIdHolder.id } : null,
+  });
+  const sessionId = await manager.start({
+    message: "hello",
+    messageUuid: "message-1",
+  });
+  localIdHolder.id = sessionId;
+  await vi.waitFor(() => {
+    expect(manager.getSession(sessionId)?.isRunning).toBe(true);
+  });
+  const track = vi.fn();
+  const outcome = await manager.handleInboundControlRequest(
+    "remote-1",
+    {
+      type: "control_request",
+      request_id: "req-int-1",
+      request: { subtype: "interrupt" },
+    },
+    { track },
+  );
+  expect(outcome).toBe("interrupted");
+  expect(track).toHaveBeenCalledWith(
+    expect.objectContaining({
+      outcome: "interrupted",
+      local_session_id: sessionId,
+      request_id: "req-int-1",
+    }),
+  );
+  // interruptTurn sets flag on live query.
+  const runtime = (
+    manager as unknown as {
+      repository: {
+        get: (id: string) => { _turnInterruptRequested?: boolean } | undefined;
+      };
+    }
+  ).repository.get(sessionId);
+  expect(runtime?._turnInterruptRequested).toBe(true);
+});
+
+it("handleInboundControlRequest no_session when bridge map miss", async () => {
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+    getBridgeActiveSession: () => null,
+  });
+  const track = vi.fn();
+  await expect(
+    manager.handleInboundControlRequest(
+      "remote-missing",
+      {
+        type: "control_request",
+        request: { subtype: "interrupt" },
+      },
+      { track },
+    ),
+  ).resolves.toBe("no_session");
+  expect(track).toHaveBeenCalledWith(
+    expect.objectContaining({ outcome: "no_session" }),
+  );
+});
+
+it("sendMessage cancelIdleGrace teardown:false reuses warm process (idle grace residual)", async () => {
+  // Official: if _idleGraceTimer → cancelIdleGrace({teardown:false}) + running.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const harness = createManagerHarness();
+    const manager = createTestManager(harness, {
+      getIdleGraceMs: () => 60_000,
+      resolveHostLoopMode: () => true,
+    });
+    const sessionId = await manager.start({
+      message: "hello",
+      messageUuid: "message-1",
+    });
+    await vi.waitFor(() => {
+      expect(manager.getSession(sessionId)?.isRunning).toBe(true);
+    });
+    const getRuntime = () =>
+      (
+        manager as unknown as {
+          repository: {
+            get: (id: string) => {
+              lifecycleState: string;
+              _idleGraceTimer?: ReturnType<typeof setTimeout>;
+              query: { close: () => void } | null;
+              inputStream: unknown;
+            } | undefined;
+          };
+        }
+      ).repository.get(sessionId)!;
+    const runtime = getRuntime();
+    runtime.lifecycleState = "idle";
+    (
+      manager as unknown as {
+        maybeArmIdleGraceAfterIdle: (
+          id: string,
+          o?: { fromRunning?: boolean },
+        ) => void;
+      }
+    ).maybeArmIdleGraceAfterIdle(sessionId, { fromRunning: true });
+    expect(runtime._idleGraceTimer).toBeDefined();
+    const queryBefore = runtime.query;
+    expect(queryBefore).not.toBeNull();
+    await manager.sendMessage(sessionId, "follow-up", undefined, undefined, "m2");
+    expect(runtime._idleGraceTimer).toBeUndefined();
+    // teardown:false reuses process — query still the same live handle.
+    expect(runtime.query).toBe(queryBefore);
+    expect(runtime.lifecycleState).toBe("running");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("idle grace expiry tears down process when still idle", async () => {
+  vi.useFakeTimers();
+  try {
+    const harness = createManagerHarness();
+    const manager = createTestManager(harness, {
+      getIdleGraceMs: () => 1_000,
+      resolveHostLoopMode: () => true,
+    });
+    const sessionId = await manager.start({
+      message: "hello",
+      messageUuid: "message-1",
+    });
+    // Don't use waitFor with fake timers — advance microtasks manually.
+    await Promise.resolve();
+    await Promise.resolve();
+    const getRuntime = () =>
+      (
+        manager as unknown as {
+          repository: {
+            get: (id: string) => {
+              lifecycleState: string;
+              _idleGraceTimer?: ReturnType<typeof setTimeout>;
+              query: unknown;
+              inputStream: unknown;
+            } | undefined;
+          };
+        }
+      ).repository.get(sessionId)!;
+    // Wait for start attach with real time briefly.
+    vi.useRealTimers();
+    await vi.waitFor(() => {
+      expect(manager.getSession(sessionId)?.isRunning).toBe(true);
+    });
+    vi.useFakeTimers();
+    const runtime = getRuntime();
+    runtime.lifecycleState = "idle";
+    (
+      manager as unknown as {
+        maybeArmIdleGraceAfterIdle: (
+          id: string,
+          o?: { fromRunning?: boolean },
+        ) => void;
+      }
+    ).maybeArmIdleGraceAfterIdle(sessionId, { fromRunning: true });
+    expect(runtime._idleGraceTimer).toBeDefined();
+    expect(runtime.query).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(runtime._idleGraceTimer).toBeUndefined();
+    expect(runtime.query).toBeNull();
+    expect(runtime.inputStream).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+
+it("applyMcpServersIfIdle defers while running and flushes on idle grace arm", async () => {
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    getIdleGraceMs: () => 60_000,
+    resolveHostLoopMode: () => true,
+    createRemoteMcpServers: async () => ({
+      "uuid-new": { type: "http", name: "New" },
+    }),
+  });
+  const sessionId = await manager.start({
+    message: "mcp-apply",
+    messageUuid: "message-1",
+    remoteMcpServers: [
+      { uuid: "uuid-old", name: "Old", tools: [{ name: "t" }] },
+    ],
+  });
+  await vi.waitFor(() => expect(manager.getSession(sessionId)?.isRunning).toBe(true));
+
+  const runtime = (manager as unknown as {
+    repository: {
+      get: (id: string) => {
+        query: { mcpServerSets: Array<Record<string, unknown>> } | null;
+        activeMcpServers?: Record<string, unknown>;
+        mcpServersDirty?: boolean;
+        lifecycleState?: string;
+      } | undefined;
+    };
+  }).repository.get(sessionId)!;
+  // Seed active + force running apply path via replaceRemote.
+  runtime.activeMcpServers = {
+    "uuid-old": { type: "http" },
+    keepLocal: { type: "sdk" },
+  };
+
+  await manager.replaceRemoteMcpServers(sessionId, [
+    { uuid: "uuid-new", name: "New", tools: [{ name: "t" }] },
+  ]);
+
+  // Still running → deferred dirty, no setMcpServers yet.
+  expect(runtime.mcpServersDirty).toBe(true);
+  expect(runtime.activeMcpServers).toEqual({
+    keepLocal: { type: "sdk" },
+    "uuid-new": { type: "http", name: "New" },
+  });
+  const query = runtime.query as { mcpServerSets: Array<Record<string, unknown>> } | null;
+  expect(query?.mcpServerSets ?? []).toHaveLength(0);
+
+  // Transition to idle + arm grace → flush deferred setMcpServers.
+  runtime.lifecycleState = "idle";
+  manager.maybeArmIdleGraceAfterIdle(sessionId, {
+    fromRunning: true,
+    hasError: false,
+  });
+  await vi.waitFor(() =>
+    expect((runtime.query as { mcpServerSets: unknown[] } | null)?.mcpServerSets.length).toBe(1),
+  );
+  expect(runtime.mcpServersDirty).toBe(false);
+  expect(
+    (runtime.query as { mcpServerSets: Array<Record<string, unknown>> }).mcpServerSets[0],
+  ).toEqual(runtime.activeMcpServers);
+});
+
+it("setMcpServers skips dispatch_child and applies disable/enable when idle", async () => {
+  // Separate harnesses — createSessionId defaults to local_session_1.
+  const skipHarness = createManagerHarness();
+  const skipManager = createTestManager(skipHarness, {
+    resolveHostLoopMode: () => true,
+  });
+  const skipId = await skipManager.start({
+    message: "dispatch",
+    messageUuid: "message-1",
+    sessionType: "dispatch_child",
+  });
+  await vi.waitFor(() =>
+    expect(skipManager.getSession(skipId)?.isRunning).toBe(true),
+  );
+  const skip = await skipManager.setMcpServers(skipId, [
+    {
+      enabled: true,
+      name: "X",
+      toolKeys: ["x:tool"],
+      uuid: "u-skip",
+    },
+  ]);
+  expect(skip.enabledMcpTools).toEqual({});
+
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+    createMcpServer: async (_id, server) => ({
+      key: server.uuid,
+      server: { type: "http", name: server.name },
+    }),
+  });
+  const sessionId = await manager.start({
+    message: "set-mcp",
+    messageUuid: "message-2",
+  });
+  await vi.waitFor(() =>
+    expect(manager.getSession(sessionId)?.isRunning).toBe(true),
+  );
+  const runtime = (
+    manager as unknown as {
+      repository: {
+        get: (id: string) =>
+          | {
+              query: { mcpServerSets: Array<Record<string, unknown>> } | null;
+              activeMcpServers?: Record<string, unknown>;
+              mcpServersDirty?: boolean;
+              lifecycleState: string;
+              enabledMcpTools?: Record<string, boolean>;
+              sessionType?: string;
+            }
+          | undefined;
+      };
+    }
+  ).repository.get(sessionId)!;
+  expect(runtime.sessionType).not.toBe("agent");
+  expect(runtime.sessionType).not.toBe("dispatch_child");
+  runtime.lifecycleState = "idle";
+  runtime.activeMcpServers = { "uuid-old": { type: "http" } };
+
+  const result = await manager.setMcpServers(sessionId, [
+    {
+      enabled: false,
+      name: "Old",
+      toolKeys: ["old:tool"],
+      type: "http",
+      uuid: "uuid-old",
+    },
+    {
+      enabled: true,
+      name: "New",
+      toolKeys: ["new:tool"],
+      type: "http",
+      uuid: "uuid-new",
+    },
+  ]);
+  expect(result.enabledMcpTools).toEqual({
+    "old:tool": false,
+    "new:tool": true,
+  });
+  expect(runtime.activeMcpServers).toEqual({
+    "uuid-new": { type: "http", name: "New" },
+  });
+  expect(runtime.mcpServersDirty).toBe(false);
+  expect(
+    (
+      runtime.query as { mcpServerSets: Array<Record<string, unknown>> }
+    ).mcpServerSets.at(-1),
+  ).toEqual({ "uuid-new": { type: "http", name: "New" } });
+});
+
+
+it("Ds residual: setFocusedSession closes notifications via desktopNotificationService", () => {
+  const focusCloses: Array<string | null | undefined> = [];
+  const shown: string[] = [];
+  const manager = createTestManager(createManagerHarness(), {
+    desktopNotificationService: {
+      handleFocusedSessionChanged: (id) => focusCloses.push(id),
+      showIdleNotification: (input) => shown.push(input.sessionId),
+    },
+  });
+  manager.setFocusedSession("s1");
+  manager.setFocusedSession("s1"); // same — no second close
+  manager.setFocusedSession(null); // still invokes handle with null (service no-ops)
+  expect(focusCloses).toEqual(["s1", null]);
+  expect(shown).toEqual([]);
+});
+
+it("Ds residual: queryCompleted shows idle when unfocused; skips focused/scheduled", async () => {
+  const shown: Array<{ sessionId: string; title?: string | null }> = [];
+  const navigated: string[] = [];
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    createSessionId: () => "local_ds_idle",
+    desktopNotificationService: {
+      handleFocusedSessionChanged: () => undefined,
+      showIdleNotification: (input) => {
+        shown.push({ sessionId: input.sessionId, title: input.sessionTitle });
+        input.onClick?.();
+      },
+    },
+    navigateToLocalSession: (id) => navigated.push(id),
+    resolveHostLoopMode: () => true,
+  });
+  const sessionId = await manager.start({
+    message: "ds-idle",
+    messageUuid: "ds-1",
+  });
+  await vi.waitFor(() => expect(harness.factoryInputs).toHaveLength(1));
+  await nextUserMessage(harness.factoryInputs[0]!.prompt);
+  // Unfocused → show
+  manager.setFocusedSession("other");
+  harness.query.push({ is_error: false, subtype: "success", type: "result" });
+  await vi.waitFor(() => {
+    expect(manager.getSession(sessionId)?.isRunning).toBe(false);
+  });
+  await vi.waitFor(() => expect(shown).toHaveLength(1));
+  expect(shown[0]!.sessionId).toBe(sessionId);
+  expect(navigated).toEqual([sessionId]); // onClick from showIdle
+
+  // Focused → skip
+  shown.length = 0;
+  navigated.length = 0;
+  await manager.sendMessage(sessionId, "again", undefined, undefined, "ds-2");
+  await nextUserMessage(harness.factoryInputs[0]!.prompt);
+  manager.setFocusedSession(sessionId);
+  harness.query.push({ is_error: false, subtype: "success", type: "result" });
+  await vi.waitFor(() => {
+    expect(manager.getSession(sessionId)?.isRunning).toBe(false);
+  });
+  // give microtasks a chance
+  await Promise.resolve();
+  expect(shown).toEqual([]);
+
+  // scheduledTaskId → skip (seed on start — getSession renderer is a snapshot)
+  const scheduledHarness = createManagerHarness();
+  const scheduledShown: string[] = [];
+  const scheduledManager = createTestManager(scheduledHarness, {
+    createSessionId: () => "local_ds_sched",
+    desktopNotificationService: {
+      handleFocusedSessionChanged: () => undefined,
+      showIdleNotification: (input) => scheduledShown.push(input.sessionId),
+    },
+    resolveHostLoopMode: () => true,
+  });
+  const scheduledId = await scheduledManager.start({
+    message: "sched",
+    messageUuid: "ds-sched",
+    scheduledTaskId: "task-1",
+  });
+  await vi.waitFor(() => expect(scheduledHarness.factoryInputs).toHaveLength(1));
+  await nextUserMessage(scheduledHarness.factoryInputs[0]!.prompt);
+  scheduledManager.setFocusedSession("other");
+  scheduledHarness.query.push({
+    is_error: false,
+    subtype: "success",
+    type: "result",
+  });
+  await vi.waitFor(() => {
+    expect(scheduledManager.getSession(scheduledId)?.isRunning).toBe(false);
+  });
+  await Promise.resolve();
+  expect(scheduledShown).toEqual([]);
+});
+
+it("Ds residual: isHiddenSession follows iv sessionType gate", async () => {
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    createSessionId: () => "local_ds_hidden",
+    resolveHostLoopMode: () => true,
+  });
+  const sessionId = await manager.start({
+    message: "hidden",
+    messageUuid: "h-1",
+    sessionType: "agent",
+  });
+  expect(manager.isHiddenSession(sessionId)).toBe(true);
+  expect(manager.isHiddenSession("missing")).toBe(false);
+
+  // Hidden sessionType skips idle show on queryCompleted
+  const hiddenHarness = createManagerHarness();
+  const hiddenShown: string[] = [];
+  const hiddenManager = createTestManager(hiddenHarness, {
+    createSessionId: () => "local_ds_hidden_idle",
+    desktopNotificationService: {
+      handleFocusedSessionChanged: () => undefined,
+      showIdleNotification: (input) => hiddenShown.push(input.sessionId),
+    },
+    resolveHostLoopMode: () => true,
+  });
+  const hiddenId = await hiddenManager.start({
+    message: "agent-idle",
+    messageUuid: "ha-1",
+    sessionType: "agent",
+  });
+  await vi.waitFor(() => expect(hiddenHarness.factoryInputs).toHaveLength(1));
+  await nextUserMessage(hiddenHarness.factoryInputs[0]!.prompt);
+  hiddenManager.setFocusedSession("other");
+  hiddenHarness.query.push({
+    is_error: false,
+    subtype: "success",
+    type: "result",
+  });
+  await vi.waitFor(() => {
+    expect(hiddenManager.getSession(hiddenId)?.isRunning).toBe(false);
+  });
+  await Promise.resolve();
+  expect(hiddenShown).toEqual([]);
 });

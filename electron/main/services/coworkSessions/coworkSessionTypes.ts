@@ -161,6 +161,11 @@ export interface CoworkRuntimeQuery extends AsyncIterable<CoworkSdkMessage> {
   close(): void;
   interrupt(): Promise<void>;
   setModel(model: string): Promise<void>;
+  /**
+   * Official Query.setMcpServers — mid-session MCP server map apply
+   * (control subtype mcp_set_servers). Used by applyMcpServersIfIdle.
+   */
+  setMcpServers?(servers: Record<string, unknown>): Promise<unknown>;
   setPermissionMode?(mode: CoworkPermissionMode): Promise<void>;
   supportedCommands?(): Promise<Array<{ description?: string; name: string }>>;
 }
@@ -366,6 +371,12 @@ export type CoworkPersistedSessionMetadata = {
   scheduledTaskId?: string;
   sessionId: string;
   sessionType?: CoworkSessionType;
+  /**
+   * Official IXi slashCommands: Vt.array(Vt.string()).optional() —
+   * assigned from system/init slash_commands; getSupportedCommands maps to
+   * {name,description:name} before RT()+K2e.
+   */
+  slashCommands?: string[];
   spaceId?: string;
   spaceIdSetBy?: "auto" | "user";
   systemPrompt?: string;
@@ -409,6 +420,17 @@ export type CoworkSessionRuntimeState = {
    * Persisted on saveSession; full aze canUseTool residual not product.
    */
   chromeTabGroupId?: number;
+  /**
+   * Official session.cicOnceApproved — Set of hosts allowed once this turn.
+   * Runtime-only (cleared on leavingRunning / finishTurnCleanup). Not IXi.
+   * Used by aze canUseTool CIC residual.
+   */
+  cicOnceApproved?: Set<string>;
+  /**
+   * Official session.activeMcpServers — live MCP server map for query.setMcpServers.
+   * Runtime residual; full mcpCoordinator createAllServers product not invented.
+   */
+  activeMcpServers?: Record<string, unknown>;
   cliSessionId?: string;
   createdAt: number;
   /**
@@ -488,6 +510,27 @@ export type CoworkSessionRuntimeState = {
    * Residual: real Statsig gate product (inject only, default off).
    */
   _suggestionTimeout?: ReturnType<typeof setTimeout>;
+  /**
+   * Official session._idleGraceTimer — runtime-only Node timer after transition
+   * to idle when wr idleGraceMs>0 and process kept for warm resume. Not IXi.
+   * Residual: Statsig idleGraceMs product inject (default 0).
+   */
+  _idleGraceTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Official session._idleGraceStartedAt — wall ms when grace armed.
+   * Cleared with timer. Not IXi.
+   */
+  _idleGraceStartedAt?: number;
+  /**
+   * Official session._lastIdleAt — set on every transitionTo idle.
+   * Runtime-only (not IXi).
+   */
+  _lastIdleAt?: number;
+  /**
+   * Official session.mcpServersDirty — defer setMcpServers while Wl(session).
+   * Runtime-only; flushed on idle-grace arm warm branch.
+   */
+  mcpServersDirty?: boolean;
   /** Official session.otelConfig. */
   otelConfig?: CoworkOtelConfig;
   parentSessionId?: string;
@@ -506,6 +549,11 @@ export type CoworkSessionRuntimeState = {
   permissionMode?: CoworkPermissionMode;
   processName: string;
   promptSuggestion?: string;
+  /**
+   * Official session.slashCommands — string[] from system/init slash_commands.
+   * IXi-persisted; getSupportedCommands maps name→{name,description:name}.
+   */
+  slashCommands?: string[];
   query: CoworkRuntimeQuery | null;
   /**
    * Official session.readOnlyPluginPaths (set during UXe plugin/skills mounts).
@@ -588,6 +636,8 @@ export type CoworkRendererSession = {
   scheduledTaskId?: string;
   sessionId: string;
   sessionType?: CoworkSessionType;
+  /** Official init slash_commands string names (getSupportedCommands seed). */
+  slashCommands?: string[];
   spaceId?: string;
   title?: string;
   userSelectedFolders: string[];

@@ -6,8 +6,9 @@
  *   d6e — reconcile diff plan (toCreate / toDelete)
  *   tv  — dispatch session types skip replaceEnabledMcpTools
  *
- * Full mcpCoordinator.reconcileServers / applyMcpServersIfIdle / Ii().syncUserToolToggles
- * remain product residuals — pure + manager assign/save only.
+ * Full mcpCoordinator.reconcileServers / createAllServers / Ii().syncUserToolToggles
+ * remain product residuals. applyMcpServersIfIdle + setMcpServers dirty/defer are
+ * product (#126) via coworkMcpApplyHelpers (createMcpServer inject residual).
  */
 
 /** Official Mc / DE — tv() session types that skip replaceEnabledMcpTools. */

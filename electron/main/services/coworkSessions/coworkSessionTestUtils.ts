@@ -22,6 +22,7 @@ type MessageResolver = (result: IteratorResult<CoworkSdkMessage>) => void;
 
 export class TestCoworkQuery implements CoworkRuntimeQuery {
   readonly flagSettings: CoworkFlagSettings[] = [];
+  readonly mcpServerSets: Array<Record<string, unknown>> = [];
   readonly models: string[] = [];
   readonly permissionModes: CoworkPermissionMode[] = [];
   closed = false;
@@ -45,6 +46,11 @@ export class TestCoworkQuery implements CoworkRuntimeQuery {
 
   async setModel(model: string): Promise<void> {
     this.models.push(model);
+  }
+
+  async setMcpServers(servers: Record<string, unknown>): Promise<unknown> {
+    this.mcpServerSets.push(servers);
+    return { ok: true };
   }
 
   async setPermissionMode(mode: CoworkPermissionMode): Promise<void> {

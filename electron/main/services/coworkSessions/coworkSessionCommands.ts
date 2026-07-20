@@ -13,8 +13,11 @@ export type CoworkSlashCommand = {
  * + COWORK_CLI_EXPOSED_COMMANDS K2e (context).
  * Each carries scope:"cowork" so frontend aRe filters them for Built-in skills.
  *
- * Official merge: session slash names → RT() (skip when isEnabled() false) → K2e.
- * Local shell always enables consolidate-memory (official gate ft("123929380") on for desktop Skills).
+ * Official LocalAgentModeSessionManager.getSupportedCommands(A):
+ *   i = session.slashCommands.map(o => ({name:o, description:o}))
+ *   r = RT() filtered by isEnabled (product: always enabled)
+ *   return [...i, ...r, ...K2e]
+ * Residual: real RT isEnabled() product gates not invented (always include).
  */
 const rtSkills: CoworkSlashCommand[] = [
   {
@@ -45,38 +48,46 @@ const coworkCliExposedCommands: CoworkSlashCommand[] = [
   },
 ];
 
-const exposedCommands: CoworkSlashCommand[] = [...rtSkills, ...coworkCliExposedCommands];
+/**
+ * Official init: `"slash_commands"in D && D.slash_commands` → assign string[].
+ * Keep only non-empty strings; preserve first-seen order (no invent sort).
+ */
+export function extractCoworkSlashCommandNames(
+  slashCommands: unknown,
+): string[] {
+  if (!Array.isArray(slashCommands)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of slashCommands) {
+    if (typeof item !== "string") continue;
+    const name = item.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+/**
+ * Official merge order (not Map-dedupe of CLI+host):
+ *   session slash names → RT() → K2e
+ * Duplicate names across segments are kept in official order (product Map would
+ * collapse; asar concatenates arrays — preserve concat for 1:1).
+ */
+export function mergeCoworkSupportedCommands(
+  sessionSlashCommands?: readonly string[] | null,
+): CoworkSlashCommand[] {
+  const fromSession = (sessionSlashCommands ?? []).map((name) => ({
+    name,
+    description: name,
+  }));
+  return [...fromSession, ...rtSkills, ...coworkCliExposedCommands];
+}
 
 export async function getCoworkSupportedCommands(
   session?: CoworkSessionRuntimeState,
 ): Promise<CoworkSlashCommand[]> {
-  const cliCommands = (await session?.query?.supportedCommands?.()) ?? [];
-  const commands = new Map<string, CoworkSlashCommand>();
-
-  for (const command of cliCommands) {
-    if (!command.name) continue;
-    commands.set(command.name, {
-      aliases: command.aliases,
-      argumentHint: command.argumentHint,
-      description: command.description,
-      name: command.name,
-      scope: command.scope,
-    });
-  }
-
-  // Official: RT() + K2e always appended with scope cowork; stamp scope even if CLI listed the name bare.
-  for (const command of exposedCommands) {
-    const existing = commands.get(command.name);
-    if (!existing) {
-      commands.set(command.name, command);
-      continue;
-    }
-    commands.set(command.name, {
-      ...existing,
-      scope: "cowork",
-      description: existing.description || command.description,
-    });
-  }
-
-  return [...commands.values()];
+  // Official: prefer persisted/init slashCommands, not live query.supportedCommands
+  // (Code LocalSessions uses live query — Cowork path is slashCommands + RT + K2e).
+  return mergeCoworkSupportedCommands(session?.slashCommands);
 }
