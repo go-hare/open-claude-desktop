@@ -2,10 +2,15 @@ import { app, dialog, shell } from "electron";
 import { homedir } from "node:os";
 import { LocalSessionStore } from "../services/localSessions/localSessionStore";
 import { CoworkAccountContext } from "../services/coworkAccount/coworkAccountContext";
+import {
+  createCoworkAccountOauthIdentityWatcher,
+  createCoworkGrowthBookAccountRefreshWatcher,
+} from "../services/coworkAccount/coworkAccountIdentityEffects";
 import { loadCoworkBootstrapIdentity } from "../services/coworkAccount/coworkBootstrapIdentity";
 import { createCoworkHostLoopModeResolver } from "../services/coworkHostLoop/createCoworkHostLoopModeResolver";
 import { isCoworkEnterpriseRequireFullVmSandbox } from "../services/coworkHostLoop/coworkEnterpriseConfig";
 import { isCoworkHostLoopGrowthBookFeatureEnabled } from "../services/coworkHostLoop/coworkGrowthBookFeatures";
+import { getActiveCoworkGrowthBookLifecycle } from "../services/coworkHostLoop/coworkGrowthBookLifecycle";
 import { resolveCoworkRequireFullVmSandbox } from "../services/coworkHostLoop/coworkHostLoopMode";
 import { createCoworkAgentQueryFactory } from "../services/coworkRuntime/coworkAgentQueryFactory";
 import {
@@ -49,6 +54,15 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
   const coworkAccount = new CoworkAccountContext({
     loadBootstrapIdentity: loadCoworkBootstrapIdentity,
   });
+  // Official id() listeners residual (app.asar BbA + account oauth):
+  //   id(() => I9t().finally(R0A))
+  //   id(() => { identity-diff → Lm() })
+  coworkAccount.subscribe(createCoworkAccountOauthIdentityWatcher());
+  coworkAccount.subscribe(
+    createCoworkGrowthBookAccountRefreshWatcher(() =>
+      getActiveCoworkGrowthBookLifecycle(),
+    ),
+  );
   const featureState = new FeatureStateStore();
   // Shared SettingsStore so xn allowAllBrowserActions and AppPreferences IPC
   // see the same preference bag (official Xo()/F_ preferences).
@@ -65,7 +79,7 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
   // Official v4(): feature flag 1143815894 via ft()/mZe. Product seeds official kni
   // (3p hardcodedMainGrowthBookFeatures → on:true). Env CLAUDE_HOST_LOOP_FEATURE still
   // overrides when set. requireCoworkFullVmSandbox / forceDisableHostLoop force dual-exec.
-  // 1p /api/desktop/features + fcache: initCoworkGrowthBookFeatures on bootstrap.
+  // 1p /api/desktop/features + fcache: BbA lifecycle (R0A timer + I9t account).
   const resolveHostLoopMode = createCoworkHostLoopModeResolver({
     getForceDisableHostLoop: () =>
       featureState.getBoolean("vmForceDisableHostLoop", "global", false),

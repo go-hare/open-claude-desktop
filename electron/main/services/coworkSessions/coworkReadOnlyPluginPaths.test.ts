@@ -7,6 +7,7 @@ import {
   coworkInstalledPluginsFile,
   parseInstalledPluginInstallPaths,
 } from "./coworkReadOnlyPluginPaths";
+import { resolveCoworkHostloopPluginsStagingDir } from "./coworkPluginPathStage";
 import { resolveCoworkUserDataFromSessionStorage } from "./coworkSessionRuntimeController";
 
 const tempDirs: string[] = [];
@@ -84,7 +85,7 @@ describe("collectCoworkReadOnlyPluginPaths", () => {
     expect(collected).toEqual([pluginA, pluginB]);
   });
 
-  it("collects remote dirs with .claude-plugin/plugin.json", () => {
+  it("collects remote dirs with .claude-plugin/plugin.json when H6e on", () => {
     const userData = mkTemp();
     const remote = path.join(
       userData,
@@ -104,8 +105,83 @@ describe("collectCoworkReadOnlyPluginPaths", () => {
       accountId: "acct",
       orgId: "org",
       userDataPath: userData,
+      remotePluginPathsEnabled: true,
     });
     expect(collected).toEqual([remote]);
+  });
+
+  it("H6e off skips remote rpm dirs without inventing", () => {
+    const userData = mkTemp();
+    const remote = path.join(
+      userData,
+      "local-agent-mode-sessions",
+      "acct",
+      "org",
+      "rpm",
+      "marketplace",
+      "tool",
+    );
+    fs.mkdirSync(path.join(remote, ".claude-plugin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(remote, ".claude-plugin", "plugin.json"),
+      JSON.stringify({ name: "tool" }),
+    );
+    expect(
+      collectCoworkReadOnlyPluginPaths({
+        accountId: "acct",
+        orgId: "org",
+        userDataPath: userData,
+        remotePluginPathsEnabled: false,
+      }),
+    ).toEqual([]);
+  });
+
+  it("kK-stages install paths that contain spaces and appends staging root", () => {
+    const userData = mkTemp();
+    const stagingTmp = mkTemp();
+    const plugin = path.join(userData, "My Plugins", "space-tool");
+    fs.mkdirSync(plugin, { recursive: true });
+    const file = coworkInstalledPluginsFile(userData, "acct", "org");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          space: [{ installPath: plugin, scope: "user" }],
+        },
+      }),
+    );
+    const collected = collectCoworkReadOnlyPluginPaths({
+      accountId: "acct",
+      orgId: "org",
+      userDataPath: userData,
+      stageDeps: { tmpdir: stagingTmp },
+    });
+    const stagingRoot = resolveCoworkHostloopPluginsStagingDir(stagingTmp);
+    expect(collected.some((p) => p.includes(" "))).toBe(false);
+    expect(collected.some((p) => p.startsWith(stagingRoot + path.sep))).toBe(
+      true,
+    );
+    expect(collected).toContain(stagingRoot);
+  });
+
+  it("includes skillsPluginPath residual without inventing when missing", () => {
+    const userData = mkTemp();
+    const skills = path.join(userData, "skills-root");
+    fs.mkdirSync(skills, { recursive: true });
+    expect(
+      collectCoworkReadOnlyPluginPaths({
+        userDataPath: userData,
+        skillsPluginPath: skills,
+      }),
+    ).toEqual([skills]);
+    expect(
+      collectCoworkReadOnlyPluginPaths({
+        userDataPath: userData,
+        skillsPluginPath: path.join(userData, "nope"),
+      }),
+    ).toEqual([]);
   });
 });
 

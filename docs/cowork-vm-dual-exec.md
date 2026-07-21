@@ -51,8 +51,8 @@ Official Cowork “isolated Linux workspace” is the **VM**, not CLI sandbox al
 | Env `CLAUDE_REQUIRE_COWORK_FULL_VM_SANDBOX=1` | yes residual |
 | Env `CLAUDE_HOST_LOOP_FEATURE` / `CLAUDE_FORCE_HOST_LOOP` (+ dev override) | yes (env wins over kni) |
 | GrowthBook flag `1143815894` via `ft`/kni seed | yes (3p `hardcodedMainGrowthBookFeatures` → on) |
-| Enterprise `vi().requireCoworkFullVmSandbox` (MDM plist / configLibrary / remote tier) | yes residual (`coworkEnterpriseConfig.ts`; win32 registry / full QB schema residual) |
-| 1p `/api/desktop/features` + `userData/fcache` | yes residual (`coworkGrowthBookFetch.ts`; `CLAUDE_DEPLOYMENT_MODE=1p` on bootstrap) |
+| Enterprise `vi().requireCoworkFullVmSandbox` (MDM plist / win32 Policies registry / configLibrary / remote tier) | yes residual (`coworkEnterpriseConfig.ts`; full QB key list exported; product consumes require key) |
+| 1p `/api/desktop/features` + `userData/fcache` + BbA/R0A/I9t lifecycle | yes residual (`coworkGrowthBookFetch.ts` + `coworkGrowthBookLifecycle.ts`; bootstrap + account-change) |
 
 ### Bundle on this machine (2026-07-21+)
 
@@ -67,6 +67,21 @@ CDN residual (product now implements official shape):
 - Base: `https://downloads.claude.ai/vms/linux/<arch>/<Hn.sha>`
 - File: `rootfs.img.zst` + sha256 checksum from `Hn.files` + `.rootfs.img.origin` = `Hn.sha`
 - IPC `ClaudeVM.download` → `ensureCoworkVmRootfs` (no-op when ready; fails honestly offline)
+
+Live CDN probe (2026-07-22, this machine, arm64, `Hn.sha=5680b11b…`):
+
+| Check | Result |
+| --- | --- |
+| `HEAD …/rootfs.img.zst` | `200`, `Content-Type: application/zstd`, `Content-Length: 2200840699` (~2.05 GiB compressed) |
+| `Range: bytes=0-15` | `206`, zstd magic `28 b5 2f fd` |
+
+Re-run probe (no full download):
+
+```bash
+node scripts/probe-cowork-vm-cdn.mjs
+```
+
+Full download + zstd decompress E2E not re-run here (bundle already hardlinked); inject unit path covers checksum/origin write.
 
 ### Live Electron smoke (native layer) — PASS 2026-07-21 / guest Claude 2026-07-21
 
@@ -98,14 +113,29 @@ Operational notes (honest, not invented):
 ### Plugin paths (UXe fill)
 
 - Consume: `pluginMountsFromReadOnlyPaths(session.readOnlyPluginPaths)` in dual-exec mounts + factory
-- Fill: `collectCoworkReadOnlyPluginPaths` from `userData/.../cowork_plugins/installed_plugins.json` + remote rpm dirs when account/org identity present; does not invent missing installs
+- Fill: `collectCoworkReadOnlyPluginPaths` from skills residual + `installed_plugins.json` + remote rpm dirs when account/org present
+- Official H6e: remote rpm walk gated by GrowthBook `ft("2340532315")` (not kni force-on; default off unless applied)
+- Official eFA residual: `cowork_settings.json` `enabledPlugins` map read (on-disk); no invent network install
+- Official kK: space-containing paths staged under `tmpdir/claude-hostloop-plugins/<sha16>` (`coworkPluginPathStage.ts`); staging root appended when used
+- Does not invent missing installs or skills roots
+
+### Residual closed this cut (product 1:1, not invent)
+
+| Residual | Status |
+| --- | --- |
+| win32 Policies + full QB bag on `raw` | yes (`readManagedEnterpriseBag` / `loadCoworkEnterpriseConfig`; config still only materializes require boolean; never invent true) |
+| GrowthBook BbA + R0A + I9t | yes (`startCoworkGrowthBookLifecycle` + `id()` subscribe → `refreshForAccountChange`) |
+| Account identity-diff → oauth `Lm` clear | yes (`coworkOauthTokenCache` + `createCoworkAccountOauthIdentityWatcher`; first observation seeds, uuid/loggedOut flip clears) |
+| H6e remote plugin gate `ft("2340532315")` + eFA `cowork_settings.enabledPlugins` | yes (on-disk rpm walk only when flag on; no invent network marketplace install) |
+| kK space-path staging | yes |
+| CDN HEAD/Range probe | yes (`node scripts/probe-cowork-vm-cdn.mjs`; inject unit covers write path) |
 
 ### Honest residual
 
-1. Enterprise **win32** `SOFTWARE\Policies\…` registry + native `Jn()` plist bridge; full enterprise QB key schema (product reads require key only)
-2. GrowthBook periodic refresh timer (`R0A` 1h / 5min) + account-change `I9t` re-fetch (one-shot bootstrap residual)
-3. Full remote plugin sync / skillsPluginPath SA/sA / space-path kK like full UXe (path collect is install-manifest residual)
-4. Live CDN download end-to-end when network allows (unit-tested inject path; this machine timed out on CDN HEAD)
+1. Native `Jn()` win32 registry / plist bridge (`@ant/claude-native`) — product uses `reg query` + plutil/XML residual
+2. Full remote plugin marketplace network sync (official `gQ.fetchEnabledState` / install beyond on-disk collect + H6e gate + eFA map read)
+3. Full CDN download + zstd of ~2 GiB rootfs when no local hardlink (probe PASS; full E2E optional offline-safe skip)
+4. Official trusted-device token clear side channel on uuid change (hook optional; residual no-ops without enroll stack)
 
 ## Do not invent
 

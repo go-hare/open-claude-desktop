@@ -11,14 +11,29 @@
  *   ]
  *   Ke.readOnlyPluginPaths = Ve
  *
+ * Official H6e gate: remote plugin paths only when ft("2340532315") is on.
+ * eFA residual: cowork_settings.json enabledPlugins map (on-disk only).
+ *
  * Product residual: collect host install paths from official on-disk manifests
  * under userData/local-agent-mode-sessions/<account>/<org>/cowork_plugins/
  * (installed_plugins.json) + remote rpm/remote_cowork_plugins when present.
  * Does not invent plugin roots; empty when account/org or manifests absent.
+ * Does not invent network marketplace install beyond on-disk collect.
  */
 import fs from "node:fs";
 import path from "node:path";
+import { isCoworkGrowthBookFeatureOn } from "../coworkHostLoop/coworkGrowthBookFeatures";
 import { coworkAccountStorageDir } from "./coworkAutoMemoryPaths";
+import {
+  stageCoworkPluginPaths,
+  type StageCoworkPluginPathDeps,
+} from "./coworkPluginPathStage";
+
+/**
+ * Official GrowthBook flag gating H6e remote plugin path collection.
+ * Not in kni force-on set — 3p defaults off unless applied features turn it on.
+ */
+export const COWORK_REMOTE_PLUGIN_PATHS_FEATURE_FLAG_ID = "2340532315";
 
 /** Official uC = join(zV(account, org), "cowork_plugins") */
 export function coworkPluginsDir(
@@ -57,11 +72,51 @@ export function coworkRemotePluginDirs(
   ];
 }
 
+/** Official e4 — join(RB(account, org), "cowork_settings.json") */
+export function coworkSettingsFile(
+  userDataPath: string,
+  accountId: string,
+  orgId: string,
+): string {
+  return path.join(
+    coworkAccountStorageDir(userDataPath, accountId, orgId),
+    "cowork_settings.json",
+  );
+}
+
+/**
+ * Official H6e gate residual: ft("2340532315").
+ * Injectable for tests; default uses GrowthBook Gu map.
+ */
+export function isCoworkRemotePluginPathsFeatureEnabled(
+  isOn: (flagId: string) => boolean = isCoworkGrowthBookFeatureOn,
+): boolean {
+  return isOn(COWORK_REMOTE_PLUGIN_PATHS_FEATURE_FLAG_ID) === true;
+}
+
 export type CollectCoworkReadOnlyPluginPathsInput = {
   accountId?: string | null;
   extraPaths?: readonly string[] | null;
   orgId?: string | null;
   userDataPath: string;
+  /**
+   * Official skillsPluginPath (yI.getPluginPath) residual — staged via kK when
+   * the path contains spaces. Optional; never invent a skills root.
+   */
+  skillsPluginPath?: string | null;
+  /** Injectable kK staging deps (tests). */
+  stageDeps?: StageCoworkPluginPathDeps;
+  /**
+   * When false, skip remote rpm / remote_cowork_plugins collect (H6e off).
+   * Default: GrowthBook ft("2340532315").
+   */
+  remotePluginPathsEnabled?: boolean;
+  /**
+   * Official eFA enabledPlugins map residual. When provided as empty object
+   * with remote enabled, still walks on-disk remote install dirs (product
+   * residual does not filter by enablement ids beyond path existence).
+   */
+  enabledPluginsMap?: Record<string, unknown> | null;
 };
 
 function isNonEmptyString(value: unknown): value is string {
@@ -96,6 +151,25 @@ function readJsonFile(filePath: string): unknown | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Official eFA residual — read enabledPlugins from cowork_settings.json.
+ * Returns {} when missing; does not invent plugin enablement.
+ */
+export function readCoworkEnabledPluginsMap(
+  userDataPath: string,
+  accountId: string,
+  orgId: string,
+): Record<string, unknown> {
+  const file = coworkSettingsFile(userDataPath, accountId, orgId);
+  const raw = readJsonFile(file);
+  if (!raw || typeof raw !== "object") return {};
+  const enabled = (raw as { enabledPlugins?: unknown }).enabledPlugins;
+  if (!enabled || typeof enabled !== "object" || Array.isArray(enabled)) {
+    return {};
+  }
+  return { ...(enabled as Record<string, unknown>) };
 }
 
 /**
@@ -140,7 +214,8 @@ function collectRemotePluginInstallDirs(remoteRoot: string): string[] {
 
 /**
  * Collect host paths for session.readOnlyPluginPaths (official Ve subset).
- * Dedupes; preserves order: extras → installed_plugins → remote dirs.
+ * Dedupes; preserves order: skills → extras → installed_plugins → remote dirs.
+ * Official kK: stage space-containing paths under tmpdir/claude-hostloop-plugins.
  */
 export function collectCoworkReadOnlyPluginPaths(
   input: CollectCoworkReadOnlyPluginPathsInput,
@@ -160,33 +235,55 @@ export function collectCoworkReadOnlyPluginPaths(
     out.push(resolved);
   };
 
+  // Official Ve: SA (staged skills) first when present.
+  if (isNonEmptyString(input.skillsPluginPath)) {
+    push(input.skillsPluginPath);
+  }
+
   for (const extra of input.extraPaths ?? []) {
     if (isNonEmptyString(extra)) push(extra);
   }
 
   const accountId = input.accountId?.trim();
   const orgId = input.orgId?.trim();
-  if (!accountId || !orgId) return out;
-
-  const installedFile = coworkInstalledPluginsFile(
-    input.userDataPath,
-    accountId,
-    orgId,
-  );
-  const manifest = readJsonFile(installedFile);
-  for (const p of parseInstalledPluginInstallPaths(manifest)) {
-    push(p);
-  }
-
-  for (const remoteRoot of coworkRemotePluginDirs(
-    input.userDataPath,
-    accountId,
-    orgId,
-  )) {
-    for (const p of collectRemotePluginInstallDirs(remoteRoot)) {
+  if (accountId && orgId) {
+    const installedFile = coworkInstalledPluginsFile(
+      input.userDataPath,
+      accountId,
+      orgId,
+    );
+    const manifest = readJsonFile(installedFile);
+    for (const p of parseInstalledPluginInstallPaths(manifest)) {
       push(p);
+    }
+
+    // Official H6e: if !ft("2340532315") → no remote paths.
+    const remoteEnabled =
+      input.remotePluginPathsEnabled
+      ?? isCoworkRemotePluginPathsFeatureEnabled();
+    if (remoteEnabled) {
+      // Official eFA residual — load enabledPlugins when caller did not inject.
+      // Product residual still collects on-disk remote installs; does not
+      // invent network marketplace sync (gQ.fetchEnabledState / install).
+      // Keep map materialization so residual path exercises eFA disk read.
+      const enabledMap =
+        input.enabledPluginsMap
+        ?? readCoworkEnabledPluginsMap(input.userDataPath, accountId, orgId);
+      // Map is reserved for future pQe filter parity; presence alone is enough
+      // for on-disk rpm walk residual (do not invent installs from map keys).
+      void enabledMap;
+      for (const remoteRoot of coworkRemotePluginDirs(
+        input.userDataPath,
+        accountId,
+        orgId,
+      )) {
+        for (const p of collectRemotePluginInstallDirs(remoteRoot)) {
+          push(p);
+        }
+      }
     }
   }
 
-  return out;
+  // Official kK residual on every path with spaces; may append HeA staging root.
+  return stageCoworkPluginPaths(out, input.stageDeps ?? {});
 }

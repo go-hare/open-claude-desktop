@@ -137,6 +137,9 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
     },
     Account: {
       setAccountDetails: async (_event, details) => {
+        // Official gbA / setAccountDetails → qa store + id() listeners.
+        // GrowthBook I9t + oauth Lm identity-diff are subscribed in
+        // registerDesktopIpc (BbA id residual), not inlined here.
         context.coworkAccount.setAccountDetails(details);
         return true;
       },

@@ -21,6 +21,25 @@ it("stores the renderer account details and exposes the Cowork identity", () => 
   });
 });
 
+it("subscribe residual notifies on setAccountDetails", () => {
+  const context = new CoworkAccountContext();
+  const seen: string[] = [];
+  const unsub = context.subscribe((details) => {
+    seen.push(details.accountUuid ?? "none");
+  });
+  context.setAccountDetails({
+    accountUuid: "a1",
+    isLoggedOut: false,
+  });
+  expect(seen).toEqual(["a1"]);
+  unsub();
+  context.setAccountDetails({
+    accountUuid: "a2",
+    isLoggedOut: false,
+  });
+  expect(seen).toEqual(["a1"]);
+});
+
 it("preserves optional isRaven for official K2 (isRaven ?? true)", () => {
   const context = new CoworkAccountContext();
   context.setAccountDetails({

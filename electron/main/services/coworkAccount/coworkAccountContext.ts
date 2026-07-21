@@ -78,6 +78,17 @@ export class CoworkAccountContext {
     return identityFromDetails(this.details, this.organizationUuid);
   }
 
+  /**
+   * Official id(listener) residual — subscribe to setAccountDetails changes.
+   * Returns unsubscribe (official id callbacks unregister the same way).
+   */
+  subscribe(listener: AccountListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
   setAccountDetails(value: unknown): CoworkAccountDetails {
     const details = normalizeAccountDetails(value);
     this.details = details;

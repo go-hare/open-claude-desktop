@@ -188,11 +188,11 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   const initialTarget = extractLaunchTarget(process.argv);
 
   await app.whenReady();
-  // Official BbA GrowthBook init residual: 3p kni no-op network; 1p when
-  // CLAUDE_DEPLOYMENT_MODE=1p uses /api/desktop/features + fcache.
+  // Official BbA: y7() + R0A() timer (1h / 5min) + id(() => I9t().finally(R0A)).
+  // 3p kni short-circuits network; 1p uses /api/desktop/features + fcache.
   try {
-    const { initCoworkGrowthBookFeatures } = await import(
-      "./services/coworkHostLoop/coworkGrowthBookFetch"
+    const { startCoworkGrowthBookLifecycle } = await import(
+      "./services/coworkHostLoop/coworkGrowthBookLifecycle"
     );
     const { COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES } = await import(
       "./services/coworkHostLoop/coworkGrowthBookFeatures"
@@ -201,7 +201,7 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
       process.env.CLAUDE_DEPLOYMENT_MODE
       ?? (options.desktopTelemetryConfig?.deploymentMode as string | undefined)
       ?? "3p";
-    await initCoworkGrowthBookFeatures({
+    await startCoworkGrowthBookLifecycle({
       getHardcodedFeatures: () =>
         deploymentMode === "1p" ? null : COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES,
       getClaudeAiBaseUrl: () =>
