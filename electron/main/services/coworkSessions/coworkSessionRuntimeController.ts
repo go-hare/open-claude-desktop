@@ -13,6 +13,13 @@ import {
   withCoworkWorkspaceMcpServer,
   type CoworkVmEgressPolicy,
 } from "../coworkRuntime/coworkWorkspaceMcpServer";
+import { computeCoworkHostLoopBashMounts } from "../coworkVm/coworkVmBashMounts";
+import {
+  computeCoworkDualExecMounts,
+  pluginMountsFromReadOnlyPaths,
+} from "../coworkVm/coworkVmDualExecMounts";
+import { getCoworkVmGuestBashRunner } from "../coworkVm/coworkVmGuestBash";
+import { getCoworkClaudeVmService } from "../coworkVm/coworkClaudeVm";
 import type {
   CoworkAccountDetails,
   CoworkAccountIdentity,
@@ -47,6 +54,10 @@ import {
   coworkUserSelectedFolderPaths,
 } from "./coworkSessionWorkspace";
 import { pruneCoworkSessionCuGrantsOnTurnStart } from "./coworkCuPermissionHelpers";
+import {
+  collectCoworkReadOnlyPluginPaths,
+} from "./coworkReadOnlyPluginPaths";
+import { COWORK_LOCAL_AGENT_MODE_SESSIONS_DIR } from "./coworkAutoMemoryPaths";
 
 type CoworkSessionRuntimeControllerOptions = {
   emit: (event: CoworkSessionEvent) => void;
@@ -317,13 +328,80 @@ export class CoworkSessionRuntimeController {
         /* keep paths even if mkdir fails — policy still references them */
       }
     }
-    // Official session.readOnlyPluginPaths (set during UXe plugin mounts).
-    // Optional until dual-exec plugin path collection is product-wired — do not invent roots.
+    // Official session.readOnlyPluginPaths (UXe: Ke.readOnlyPluginPaths=Ve).
+    // Fill from installed_plugins.json / remote plugin dirs when session has none yet.
+    // Do not invent roots — collect only existing host install paths.
+    if (
+      !session.readOnlyPluginPaths
+      || session.readOnlyPluginPaths.length === 0
+    ) {
+      const identity = this.getIdentity();
+      const userDataPath = resolveCoworkUserDataFromSessionStorage(
+        sessionStorageDir,
+      );
+      if (userDataPath && identity?.accountUuid && identity?.organizationUuid) {
+        const collected = collectCoworkReadOnlyPluginPaths({
+          accountId: identity.accountUuid,
+          orgId: identity.organizationUuid,
+          userDataPath,
+        });
+        if (collected.length > 0) {
+          session.readOnlyPluginPaths = collected;
+        }
+      }
+    }
     const readOnlyPluginPaths =
       session.readOnlyPluginPaths?.filter(
         (pluginPath) =>
           typeof pluginPath === "string" && pluginPath.trim().length > 0,
       ) ?? null;
+    const vmProcessName = session.vmProcessName || session.processName;
+    const networkDriveFolders = coworkNetworkDriveFolderPaths(
+      session.resolvedFolders,
+    );
+    const userSelectedFolders = coworkUserSelectedFolderPaths(
+      session.resolvedFolders,
+    );
+    // Official dual-exec (hostLoopMode=false): await vm ready, then guest spawn mounts.
+    let dualExecSpawn:
+      | {
+          additionalMounts: Record<string, unknown>;
+          allowedDomains?: string[] | null;
+          isResume?: boolean;
+          processName: string;
+          sessionId: string;
+        }
+      | null = null;
+    if (!session.hostLoopMode && vmProcessName) {
+      // Best-effort early start; spawn-time ensureVmStarted also waits for guest.
+      // Honest failure surfaces at guest Claude spawn (not option-build).
+      void getCoworkClaudeVmService().startVM().catch(() => undefined);
+      const dualMounts = computeCoworkDualExecMounts({
+        autoMemoryDir,
+        autoMemoryReadWrite:
+          !Boolean(session.sessionType === "radar") && Boolean(autoMemoryDir),
+        fileDeleteApprovedMounts: session.fileDeleteApprovedMounts,
+        hostClaudeConfigDir,
+        hostOutputsDir,
+        hostUploadsDir,
+        networkDriveFolders,
+        // Official UXe plugin ro mounts when session already collected host paths.
+        pluginMounts: pluginMountsFromReadOnlyPaths(readOnlyPluginPaths),
+        userSelectedFolders,
+        vmProcessName,
+      });
+      dualExecSpawn = {
+        additionalMounts: dualMounts.mounts as Record<string, unknown>,
+        allowedDomains: resolveCoworkWorkspaceAllowedDomains({
+          egressAllowedDomains: session.egressAllowedDomains,
+          otelConfig: session.otelConfig,
+          vmEgressPolicy: this.getVmEgressPolicy?.(session),
+        }) as string[] | null | undefined,
+        isResume: Boolean(resume),
+        processName: vmProcessName,
+        sessionId: session.sessionId,
+      };
+    }
     return this.queryFactory({
       accountDetails: this.getAccountDetails(),
       accountIdentity: this.getIdentity(),
@@ -334,16 +412,21 @@ export class CoworkSessionRuntimeController {
       canUseTool: (request) => this.requestPermission(session, request),
       // Official aze CIC canUseTool residual — product wires browser card hooks.
       cicCanUseTool: this.buildCicCanUseTool?.(session),
-      cwd: session.cwd,
+      cwd: session.hostLoopMode
+        ? session.cwd
+        : `/sessions/${vmProcessName}`,
       // Official a||g path-required gate uses session.sessionType.
       sessionType: session.sessionType ?? null,
+      dualExecSpawn,
       enabledMcpTools: session.enabledMcpTools,
       forkSession: Boolean(rewindTo && resume),
       hostClaudeConfigDir,
       hostOutputsDir,
       hostUploadsDir,
       hostLoopMode: session.hostLoopMode,
+      networkDriveFolders,
       readOnlyPluginPaths,
+      vmProcessName,
       // Official alwaysLoad: mcp-registry + skills + plugins + cowork (dXe).
       // Path context wires LocalMcp XL/DeA staging (createSdkServer).
       // Official UXe host-loop also injects workspace MCP (x1i: bash + web_fetch).
@@ -356,18 +439,51 @@ export class CoworkSessionRuntimeController {
             () => this.buildPathContext(session),
           ),
           session.hostLoopMode
-            ? {
-                // Official UXe → x1i({ allowedDomains: w }) where
-                // w = resolveVmAllowedDomains(session.egress, otel).
-                allowedDomains: resolveCoworkWorkspaceAllowedDomains({
-                  egressAllowedDomains: session.egressAllowedDomains,
-                  otelConfig: session.otelConfig,
-                  vmEgressPolicy: this.getVmEgressPolicy?.(session),
-                }),
-                sessionId: session.sessionId,
-                sessionType: session.sessionType ?? "cowork",
-                vmProcessName: session.vmProcessName || session.processName,
-              }
+            ? (() => {
+                // Official UXe → x1i({
+                //   allowedDomains, computeBashMounts: j1i, vmReadyPromise,
+                //   vmProcessName, sessionId, sessionType
+                // }) with Y1i/xeA guest bash — not host child_process.
+                const vmProcessName =
+                  session.vmProcessName || session.processName;
+                const guestBash = getCoworkVmGuestBashRunner();
+                return {
+                  allowedDomains: resolveCoworkWorkspaceAllowedDomains({
+                    egressAllowedDomains: session.egressAllowedDomains,
+                    otelConfig: session.otelConfig,
+                    vmEgressPolicy: this.getVmEgressPolicy?.(session),
+                  }),
+                  computeBashMounts: () => {
+                    const storage =
+                      this.getSessionStorageDir?.(session) ?? null;
+                    const outputs =
+                      this.getHostOutputsDir?.(session)
+                      ?? (storage ? path.join(storage, "outputs") : null);
+                    const uploads = storage
+                      ? path.join(storage, "uploads")
+                      : null;
+                    return computeCoworkHostLoopBashMounts({
+                      autoMemoryDir: this.getAutoMemoryDir?.(session) ?? null,
+                      fileDeleteApprovedMounts:
+                        session.fileDeleteApprovedMounts,
+                      hostOutputsDir: outputs,
+                      hostUploadsDir: uploads,
+                      networkDriveFolders:
+                        coworkNetworkDriveFolderPaths(session.resolvedFolders),
+                      sessionStorageDir: storage,
+                      userSelectedFolders: coworkUserSelectedFolderPaths(
+                        session.resolvedFolders,
+                      ),
+                      vmProcessName,
+                    });
+                  },
+                  getVmStatus: () => guestBash.getVmStatus(),
+                  runBash: (input) => guestBash.runBash(input),
+                  sessionId: session.sessionId,
+                  sessionType: session.sessionType ?? "cowork",
+                  vmProcessName,
+                };
+              })()
             : null,
         ),
         {
@@ -444,7 +560,10 @@ export class CoworkSessionRuntimeController {
           : this.hasMarkTaskComplete !== false,
       ),
       // Official UXe additionalDirectories / twe(Zni) includes network unc.
-      userSelectedFolders: coworkFolderPermissionPaths(session.resolvedFolders),
+      // Dual-exec factory rewrites to /sessions/<vm>/mnt/<name>; host-loop keeps host paths.
+      userSelectedFolders: session.hostLoopMode
+        ? coworkFolderPermissionPaths(session.resolvedFolders)
+        : userSelectedFolders,
     });
   }
 
@@ -589,4 +708,27 @@ export class CoworkSessionRuntimeController {
       type: "error",
     });
   }
+}
+
+/**
+ * Derive Electron userData from session storage path:
+ *   userData/local-agent-mode-sessions/<account>/<org>/...
+ * When session storage is unset, return null (do not invent userData).
+ */
+export function resolveCoworkUserDataFromSessionStorage(
+  sessionStorageDir: string | null | undefined,
+): string | null {
+  if (!sessionStorageDir) return null;
+  const marker = path.sep + COWORK_LOCAL_AGENT_MODE_SESSIONS_DIR + path.sep;
+  const normalized = path.resolve(sessionStorageDir);
+  const idx = normalized.indexOf(marker);
+  if (idx <= 0) {
+    // exact segment at end of userData
+    const suffix = path.sep + COWORK_LOCAL_AGENT_MODE_SESSIONS_DIR;
+    if (normalized.endsWith(suffix)) {
+      return normalized.slice(0, -suffix.length) || null;
+    }
+    return null;
+  }
+  return normalized.slice(0, idx) || null;
 }

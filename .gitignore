@@ -3,10 +3,15 @@ node_modules/
 .electron-cache/
 .smoke-user-data/
 .smoke-user-data-packaged/
+.smoke-cowork-vm-app/
+.smoke-cowork-vm-user-data/
+.smoke-cowork-vm-electron/
 .vite/
 out/
 /dist/
 resources/ion-dist/
+resources/smol-bin.*.img
+resources/smol-bin.*.vhdx
 .DS_Store
 *.log
 .codex-user-data-*/

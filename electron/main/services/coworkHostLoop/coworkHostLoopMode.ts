@@ -84,3 +84,30 @@ export function readCoworkHostLoopFeatureEnv(
   if (value === "0" || value === "false") return false;
   return undefined;
 }
+
+/**
+ * Official `vi().requireCoworkFullVmSandbox === true` (org / enterprise MDM).
+ * Product residual sources (first true wins; never invent true from absence):
+ *   1. enterpriseValue from vi() residual (managed MDM / configLibrary / remote)
+ *   2. env CLAUDE_REQUIRE_COWORK_FULL_VM_SANDBOX / CLAUDE_REQUIRE_FULL_VM_SANDBOX
+ *   3. settings preference key requireCoworkFullVmSandbox === true
+ */
+export function readCoworkRequireFullVmSandboxEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const value =
+    env.CLAUDE_REQUIRE_COWORK_FULL_VM_SANDBOX
+    ?? env.CLAUDE_REQUIRE_FULL_VM_SANDBOX;
+  return value === "1" || value === "true";
+}
+
+export function resolveCoworkRequireFullVmSandbox(input: {
+  env?: NodeJS.ProcessEnv;
+  /** Official vi().requireCoworkFullVmSandbox when product-wired. */
+  enterpriseValue?: unknown;
+  preferenceValue?: unknown;
+}): boolean {
+  if (input.enterpriseValue === true) return true;
+  if (readCoworkRequireFullVmSandboxEnv(input.env ?? process.env)) return true;
+  return input.preferenceValue === true;
+}

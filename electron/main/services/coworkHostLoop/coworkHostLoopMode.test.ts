@@ -5,8 +5,10 @@ import {
   readCoworkHostLoopFeatureEnv,
   resolveCoworkHostLoopMode,
   resolveCoworkHostLoopModeForNewSession,
+  resolveCoworkRequireFullVmSandbox,
   shouldRejectCoworkHostLoopResume,
 } from "./coworkHostLoopMode";
+import { readCoworkHostLoopPolicy } from "./createCoworkHostLoopModeResolver";
 
 describe("resolveCoworkHostLoopModeForNewSession", () => {
   it("disables host loop when org requires full VM sandbox", () => {
@@ -102,5 +104,45 @@ describe("env helpers", () => {
     expect(readCoworkHostLoopFeatureEnv({ CLAUDE_HOST_LOOP_FEATURE: "0" })).toBe(false);
     expect(readCoworkHostLoopFeatureEnv({ CLAUDE_HOST_LOOP_FEATURE: "1" })).toBe(true);
     expect(readCoworkHostLoopFeatureEnv({})).toBeUndefined();
+  });
+
+  it("reads require full VM sandbox from enterprise, env, or preference without inventing true", () => {
+    expect(resolveCoworkRequireFullVmSandbox({ env: {} })).toBe(false);
+    expect(
+      resolveCoworkRequireFullVmSandbox({
+        enterpriseValue: true,
+        env: {},
+      }),
+    ).toBe(true);
+    expect(
+      resolveCoworkRequireFullVmSandbox({
+        env: { CLAUDE_REQUIRE_COWORK_FULL_VM_SANDBOX: "1" },
+      }),
+    ).toBe(true);
+    expect(
+      resolveCoworkRequireFullVmSandbox({
+        env: {},
+        preferenceValue: true,
+      }),
+    ).toBe(true);
+    expect(
+      resolveCoworkRequireFullVmSandbox({
+        env: {},
+        preferenceValue: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("readCoworkHostLoopPolicy", () => {
+  it("forces dual-exec when require full VM sandbox preference is true", () => {
+    const policy = readCoworkHostLoopPolicy({
+      env: {},
+      getForceDisableHostLoop: () => false,
+      getHostLoopFeatureEnabled: () => true,
+      getRequireCoworkFullVmSandboxPreference: () => true,
+    });
+    expect(policy.requireCoworkFullVmSandbox).toBe(true);
+    expect(resolveCoworkHostLoopModeForNewSession(policy)).toBe(false);
   });
 });

@@ -18,6 +18,7 @@ import {
   coworkAccountStorageDir,
   resolveCoworkAutoMemoryDir,
 } from "../services/coworkSessions/coworkAutoMemoryPaths";
+import { getCoworkClaudeVmService } from "../services/coworkVm/coworkClaudeVm";
 import { getComputerUseTccState, openTccSystemSettings, requestAccessibilityGrant, requestScreenRecordingGrant } from "../services/tcc/computerUseTcc";
 import type { IpcHandlerContext } from "./context";
 import { originalEventSurface } from "./originalEventSurface";
@@ -303,15 +304,28 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     const activeFile = files.find((file) => file.id === activeOfficeFileId) ?? files[0] ?? null;
     return { files, activeFile };
   };
-  const vmState = () => ({
-    downloadStatus: "downloaded",
-    runningStatus: vmStateMap.get("runtime")?.status ?? "stopped",
-    mode: "host-loop",
-    platform: process.platform,
-    updatedAt: vmStateMap.get("runtime")?.updatedAt,
+  const coworkVm = getCoworkClaudeVmService();
+  const vmStateFromSnapshot = (snap: Awaited<ReturnType<typeof coworkVm.snapshot>>) => ({
+    downloadStatus: snap.downloadStatus,
+    runningStatus: snap.runningStatus,
+    mode: snap.mode,
+    platform: snap.platform,
+    updatedAt: snap.updatedAt,
+    connected: snap.connected,
+    running: snap.running,
+    swiftLoaded: snap.swiftLoaded,
+    bundleReady: snap.bundleReady,
+    bundlePath: snap.bundlePath,
+    smolBinPath: snap.smolBinPath,
+    error: snap.error,
   });
   const setVmRuntime = (status: string, extra: Record<string, unknown> = {}) => {
-    const next = { status, mode: "host-loop", updatedAt: new Date().toISOString(), ...extra };
+    const next = {
+      status,
+      mode: extra.mode ?? "vm",
+      updatedAt: new Date().toISOString(),
+      ...extra,
+    };
     vmStateMap.set("runtime", next);
     persistVmState();
     return next;
@@ -506,23 +520,77 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
     },
     ClaudeVM: {
+      /**
+       * Official downloadVM (KZe/QGi): ensure rootfs under userData/vm_bundles/claudevm.bundle.
+       * When already ready (linked/copied), no network. Else CDN rootfs.img.zst + origin sha.
+       */
       download: async () => {
-        const status = { status: "downloaded", mode: "host-loop", updatedAt: new Date().toISOString() };
+        events.claudeVmDownloadProgress(0);
+        const snap = await coworkVm.downloadVM({
+          onProgress: (pct) => events.claudeVmDownloadProgress(pct),
+        });
+        const status = {
+          status: snap.bundleReady
+            ? "downloaded"
+            : snap.error
+              ? "failed"
+              : "missing",
+          mode: snap.mode,
+          updatedAt: snap.updatedAt,
+          bundlePath: snap.bundlePath,
+          error: snap.error,
+        };
         vmStateMap.set("download", status);
         persistVmState();
-        events.claudeVmDownloadProgress(100);
+        events.claudeVmDownloadProgress(snap.bundleReady ? 100 : coworkVm.getDownloadProgress());
         events.claudeVmDownloadStatusChanged(status);
-        events.claudeVmApiReachabilityUpdated({ reachability: "ok", willTryRecover: false, mode: "host-loop" });
-        return { success: true, status: "downloaded", mode: "host-loop" };
+        events.claudeVmApiReachabilityUpdated({
+          reachability: snap.bundleReady ? "ok" : "unknown",
+          willTryRecover: false,
+          mode: snap.mode,
+        });
+        return { success: snap.bundleReady, ...status };
       },
+      /**
+       * Official DU/startVM → Mn() swift addon startVM(bundlePath, …).
+       * No host-loop fake "running" — status reflects swift probe.
+       */
       startVM: async (_event, options) => {
-        const runtime = setVmRuntime("running", { options });
+        const opts = asObject(options);
+        const snap = await coworkVm.startVM({
+          memoryGB: typeof opts.memoryGB === "number" ? opts.memoryGB : undefined,
+          cpuCount: typeof opts.cpuCount === "number" ? opts.cpuCount : undefined,
+          apiProbeURL: typeof opts.apiProbeURL === "string" ? opts.apiProbeURL : undefined,
+        });
+        const runtime = setVmRuntime(snap.runningStatus, vmStateFromSnapshot(snap));
         events.claudeVmRunningStatusChanged(runtime);
-        events.claudeVmApiReachabilityUpdated({ reachability: "ok", willTryRecover: false, mode: "host-loop" });
-        return { success: true, ...runtime };
+        if (snap.error && snap.runningStatus === "failed") {
+          events.claudeVmStartupError(snap.error);
+        }
+        events.claudeVmApiReachabilityUpdated({
+          reachability: snap.connected ? "ok" : snap.running ? "unknown" : "offline",
+          willTryRecover: false,
+          mode: snap.mode,
+        });
+        return {
+          success: snap.runningStatus === "running" || snap.connected,
+          ...vmStateFromSnapshot(snap),
+        };
       },
-      getDownloadStatus: async () => ({ status: "downloaded", mode: "host-loop" }),
-      getRunningStatus: async () => vmState(),
+      getDownloadStatus: async () => {
+        const snap = await coworkVm.snapshot();
+        return {
+          status: snap.downloadStatus,
+          mode: snap.mode,
+          bundleReady: snap.bundleReady,
+          bundlePath: snap.bundlePath,
+        };
+      },
+      getRunningStatus: async () => {
+        const snap = await coworkVm.snapshot();
+        const runtime = setVmRuntime(snap.runningStatus, vmStateFromSnapshot(snap));
+        return runtime;
+      },
       setForceDisableHostLoop: async (_event, enabled) => {
         featureState.setBoolean("vmForceDisableHostLoop", "global", Boolean(enabled));
         return true;
@@ -533,16 +601,41 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         return true;
       },
       deleteAndReinstall: async () => {
+        await coworkVm.stopVM(false);
         vmStateMap.clear();
-        const runtime = setVmRuntime("stopped");
+        const snap = await coworkVm.snapshot();
+        const runtime = setVmRuntime("stopped", vmStateFromSnapshot(snap));
         events.claudeVmRunningStatusChanged(runtime);
-        events.claudeVmDownloadStatusChanged({ status: "downloaded", mode: "host-loop" });
-        return { success: true, status: "downloaded", mode: "host-loop" };
+        events.claudeVmDownloadStatusChanged({
+          status: snap.downloadStatus,
+          mode: snap.mode,
+        });
+        return { success: true, status: snap.downloadStatus, mode: snap.mode };
       },
-      checkVirtualMachinePlatform: async () => ({ supported: true, mode: "host-loop", platform: process.platform }),
-      enableVirtualMachinePlatform: async () => ({ success: true, restartNeeded: false, mode: "host-loop" }),
-      restartAfterVMPInstall: async () => ({ success: true, restartNeeded: false, mode: "host-loop" }),
-      apiReachability_$store$_getState: async () => ({ reachability: "ok", willTryRecover: false, mode: "host-loop" }),
+      checkVirtualMachinePlatform: async () => {
+        const snap = await coworkVm.snapshot();
+        return {
+          supported: process.platform === "darwin" && snap.swiftLoaded,
+          mode: snap.mode,
+          platform: process.platform,
+          swiftLoaded: snap.swiftLoaded,
+          bundleReady: snap.bundleReady,
+        };
+      },
+      enableVirtualMachinePlatform: async () => ({
+        success: process.platform === "darwin",
+        restartNeeded: false,
+        mode: "vm",
+      }),
+      restartAfterVMPInstall: async () => ({ success: true, restartNeeded: false, mode: "vm" }),
+      apiReachability_$store$_getState: async () => {
+        const snap = await coworkVm.snapshot();
+        return {
+          reachability: snap.connected ? "ok" : "unknown",
+          willTryRecover: false,
+          mode: snap.mode,
+        };
+      },
     },
     ComputerUseTcc: {
       getState: async () => getComputerUseTccState(),

@@ -101,6 +101,22 @@ export type CoworkQueryFactoryInput = {
    * Optional until full dual-exec plugin path collection is product-wired.
    */
   readOnlyPluginPaths?: string[] | null;
+  /**
+   * Dual-exec (hostLoopMode=false) guest Claude spawn config.
+   * When set, factory uses createVMSpawnFunction (tGi) instead of host child_process.
+   */
+  dualExecSpawn?: {
+    additionalMounts: Record<string, unknown>;
+    allowedDomains?: readonly string[] | null;
+    isResume?: boolean;
+    mountSkeletonHome?: boolean;
+    processName: string;
+    sessionId: string;
+  } | null;
+  /**
+   * Official network-drive host paths excluded from dual-exec user mounts (NH).
+   */
+  networkDriveFolders?: readonly string[] | null;
   mcpServers?: Record<string, unknown>;
   model?: string;
   permissionMode?: string;
@@ -109,6 +125,10 @@ export type CoworkQueryFactoryInput = {
   resume?: string;
   resumeSessionAt?: string;
   sessionId: string;
+  /**
+   * Official vmProcessName for dual-exec cwd `/sessions/<vm>` and mounts.
+   */
+  vmProcessName?: string;
   /**
    * Official session.sessionType for canUseTool headless/bridge gates
    * (agent / dispatch_child path-required). Local cowork omit → picker.

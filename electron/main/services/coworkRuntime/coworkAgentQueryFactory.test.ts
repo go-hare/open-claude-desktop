@@ -47,6 +47,28 @@ it("builds the long-lived host-loop SDK options", () => {
   expect(options.disallowedTools).toContain("Bash");
 });
 
+it("builds dual-exec SDK options with guest cwd and VM spawn (not host bash invent)", () => {
+  const options = buildCoworkSdkOptions(
+    input({
+      hostLoopMode: false,
+      vmProcessName: "vm-proc-1",
+      hostClaudeConfigDir: "/tmp/sess/.claude",
+      hostOutputsDir: "/tmp/sess/outputs",
+      userSelectedFolders: ["/Users/test/project"],
+    }),
+    { executable: "/opt/claude", spawnClaudeCodeProcess: vi.fn() },
+  );
+
+  expect(options.cwd).toBe("/sessions/vm-proc-1");
+  expect(options.pathToClaudeCodeExecutable).toBe("/usr/local/bin/claude");
+  expect(options.additionalDirectories).toEqual([
+    "/sessions/vm-proc-1/mnt/project",
+  ]);
+  expect(typeof options.spawnClaudeCodeProcess).toBe("function");
+  // Host-loop disallowed Bash list is host-loop-only.
+  expect(options.disallowedTools).toBeUndefined();
+});
+
 it("appends official auto-memory host allow rules in host-loop mode", () => {
   const withMemory = buildCoworkSdkOptions(
     input({

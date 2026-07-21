@@ -188,6 +188,30 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   const initialTarget = extractLaunchTarget(process.argv);
 
   await app.whenReady();
+  // Official BbA GrowthBook init residual: 3p kni no-op network; 1p when
+  // CLAUDE_DEPLOYMENT_MODE=1p uses /api/desktop/features + fcache.
+  try {
+    const { initCoworkGrowthBookFeatures } = await import(
+      "./services/coworkHostLoop/coworkGrowthBookFetch"
+    );
+    const { COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES } = await import(
+      "./services/coworkHostLoop/coworkGrowthBookFeatures"
+    );
+    const deploymentMode =
+      process.env.CLAUDE_DEPLOYMENT_MODE
+      ?? (options.desktopTelemetryConfig?.deploymentMode as string | undefined)
+      ?? "3p";
+    await initCoworkGrowthBookFeatures({
+      getHardcodedFeatures: () =>
+        deploymentMode === "1p" ? null : COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES,
+      getClaudeAiBaseUrl: () =>
+        process.env.CLAUDE_AI_URL?.trim() || "https://claude.ai",
+      getUserDataPath: () => app.getPath("userData"),
+      log: (...args) => console.info(...args),
+    });
+  } catch (error) {
+    console.warn("[growthbook] init residual failed", error);
+  }
   installAppProtocolHandler({ ionDistRoot: options.ionDistRoot ?? paths.ionDistRoot });
   await runtime.createAndLoadWindow();
 

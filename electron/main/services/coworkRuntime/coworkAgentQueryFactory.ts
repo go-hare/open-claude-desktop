@@ -42,6 +42,11 @@ import {
 } from "./coworkClaudeExecutable";
 import { resolveCoworkChromeCicCanUseTool } from "../coworkSessions/coworkChromeCicCanUseTool";
 import type { CoworkChromePermissionMode } from "../coworkSessions/coworkSessionTypes";
+import { createCoworkVmSpawnFunction } from "../coworkVm/coworkVmProcess";
+import {
+  computeCoworkDualExecMounts,
+  pluginMountsFromReadOnlyPaths,
+} from "../coworkVm/coworkVmDualExecMounts";
 
 export type CoworkSdkQuery = (params: {
   options?: Options;
@@ -201,6 +206,63 @@ export function hostCwd(input: CoworkQueryFactoryInput): string {
   return folders[0] ?? process.cwd();
 }
 
+/**
+ * Official dual-exec cwd is `/sessions/<vmProcessName>` (guest).
+ * Host-loop uses hostCwd (real host path).
+ */
+export function resolveCoworkSdkCwd(input: CoworkQueryFactoryInput): string {
+  if (!input.hostLoopMode && input.vmProcessName) {
+    return `/sessions/${input.vmProcessName}`;
+  }
+  return hostCwd(input);
+}
+
+function resolveDualExecSpawn(
+  input: CoworkQueryFactoryInput,
+  options: CoworkAgentQueryFactoryOptions,
+): Options["spawnClaudeCodeProcess"] | undefined {
+  if (input.hostLoopMode) {
+    return options.spawnClaudeCodeProcess;
+  }
+  const vmProcessName = input.vmProcessName;
+  if (!vmProcessName) return undefined;
+
+  // Prefer explicit dualExecSpawn from runtime; else derive mounts from session inputs.
+  // Official UXe fills session.readOnlyPluginPaths → plugin ro mounts (pluginMountsFromReadOnlyPaths).
+  const derived = input.dualExecSpawn
+    ? null
+    : computeCoworkDualExecMounts({
+        autoMemoryDir: input.autoMemoryDir,
+        autoMemoryReadWrite: !input.autoMemoryReadOnly && Boolean(input.autoMemoryDir),
+        hostClaudeConfigDir: input.hostClaudeConfigDir,
+        hostOutputsDir: input.hostOutputsDir,
+        hostUploadsDir: input.hostUploadsDir,
+        networkDriveFolders: input.networkDriveFolders,
+        pluginMounts: pluginMountsFromReadOnlyPaths(input.readOnlyPluginPaths),
+        userSelectedFolders: hostFolders(input.userSelectedFolders),
+        vmProcessName,
+      });
+
+  const mounts =
+    input.dualExecSpawn?.additionalMounts
+    ?? derived?.mounts
+    ?? {};
+  const processName =
+    input.dualExecSpawn?.processName ?? vmProcessName;
+  const sessionId = input.dualExecSpawn?.sessionId ?? input.sessionId;
+
+  // Do not startVM at option-build time (unit tests / pure options).
+  // Runtime controller kicks start early; spawnCoworkVmGuestProcess ensures guest before spawn.
+  return createCoworkVmSpawnFunction({
+    additionalMounts: mounts as Record<string, unknown>,
+    allowedDomains: input.dualExecSpawn?.allowedDomains,
+    isResume: input.dualExecSpawn?.isResume ?? Boolean(input.resume),
+    mountSkeletonHome: input.dualExecSpawn?.mountSkeletonHome,
+    processName,
+    sessionId,
+  });
+}
+
 export function buildCoworkSdkOptions(
   input: CoworkQueryFactoryInput,
   options: CoworkAgentQueryFactoryOptions = {},
@@ -231,18 +293,43 @@ export function buildCoworkSdkOptions(
       ),
     );
   }
+
+  const dualExec =
+    !input.hostLoopMode && input.vmProcessName
+      ? computeCoworkDualExecMounts({
+          autoMemoryDir: input.autoMemoryDir,
+          autoMemoryReadWrite:
+            !input.autoMemoryReadOnly && Boolean(input.autoMemoryDir),
+          hostClaudeConfigDir: input.hostClaudeConfigDir,
+          hostOutputsDir: input.hostOutputsDir,
+          hostUploadsDir: input.hostUploadsDir,
+          networkDriveFolders: input.networkDriveFolders,
+          pluginMounts: pluginMountsFromReadOnlyPaths(input.readOnlyPluginPaths),
+          userSelectedFolders: folders,
+          vmProcessName: input.vmProcessName,
+        })
+      : null;
+
   const sdkOptions: Options = {
-    additionalDirectories: folders.length > 0 ? folders : undefined,
+    additionalDirectories: input.hostLoopMode
+      ? folders.length > 0
+        ? folders
+        : undefined
+      : dualExec && dualExec.additionalDirectories.length > 0
+        ? dualExec.additionalDirectories
+        : undefined,
     allowedTools: enabled.length > 0 ? enabled : undefined,
     canUseTool: createCanUseTool(input),
-    cwd: hostCwd(input),
+    cwd: resolveCoworkSdkCwd(input),
     forwardSubagentText: true,
     forkSession: input.forkSession,
     includePartialMessages: true,
     mcpServers: input.mcpServers as Options["mcpServers"],
     model: input.model,
-    pathToClaudeCodeExecutable:
-      options.executable ?? resolveCoworkClaudeExecutable(),
+    pathToClaudeCodeExecutable: input.hostLoopMode
+      ? options.executable ?? resolveCoworkClaudeExecutable()
+      : // Official dual-exec: guest binary at /usr/local/bin/claude
+        "/usr/local/bin/claude",
     permissionMode: permissionMode(input.permissionMode),
     resume: input.resume,
     resumeSessionAt: input.resumeSessionAt,
@@ -255,6 +342,9 @@ export function buildCoworkSdkOptions(
     sdkOptions.disallowedTools = [...HOST_LOOP_DIRECT_DISALLOWED_TOOLS];
     sdkOptions.tools = [...HOST_LOOP_TOOL_NAMES];
     sdkOptions.spawnClaudeCodeProcess = options.spawnClaudeCodeProcess;
+  } else if (input.vmProcessName) {
+    // Official dual-exec: spawn Claude Code inside guest (tGi), not host shell.
+    sdkOptions.spawnClaudeCodeProcess = resolveDualExecSpawn(input, options);
   }
   return sdkOptions;
 }

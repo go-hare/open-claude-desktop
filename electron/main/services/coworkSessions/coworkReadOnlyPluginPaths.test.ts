@@ -1,0 +1,125 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  collectCoworkReadOnlyPluginPaths,
+  coworkInstalledPluginsFile,
+  parseInstalledPluginInstallPaths,
+} from "./coworkReadOnlyPluginPaths";
+import { resolveCoworkUserDataFromSessionStorage } from "./coworkSessionRuntimeController";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function mkTemp(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cowork-plugins-"));
+  tempDirs.push(dir);
+  return dir;
+}
+
+describe("parseInstalledPluginInstallPaths", () => {
+  it("reads installPath entries from official plugins map", () => {
+    const paths = parseInstalledPluginInstallPaths({
+      version: 2,
+      plugins: {
+        "foo@local": [
+          { installPath: "/tmp/plugins/foo", scope: "user" },
+          { installPath: "", scope: "user" },
+        ],
+        "bar@mp": [{ installPath: "/tmp/plugins/bar", scope: "user" }],
+      },
+    });
+    expect(paths).toEqual([
+      path.resolve("/tmp/plugins/foo"),
+      path.resolve("/tmp/plugins/bar"),
+    ]);
+  });
+
+  it("returns empty for missing/invalid manifests", () => {
+    expect(parseInstalledPluginInstallPaths(null)).toEqual([]);
+    expect(parseInstalledPluginInstallPaths({})).toEqual([]);
+  });
+});
+
+describe("collectCoworkReadOnlyPluginPaths", () => {
+  it("returns empty without account/org and does not invent roots", () => {
+    expect(
+      collectCoworkReadOnlyPluginPaths({
+        userDataPath: mkTemp(),
+      }),
+    ).toEqual([]);
+  });
+
+  it("collects existing install paths from installed_plugins.json", () => {
+    const userData = mkTemp();
+    const pluginA = path.join(userData, "plugin-a");
+    const pluginB = path.join(userData, "plugin-b");
+    fs.mkdirSync(pluginA, { recursive: true });
+    fs.mkdirSync(pluginB, { recursive: true });
+    const missing = path.join(userData, "missing-plugin");
+    const file = coworkInstalledPluginsFile(userData, "acct", "org");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          a: [{ installPath: pluginA, scope: "user" }],
+          b: [{ installPath: pluginB, scope: "user" }],
+          c: [{ installPath: missing, scope: "user" }],
+        },
+      }),
+    );
+    const collected = collectCoworkReadOnlyPluginPaths({
+      accountId: "acct",
+      orgId: "org",
+      userDataPath: userData,
+    });
+    expect(collected).toEqual([pluginA, pluginB]);
+  });
+
+  it("collects remote dirs with .claude-plugin/plugin.json", () => {
+    const userData = mkTemp();
+    const remote = path.join(
+      userData,
+      "local-agent-mode-sessions",
+      "acct",
+      "org",
+      "rpm",
+      "marketplace",
+      "tool",
+    );
+    fs.mkdirSync(path.join(remote, ".claude-plugin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(remote, ".claude-plugin", "plugin.json"),
+      JSON.stringify({ name: "tool" }),
+    );
+    const collected = collectCoworkReadOnlyPluginPaths({
+      accountId: "acct",
+      orgId: "org",
+      userDataPath: userData,
+    });
+    expect(collected).toEqual([remote]);
+  });
+});
+
+describe("resolveCoworkUserDataFromSessionStorage", () => {
+  it("strips local-agent-mode-sessions segment", () => {
+    expect(
+      resolveCoworkUserDataFromSessionStorage(
+        "/Users/x/Library/Application Support/App/local-agent-mode-sessions/a/o/agent/sid",
+      ),
+    ).toBe("/Users/x/Library/Application Support/App");
+  });
+
+  it("returns null when marker missing", () => {
+    expect(resolveCoworkUserDataFromSessionStorage("/tmp/other")).toBeNull();
+    expect(resolveCoworkUserDataFromSessionStorage(null)).toBeNull();
+  });
+});

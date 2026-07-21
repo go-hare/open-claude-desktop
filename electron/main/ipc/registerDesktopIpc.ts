@@ -4,6 +4,9 @@ import { LocalSessionStore } from "../services/localSessions/localSessionStore";
 import { CoworkAccountContext } from "../services/coworkAccount/coworkAccountContext";
 import { loadCoworkBootstrapIdentity } from "../services/coworkAccount/coworkBootstrapIdentity";
 import { createCoworkHostLoopModeResolver } from "../services/coworkHostLoop/createCoworkHostLoopModeResolver";
+import { isCoworkEnterpriseRequireFullVmSandbox } from "../services/coworkHostLoop/coworkEnterpriseConfig";
+import { isCoworkHostLoopGrowthBookFeatureEnabled } from "../services/coworkHostLoop/coworkGrowthBookFeatures";
+import { resolveCoworkRequireFullVmSandbox } from "../services/coworkHostLoop/coworkHostLoopMode";
 import { createCoworkAgentQueryFactory } from "../services/coworkRuntime/coworkAgentQueryFactory";
 import {
   createWebContentsDirectoryDispatcher,
@@ -47,11 +50,27 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
     loadBootstrapIdentity: loadCoworkBootstrapIdentity,
   });
   const featureState = new FeatureStateStore();
-  // Official v4(): feature flag 1143815894 is the product gate. Without a GrowthBook
-  // bridge yet, default host-loop off (false) — never hard-wire true. Operators can
-  // enable via CLAUDE_HOST_LOOP_FEATURE=1 or CLAUDE_FORCE_HOST_LOOP=1 under dev override.
+  // Shared SettingsStore so xn allowAllBrowserActions and AppPreferences IPC
+  // see the same preference bag (official Xo()/F_ preferences).
+  const settings = new SettingsStore();
+  // Official uHA = vi().requireCoworkFullVmSandbox === true (MDM / configLibrary).
+  // Residual env + settings preference still honored when enterprise source is none.
+  const requireCoworkFullVmSandbox = () =>
+    resolveCoworkRequireFullVmSandbox({
+      enterpriseValue: isCoworkEnterpriseRequireFullVmSandbox({
+        getUserDataPath: () => app.getPath("userData"),
+      }),
+      preferenceValue: settings.getPreferences().requireCoworkFullVmSandbox,
+    });
+  // Official v4(): feature flag 1143815894 via ft()/mZe. Product seeds official kni
+  // (3p hardcodedMainGrowthBookFeatures → on:true). Env CLAUDE_HOST_LOOP_FEATURE still
+  // overrides when set. requireCoworkFullVmSandbox / forceDisableHostLoop force dual-exec.
+  // 1p /api/desktop/features + fcache: initCoworkGrowthBookFeatures on bootstrap.
   const resolveHostLoopMode = createCoworkHostLoopModeResolver({
-    getForceDisableHostLoop: () => featureState.getBoolean("vmForceDisableHostLoop", "global", false),
+    getForceDisableHostLoop: () =>
+      featureState.getBoolean("vmForceDisableHostLoop", "global", false),
+    getHostLoopFeatureEnabled: () => isCoworkHostLoopGrowthBookFeatureEnabled(),
+    getRequireCoworkFullVmSandbox: requireCoworkFullVmSandbox,
   });
   // Official mcpDirectoryBridge wPA + skills c9e + pluginSearchBridge I9e:
   // reverse-RPC via LocalAgentModeSessions.onEvent.
@@ -67,9 +86,6 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
   );
   // Official getSessionStorageDir for XL transcript/message path context.
   let coworkPersistence: CoworkSessionPersistence | null = null;
-  // Shared SettingsStore so xn allowAllBrowserActions and AppPreferences IPC
-  // see the same preference bag (official Xo()/F_ preferences).
-  const settings = new SettingsStore();
   // Official Ds NotificationService (class fir) residual — Electron adapter only.
   // Swift UNUserNotificationCenter / ze analytics / dock bounce not product.
   const desktopNotificationService = new CoworkDesktopNotificationService({
@@ -162,8 +178,8 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
       onStderr: (chunk) => console.warn("[cowork-agent-sdk]", chunk.trimEnd()),
     }),
     resolveHostLoopMode: () => resolveHostLoopMode(),
-    // Org sandbox policy source is unresolved until account/org payload is wired.
-    requireCoworkFullVmSandbox: () => false,
+    // Official vi().requireCoworkFullVmSandbox — settings/env residual until org payload.
+    requireCoworkFullVmSandbox,
     // Official transcript load applies XL via buildVMPathContext.
     transcriptReader: createCoworkTranscriptReader(
       undefined,
