@@ -18,13 +18,31 @@ import {
 import { describeMcpServer, mcpConfigEntries } from "../services/mcp/mcpRuntime";
 import { handleSupportBundleAction } from "../services/support/supportBundle";
 import { openCustom3pSetupWindow } from "../windows/custom3pSetupWindow";
-import { applyKeepAwakeEnabled, syncKeepAwakeFromPreferences } from "../services/settings/keepAwake";
+import {
+  applyKeepAwakeEnabled,
+  syncKeepAwakeFromPreferences,
+} from "../services/settings/keepAwake";
+import {
+  runPreferencePostWriteEffects,
+  runPreferencePreWriteHook,
+} from "../services/settings/preferenceEffects";
+import {
+  ensureWakeSchedulerController,
+  getWakeSchedulerStatus,
+  openWakeSchedulerSettings,
+} from "../services/settings/wakeScheduler";
 import type { IpcHandlerContext } from "./context";
 import { originalEventSurface } from "./originalEventSurface";
 import { dispatchBridgeEvent, registerInterfaceSyncHandlers, registerNamespaceHandlers } from "./registerIpc";
 
 function asObject(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function applyKeepAwakeEnabledIfNeeded(key: string, value: unknown): void {
+  if (key === "keepAwakeEnabled") {
+    applyKeepAwakeEnabled(value === true);
+  }
 }
 
 function asString(value: unknown): string | null {
@@ -219,6 +237,31 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
   // Official keepAwakeEnabled: restore powerSaveBlocker from persisted prefs on boot.
   syncKeepAwakeFromPreferences(settings.getPreferences());
 
+  // Official wvi/pvi residual: darwin controller only; native API remains null until bridge.
+  // Reconcile is honest no-op without API (never invents install/enabled).
+  const wakeController = ensureWakeSchedulerController({
+    platform: process.platform,
+    getPreference: (key) => settings.getPreferences()[key],
+    setPreference: async (key, value) => {
+      // Official xn residual for wake-driven preference writes (courtesy-flip / approval).
+      const previous = settings.getPreferences()[key];
+      const ok = settings.setPreference(key, value);
+      if (!ok) return;
+      // Avoid re-entrant reconcile on wakeSchedulerEnabled (already inside reconcile).
+      if (key === "wakeSchedulerEnabled") {
+        applyKeepAwakeEnabledIfNeeded(key, value);
+        return;
+      }
+      await runPreferencePostWriteEffects(key, value, previous);
+    },
+    getAppVersion: () => app.getVersion(),
+  });
+  if (wakeController) {
+    void wakeController.reconcile().catch(() => {
+      /* native API absent → deferred */
+    });
+  }
+
   registerNamespaceHandlers("claude.settings", {
     AppConfig: {
       getAppConfig: async () => settings.getAppConfig(),
@@ -232,13 +275,23 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
     AppPreferences: {
       getPreferences: async () => settings.getPreferences(),
       setPreference: async (_event, key, value) => {
+        // Official: HSA validate → eZt pre-hook → xn write → Rh/effects → preferencesChanged.
+        // Invalid key/value or blocked pre-hook does not write / notify.
         if (typeof key !== "string") return false;
+        const previous = settings.getPreferences()[key];
+        const preOk = await runPreferencePreWriteHook(key, value, previous);
+        if (!preOk) return false;
         const result = settings.setPreference(key, value);
-        if (key === "keepAwakeEnabled") {
-          applyKeepAwakeEnabled(value === true);
-        }
-        dispatchBridgeEvent(mainView, "claude.settings", "AppPreferences", "preferencesChanged", settings.getPreferences());
-        return result;
+        if (!result) return false;
+        await runPreferencePostWriteEffects(key, value, previous);
+        dispatchBridgeEvent(
+          mainView,
+          "claude.settings",
+          "AppPreferences",
+          "preferencesChanged",
+          settings.getPreferences(),
+        );
+        return true;
       },
     },
     Startup: {
@@ -302,9 +355,30 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       },
     },
     WakeScheduler: {
-      getStatus: async () => ({ enabled: false, supported: process.platform === "darwin" }),
+      // Official zYe getStatus: notFound until native $_A API present; never invent enabled.
+      getStatus: async () =>
+        getWakeSchedulerStatus({
+          getApprovedThisCycle: () =>
+            settings.getPreferences().wakeSchedulerApprovedThisCycle === true,
+          controller: wakeController,
+        }),
       openSettings: async () => {
-        await shell.openExternal("x-apple.systempreferences:com.apple.Battery-Settings.extension");
+        // Official openSettings → native; residual opens Login Items (wake approval surface).
+        await openWakeSchedulerSettings({
+          controller: wakeController,
+          openLoginItemsSettings: async () => {
+            // darwin Login Items; Battery settings also used historically for wake.
+            if (process.platform === "darwin") {
+              await shell.openExternal(
+                "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
+              );
+            } else {
+              await shell.openExternal(
+                "ms-settings:startupapps",
+              );
+            }
+          },
+        });
         return true;
       },
     },

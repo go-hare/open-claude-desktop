@@ -19,6 +19,23 @@ import {
   resolveCoworkAutoMemoryDir,
 } from "../services/coworkSessions/coworkAutoMemoryPaths";
 import { getCoworkClaudeVmService } from "../services/coworkVm/coworkClaudeVm";
+import {
+  addLocalDirectoryMarketplace,
+  installPluginByIdFromDisk,
+  installPluginFromDirectory,
+  installPluginFromZip,
+  listAvailableLocalMarketplacePlugins,
+  listInstalledPluginsFromDisk,
+  listKnownMarketplaces,
+  refreshKnownMarketplace,
+  removeKnownMarketplace,
+  resolveLocalMarketplaceInput,
+  resolveLocalPluginsPaths,
+  resolvePluginsAccountCtx,
+  setPluginEnabledOnDisk,
+  uninstallPluginFromDisk,
+  type LocalPluginsPathBag,
+} from "../services/plugins/localPluginsWriter";
 import { getComputerUseTccState, openTccSystemSettings, requestAccessibilityGrant, requestScreenRecordingGrant } from "../services/tcc/computerUseTcc";
 import type { IpcHandlerContext } from "./context";
 import { originalEventSurface } from "./originalEventSurface";
@@ -203,6 +220,8 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   const artifacts = featureState.loadMap<Record<string, unknown>>("artifacts");
   const memories = featureState.loadMap<string>("memories");
   const orbitDeploys = featureState.loadMap<Record<string, unknown>>("orbitDeploys");
+  // Legacy in-memory maps kept as fallback when account/org identity is absent.
+  // Prefer official on-disk residual (TGi / known_marketplaces / installed_plugins).
   const customMarketplaces = featureState.loadMap<Record<string, unknown>>("customMarketplaces");
   const localPlugins = featureState.loadMap<Record<string, unknown>>("localPlugins");
   const vmStateMap = featureState.loadMap<Record<string, unknown>>("vmState");
@@ -213,8 +232,47 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   const persistCustomMarketplaces = () => featureState.saveMap("customMarketplaces", customMarketplaces);
   const persistLocalPlugins = () => featureState.saveMap("localPlugins", localPlugins);
   const persistVmState = () => featureState.saveMap("vmState", vmStateMap);
-  const installedPlugins = () => Array.from(localPlugins.values());
-  const marketplacePlugins = () => Array.from(customMarketplaces.values()).map((marketplace) => ({ ...marketplace, source: "marketplace" }));
+
+  /**
+   * Always resolves disk layout (identity or local-desktop fallback).
+   * Installs must write installed_plugins.json so sessions can load plugins.
+   */
+  const resolvePluginPaths = (): LocalPluginsPathBag => {
+    const identity = context.coworkAccount.getIdentity();
+    const ctx = resolvePluginsAccountCtx({ identity })!;
+    return resolveLocalPluginsPaths(app.getPath("userData"), ctx);
+  };
+
+  const installedPlugins = (): Array<Record<string, unknown>> => {
+    const paths = resolvePluginPaths();
+    const fromDisk = listInstalledPluginsFromDisk(paths).map((plugin) => ({
+      ...plugin,
+      path: plugin.installPath,
+      plugin: { name: plugin.name, version: plugin.version },
+    }));
+    // Merge any pre-residual memory-only entries that still have a live path.
+    const fromMemory = Array.from(localPlugins.values()).filter((plugin) => {
+      const id = String(plugin.id ?? "");
+      return id && !fromDisk.some((d) => String(d.id) === id);
+    });
+    return [...fromDisk, ...fromMemory];
+  };
+  const marketplacePlugins = (): Array<Record<string, unknown>> => {
+    const paths = resolvePluginPaths();
+    const fromDisk = listAvailableLocalMarketplacePlugins(paths);
+    const fromMemory = Array.from(customMarketplaces.values()).map(
+      (marketplace) => ({
+        ...marketplace,
+        source: "marketplace",
+      }),
+    );
+    // Prefer disk entries; keep memory-only marketplaces as residual.
+    const diskIds = new Set(fromDisk.map((p) => String(p.id)));
+    return [
+      ...fromDisk,
+      ...fromMemory.filter((m) => !diskIds.has(String(m.id))),
+    ];
+  };
   const cachedCommands = async () => [
     ...(await listLocalSkills()).map((skill) => ({
       id: `skill:${String(skill.id)}`,
@@ -782,15 +840,19 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         persistMemories();
         return true;
       },
-      listAccountMemories: async () => Array.from(memories.entries()).filter(([key]) => key !== "global").map(([key, value]) => ({ key, value })),
-      readAccountMemory: async (_event, key) => memories.get(String(key)) ?? "",
-      writeAccountMemory: async (_event, key, value) => {
-        memories.set(String(key), String(value ?? ""));
+      // Official ion-dist gt/xt residual: list items are { path, content } (cc989143e Yt uses file.path / file.content).
+      listAccountMemories: async () =>
+        Array.from(memories.entries())
+          .filter(([key]) => key !== "global")
+          .map(([path, content]) => ({ path, content })),
+      readAccountMemory: async (_event, path) => memories.get(String(path)) ?? "",
+      writeAccountMemory: async (_event, path, value) => {
+        memories.set(String(path), String(value ?? ""));
         persistMemories();
         return true;
       },
-      deleteAccountMemory: async (_event, key) => {
-        const deleted = memories.delete(String(key));
+      deleteAccountMemory: async (_event, path) => {
+        const deleted = memories.delete(String(path));
         persistMemories();
         return deleted;
       },
@@ -909,54 +971,190 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       summarizeSpace: async (_event, spaceId) => JSON.stringify(spaces.get(String(spaceId)) ?? {}).slice(0, 1000),
     },
     CustomPlugins: {
+      /**
+       * Official addMarketplace residual — local directory only.
+       * Remote URL/git clone is intentionally unsupported (no invent network success).
+       * Args residual: (name, url, meta) or single input object (ion-dist).
+       */
       addMarketplace: async (_event, name, url, meta) => {
-        const marketplace = { id: id("market"), name, url, meta };
-        customMarketplaces.set(String(marketplace.id), marketplace);
+        const resolved = resolveLocalMarketplaceInput(name, url, meta);
+        if (resolved.kind === "unsupported") {
+          // Do not invent remote marketplace registration.
+          return {
+            success: false,
+            error: resolved.error,
+            id: null,
+            name: asString(name),
+            url: asString(url),
+          };
+        }
+        const paths = resolvePluginPaths();
+        const added = addLocalDirectoryMarketplace(paths, {
+          name: resolved.name,
+          directoryPath: resolved.directoryPath,
+        });
+        if (!added.success) {
+          return { success: false, error: added.error };
+        }
+        customMarketplaces.set(String(added.marketplace.id), added.marketplace);
         persistCustomMarketplaces();
-        return marketplace;
+        return added.marketplace;
       },
       removeMarketplace: async (_event, marketplaceId) => {
-        const deleted = customMarketplaces.delete(String(marketplaceId));
+        const paths = resolvePluginPaths();
+        const deleted = removeKnownMarketplace(paths, String(marketplaceId));
+        customMarketplaces.delete(String(marketplaceId));
         persistCustomMarketplaces();
         return deleted;
       },
-      refreshMarketplace: async (_event, marketplaceId) => customMarketplaces.get(String(marketplaceId)) ?? null,
-      listMarketplaces: async () => Array.from(customMarketplaces.values()),
-      installPlugin: async (_event, plugin) => {
-        const record = { id: id("plugin"), installedAt: new Date().toISOString(), plugin };
-        localPlugins.set(String(record.id), record);
-        persistLocalPlugins();
-        events.customPluginsInstallProgress(String(record.id), "installed");
-        return record;
+      refreshMarketplace: async (_event, marketplaceId) => {
+        const paths = resolvePluginPaths();
+        return refreshKnownMarketplace(paths, String(marketplaceId));
+      },
+      listMarketplaces: async () => {
+        const paths = resolvePluginPaths();
+        return listKnownMarketplaces(paths);
+      },
+      /**
+       * Official installPlugin residual:
+       *   (pluginId, egressAllowedDomains, pluginContext?)
+       * Product residual also accepts path/object when local install.
+       * No cloud fetch — requires name@marketplace on disk or directory path.
+       */
+      installPlugin: async (_event, plugin, _egress?, contextOrOpts?) => {
+        const paths = resolvePluginPaths();
+        const pluginObj = asObject(plugin);
+        const pluginId =
+          asString(plugin)
+          ?? asString(pluginObj.id)
+          ?? asString(pluginObj.pluginId)
+          ?? null;
+        const pluginPath =
+          asString(pluginObj.path)
+          ?? asString(pluginObj.filePath)
+          ?? asString(asObject(contextOrOpts).path)
+          ?? null;
+        const replaceExisting =
+          asObject(contextOrOpts).replaceExisting === true
+          || pluginObj.replaceExisting === true;
+
+        let result;
+        if (pluginPath) {
+          result = installPluginFromDirectory(paths, pluginPath, { replaceExisting });
+        } else if (pluginId) {
+          result = installPluginByIdFromDisk(paths, pluginId, { replaceExisting });
+        } else {
+          return {
+            success: false,
+            pluginId: "",
+            error: "Missing pluginId or local path (cloud install not available in residual).",
+          };
+        }
+        if (!result.success) {
+          return {
+            success: false,
+            pluginId: pluginId ?? "",
+            error: result.error,
+          };
+        }
+        events.customPluginsInstallProgress(result.pluginId, "installed");
+        return {
+          success: true,
+          pluginId: result.pluginId,
+          pluginName: result.pluginName,
+          filePath: result.installPath,
+          installPath: result.installPath,
+          isNew: result.isNew,
+          path: result.installPath,
+          id: result.pluginId,
+          name: result.pluginName,
+          version: result.pluginVersion,
+          source: "marketplace",
+        };
       },
       updatePlugin: async (_event, pluginId, update) => {
-        const existing = localPlugins.get(String(pluginId)) ?? { id: String(pluginId) };
-        const updated = { ...existing, update, updatedAt: new Date().toISOString() };
-        localPlugins.set(String(pluginId), updated);
-        persistLocalPlugins();
-        events.customPluginsInstallProgress(String(pluginId), "updated");
-        return updated;
+        const paths = resolvePluginPaths();
+        const updateObj = asObject(update);
+        const sourcePath =
+          asString(updateObj.path)
+          ?? asString(updateObj.filePath)
+          ?? null;
+        if (sourcePath) {
+          const result = installPluginFromDirectory(paths, sourcePath, {
+            replaceExisting: true,
+          });
+          if (!result.success) {
+            return { success: false, error: result.error, id: String(pluginId) };
+          }
+          events.customPluginsInstallProgress(result.pluginId, "updated");
+          return {
+            success: true,
+            id: result.pluginId,
+            installPath: result.installPath,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+        // No path → cannot invent remote update.
+        return {
+          success: false,
+          id: String(pluginId),
+          error: "Local residual update requires a plugin path (no cloud update).",
+        };
       },
       uninstallPlugin: async (_event, pluginId) => {
-        const deleted = localPlugins.delete(String(pluginId));
+        const paths = resolvePluginPaths();
+        const okDisk = uninstallPluginFromDisk(paths, String(pluginId));
+        localPlugins.delete(String(pluginId));
         persistLocalPlugins();
-        return deleted;
+        return okDisk;
       },
       listInstalledPlugins: async () => installedPlugins(),
       listAvailablePlugins: async () => [...marketplacePlugins(), ...installedPlugins()],
       getCachedCommands: async () => cachedCommands(),
-      getInstallCounts: async () => ({}),
-      listRemotePluginsPage: async () => ({ items: marketplacePlugins(), nextPage: null }),
+      getInstallCounts: async () => {
+        const installed = installedPlugins();
+        return { installed: installed.length, available: marketplacePlugins().length };
+      },
+      /**
+       * Official listRemotePluginsPage residual shape used by ion-dist:
+       *   { plugins, hasMore }  (product also returns items/nextPage for older callers)
+       * Local residual: page over on-disk marketplace plugins only — no cloud.
+       */
+      listRemotePluginsPage: async (_event, limit?, offset?) => {
+        const all = marketplacePlugins();
+        const lim =
+          typeof limit === "number" && Number.isFinite(limit) && limit > 0
+            ? Math.floor(limit)
+            : 100;
+        const off =
+          typeof offset === "number" && Number.isFinite(offset) && offset > 0
+            ? Math.floor(offset)
+            : 0;
+        const slice = all.slice(off, off + lim);
+        const hasMore = off + slice.length < all.length;
+        return {
+          plugins: slice,
+          items: slice,
+          hasMore,
+          nextPage: hasMore ? off + slice.length : null,
+        };
+      },
       checkPluginHasLocalChanges: async (_event, pluginId) => {
-        const plugin = localPlugins.get(String(pluginId));
-        const pluginPath = asString(plugin?.path) ?? asString(asObject(plugin?.plugin).path);
+        const plugins = installedPlugins();
+        const plugin = plugins.find((p) => String(p.id) === String(pluginId))
+          ?? localPlugins.get(String(pluginId));
+        const pluginPath = asString(plugin?.path)
+          ?? asString(plugin?.installPath)
+          ?? asString(asObject(plugin?.plugin).path);
         if (!pluginPath) return false;
         try { await fs.access(pluginPath); return true; } catch { return false; }
       },
       getAndClearMigrationIssues: async () => {
         const issues = [];
         for (const plugin of installedPlugins()) {
-          const pluginPath = asString(plugin.path) ?? asString(asObject(plugin.plugin).path);
+          const pluginPath = asString(plugin.path)
+            ?? asString(plugin.installPath)
+            ?? asString(asObject(plugin.plugin).path);
           if (!pluginPath) continue;
           try {
             await fs.access(pluginPath);
@@ -970,19 +1168,26 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       installLocalOrgPlugin: async (_event, pluginPath) => {
         const target = asString(pluginPath) ?? asString(asObject(pluginPath).path);
         if (!target) return { success: false, error: "missing plugin path" };
-        const record = { id: id("plugin"), installedAt: new Date().toISOString(), source: "local-org", path: target };
-        localPlugins.set(String(record.id), record);
-        persistLocalPlugins();
-        events.customPluginsInstallProgress(String(record.id), "installed");
-        return { success: true, pluginId: record.id };
+        const paths = resolvePluginPaths();
+        const result = installPluginFromDirectory(paths, target, {
+          replaceExisting: true,
+          marketplaceName: "org-provisioned",
+        });
+        if (!result.success) {
+          return { success: false, pluginId: "", error: result.error };
+        }
+        events.customPluginsInstallProgress(result.pluginId, "installed");
+        return { success: true, pluginId: result.pluginId, filePath: result.installPath };
       },
     },
     LocalPlugins: {
       getPlugins: async () => installedPlugins(),
       deletePlugin: async (_event, pluginId) => {
-        const deleted = localPlugins.delete(String(pluginId));
+        const paths = resolvePluginPaths();
+        const okDisk = uninstallPluginFromDisk(paths, String(pluginId));
+        localPlugins.delete(String(pluginId));
         persistLocalPlugins();
-        return deleted;
+        return okDisk;
       },
       getDownloadedRemotePlugins: async () => installedPlugins().filter((plugin) => plugin.source === "local-upload" || plugin.source === "marketplace"),
       getPluginCliStatus: async () => ({ installed: false }),
@@ -995,11 +1200,14 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
       revokePluginOAuth: async () => true,
       setPluginEnabled: async (_event, pluginId, enabled) => {
+        const paths = resolvePluginPaths();
+        const updated = setPluginEnabledOnDisk(paths, String(pluginId), Boolean(enabled));
+        if (updated) return updated;
         const existing = localPlugins.get(String(pluginId)) ?? { id: String(pluginId) };
-        const updated = { ...existing, enabled: Boolean(enabled) };
-        localPlugins.set(String(pluginId), updated);
+        const mem = { ...existing, enabled: Boolean(enabled) };
+        localPlugins.set(String(pluginId), mem);
         persistLocalPlugins();
-        return updated;
+        return mem;
       },
       setPluginEnvVars: async () => true,
       setPluginOAuthClient: async () => true,
@@ -1009,15 +1217,66 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         if (target) await shell.openExternal(target);
         return { success: Boolean(target) };
       },
+      /**
+       * Official syncRemotePlugins residual — product does not invent cloud sync.
+       * Returns on-disk installed plugins only.
+       */
       syncRemotePlugins: async () => installedPlugins(),
-      uploadPlugin: async (_event, pluginPath) => {
-        const target = asString(pluginPath) ?? asString(asObject(pluginPath).path);
-        if (!target) return { success: false, error: "missing plugin path" };
-        const record = { id: id("plugin"), uploadedAt: new Date().toISOString(), source: "local-upload", path: target };
-        localPlugins.set(String(record.id), record);
-        persistLocalPlugins();
-        events.localPluginsCliOpAlwaysAllowed([String(record.id)]);
-        return { success: true, pluginId: record.id };
+      /**
+       * Official uploadPlugin residual: filename + base64Content + replaceExisting.
+       * Also accepts local directory/zip path (product residual).
+       * Always writes to disk (identity or local-desktop fallback).
+       */
+      uploadPlugin: async (_event, filenameOrPath, base64Content?, replaceExisting?, _pluginContext?) => {
+        const paths = resolvePluginPaths();
+        const replace = replaceExisting === true;
+        const nameOrPath = asString(filenameOrPath);
+        const b64 = asString(base64Content);
+
+        if (b64) {
+          try {
+            const buf = Buffer.from(b64, "base64");
+            const result = installPluginFromZip(paths, buf, { replaceExisting: replace });
+            if (!result.success) {
+              return { success: false, error: result.error };
+            }
+            events.localPluginsCliOpAlwaysAllowed([result.pluginId]);
+            events.customPluginsInstallProgress(result.pluginId, "installed");
+            return {
+              success: true,
+              pluginId: result.pluginId,
+              filePath: result.installPath,
+              isNew: result.isNew,
+            };
+          } catch (err) {
+            return {
+              success: false,
+              error: err instanceof Error ? err.message : "upload failed",
+            };
+          }
+        }
+
+        const target =
+          nameOrPath
+          ?? asString(asObject(filenameOrPath).path)
+          ?? asString(asObject(filenameOrPath).filePath);
+        if (!target) return { success: false, error: "missing plugin path or base64 content" };
+
+        const lower = target.toLowerCase();
+        const result = lower.endsWith(".zip")
+          ? installPluginFromZip(paths, target, { replaceExisting: replace })
+          : installPluginFromDirectory(paths, target, { replaceExisting: replace });
+        if (!result.success) {
+          return { success: false, error: result.error };
+        }
+        events.localPluginsCliOpAlwaysAllowed([result.pluginId]);
+        events.customPluginsInstallProgress(result.pluginId, "installed");
+        return {
+          success: true,
+          pluginId: result.pluginId,
+          filePath: result.installPath,
+          isNew: result.isNew,
+        };
       },
     },
     // Official lr (c11959232): listSources(cwd), attach(cwd, sessionName) → {sessionId,name,width,height}.

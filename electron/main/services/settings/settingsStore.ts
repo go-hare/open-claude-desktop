@@ -1,6 +1,17 @@
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  mergeAppPreferences,
+  OFFICIAL_APP_PREFERENCE_DEFAULTS,
+} from "./appPreferencesDefaults";
+import { validateAppPreference } from "./appPreferencesSchema";
+import {
+  resolveOfficialAppConfigPath,
+  readOfficialPreferencesSegment,
+  writeOfficialGlobalShortcutSegment,
+  writeOfficialPreferencesSegment,
+} from "./officialConfigJson";
 
 export type Custom3pConfigRecord = {
   id: string;
@@ -21,15 +32,11 @@ type PersistedSettings = {
   credentialHelperLastRun: unknown;
 };
 
-/** Official AppPreferences defaults used by hYt Keep awake (keepAwakeEnabled always defined). */
+/**
+ * Official SSA defaults used by getPreferences / bLA residual.
+ */
 const DEFAULT_PREFERENCES: Record<string, unknown> = {
-  /**
-   * Official allowAllBrowserActions:!1 — toggled by xn from
-   * setChromePermissionMode(skip_all_permission_checks). Browser automation
-   * product residual; key is preference-only here.
-   */
-  allowAllBrowserActions: false,
-  keepAwakeEnabled: false,
+  ...OFFICIAL_APP_PREFERENCE_DEFAULTS,
 };
 
 function defaultState(): PersistedSettings {
@@ -55,15 +62,27 @@ function slug(input: string): string {
 
 export class SettingsStore {
   private readonly settingsFile: string;
+  private readonly officialConfigPath: string;
   private state: PersistedSettings;
 
-  constructor(settingsFile = path.join(app.getPath("userData"), "desktop-shell-settings.json")) {
+  constructor(
+    settingsFile = path.join(app.getPath("userData"), "desktop-shell-settings.json"),
+    officialConfigPath?: string,
+  ) {
     this.settingsFile = settingsFile;
+    this.officialConfigPath =
+      officialConfigPath
+      ?? resolveOfficialAppConfigPath(path.dirname(settingsFile));
     this.state = this.read();
   }
 
   getSettingsFile(): string {
     return this.settingsFile;
+  }
+
+  /** Official Fb() residual — userData/claude_desktop_config.json */
+  getOfficialConfigPath(): string {
+    return this.officialConfigPath;
   }
 
   getUserDataDir(): string {
@@ -82,15 +101,27 @@ export class SettingsStore {
     try {
       const raw = JSON.parse(fs.readFileSync(this.settingsFile, "utf8")) as Partial<PersistedSettings>;
       const base = defaultState();
+      // Dual-read residual: seed from official config.json preferences under shell prefs.
+      const officialPrefs = readOfficialPreferencesSegment(this.officialConfigPath) ?? {};
+      const shellPrefs = raw.preferences ?? {};
+      const combinedStored = { ...officialPrefs, ...shellPrefs };
       return {
         ...base,
         ...raw,
-        preferences: { ...DEFAULT_PREFERENCES, ...(raw.preferences ?? {}) },
+        preferences: mergeAppPreferences(combinedStored),
         appFeatures: { ...base.appFeatures, ...(raw.appFeatures ?? {}) },
         mcpServersConfig: { ...base.mcpServersConfig, ...(raw.mcpServersConfig ?? {}) },
         custom3pConfigs: { ...base.custom3pConfigs, ...(raw.custom3pConfigs ?? {}) },
       };
     } catch {
+      // Shell missing: still try official config preferences (honest dual-read).
+      const officialPrefs = readOfficialPreferencesSegment(this.officialConfigPath);
+      if (officialPrefs) {
+        return {
+          ...defaultState(),
+          preferences: mergeAppPreferences(officialPrefs),
+        };
+      }
       return defaultState();
     }
   }
@@ -99,6 +130,15 @@ export class SettingsStore {
     fs.mkdirSync(path.dirname(this.settingsFile), { recursive: true });
     fs.writeFileSync(this.settingsFile, JSON.stringify(this.state, null, 2));
     fs.writeFileSync(this.getMcpConfigFile(), JSON.stringify(this.state.mcpServersConfig, null, 2));
+    // Official F_("preferences", i) dual-write residual — does not invent other Xo keys.
+    try {
+      writeOfficialPreferencesSegment(
+        this.officialConfigPath,
+        this.state.preferences,
+      );
+    } catch {
+      /* dual-write best-effort; shell file remains source of truth for product */
+    }
   }
 
   getAppConfig(): Record<string, unknown> {
@@ -116,24 +156,52 @@ export class SettingsStore {
     return true;
   }
 
-  getSupportedFeatures(): Record<string, boolean> {
+  /**
+   * Official AppFeatures.getSupportedFeatures / pw()+DoA residual (app.asar):
+   * each key is `{ status: "supported" | "unavailable" | "unsupported", ... }`.
+   * YK(features, key) → e[key] || { status: "unavailable" }.
+   *
+   * Product shell capabilities that this process actually provides are supported.
+   * nativeQuickEntry / quickEntryDictation / customQuickEntryDictationShortcut /
+   * wakeScheduler stay unavailable until a real native API exists — never invent supported.
+   */
+  getSupportedFeatures(): Record<string, { status: string }> {
+    const supported = { status: "supported" as const };
+    const unavailable = { status: "unavailable" as const };
     return {
-      localSessions: true,
-      scheduledTasks: true,
-      findInPage: true,
-      fileSystem: true,
-      desktopNotifications: true,
-      secondaryWindows: true,
-      customProtocols: true,
+      // Honest product shell surface (desktop residual, not official X3t keys alone).
+      localSessions: supported,
+      scheduledTasks: supported,
+      findInPage: supported,
+      fileSystem: supported,
+      desktopNotifications: supported,
+      secondaryWindows: supported,
+      customProtocols: supported,
+      // Official pw() keys that gate Desktop General / onboarding — no native API yet.
+      nativeQuickEntry: unavailable,
+      quickEntryDictation: unavailable,
+      customQuickEntryDictationShortcut: unavailable,
+      wakeScheduler: unavailable,
     };
   }
 
+  /**
+   * Official getPreferences → bLA(Xo().preferences ?? {}).
+   * Always merge SSA defaults under stored preferences.
+   */
   getPreferences(): Record<string, unknown> {
-    return { ...DEFAULT_PREFERENCES, ...this.state.preferences };
+    return mergeAppPreferences(this.state.preferences);
   }
 
+  /**
+   * Official setPreference body (after eZt pre-hooks in handlers):
+   * HSA validate then write. Returns false on reject (IPC-safe).
+   * Does not invent requireCoworkFullVmSandbox true.
+   */
   setPreference(key: string, value: unknown): boolean {
-    this.state.preferences[key] = value;
+    const parsed = validateAppPreference(key, value);
+    if (!parsed.ok) return false;
+    this.state.preferences[parsed.key] = parsed.value;
     this.save();
     return true;
   }
@@ -155,6 +223,11 @@ export class SettingsStore {
   setGlobalShortcut(accelerator: string | null): boolean {
     this.state.globalShortcut = accelerator;
     this.save();
+    try {
+      writeOfficialGlobalShortcutSegment(this.officialConfigPath, accelerator);
+    } catch {
+      /* best-effort */
+    }
     return true;
   }
 

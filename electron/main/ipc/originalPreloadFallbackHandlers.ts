@@ -51,7 +51,22 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
   if (method === "captureScreenshot") return null;
   if (method === "getAuthorizationStatus" || method === "requestAuthorization") return "denied";
   if (method === "getPreferences" || method === "getAppConfig" || method === "getMcpServersConfig" || method === "getMcpServersConfigWithStatus") return {};
-  if (method === "getSupportedFeatures") return {};
+  // Official AppFeatures.getSupportedFeatures shape; never invent native supported.
+  if (method === "getSupportedFeatures") {
+    return {
+      localSessions: { status: "supported" },
+      scheduledTasks: { status: "supported" },
+      findInPage: { status: "supported" },
+      fileSystem: { status: "supported" },
+      desktopNotifications: { status: "supported" },
+      secondaryWindows: { status: "supported" },
+      customProtocols: { status: "supported" },
+      nativeQuickEntry: { status: "unavailable" },
+      quickEntryDictation: { status: "unavailable" },
+      customQuickEntryDictationShortcut: { status: "unavailable" },
+      wakeScheduler: { status: "unavailable" },
+    };
+  }
   if (method === "getAppName") return app.getName();
   if (method === "getBuildProps") return { appVersion: app.getVersion(), platform: process.platform, arch: process.arch };
   if (method === "getSupport") return {};
