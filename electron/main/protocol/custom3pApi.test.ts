@@ -110,3 +110,88 @@ it("persists preview_feature_uses_artifacts and browser_extension_settings on ac
     blocked_domains: [],
   });
 });
+
+it("persists Capabilities account keys used by GrowthBook residual arms", async () => {
+  const handle = createCustom3pApiHandler({
+    installId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    ionDistRoot: process.cwd(),
+  });
+  const patch = await handle(
+    new Request("app://localhost/api/account/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled_saffron_search: true,
+        enabled_saffron: true,
+        tool_search_mode: "on",
+        enabled_gdrive_indexing: true,
+        enabled_mcp_tools: { inline_visualizations: true },
+        enabled_turmeric: true,
+      }),
+    }),
+  );
+  expect(patch?.status).toBe(202);
+
+  const bootstrap = await handle(new Request("app://localhost/api/bootstrap"));
+  const payload = (await bootstrap?.json()) as {
+    account: { settings: Record<string, unknown> };
+    growthbook: { features: Record<string, unknown> };
+  };
+  expect(payload.account.settings.enabled_saffron_search).toBe(true);
+  expect(payload.account.settings.enabled_saffron).toBe(true);
+  expect(payload.account.settings.tool_search_mode).toBe("on");
+  expect(payload.account.settings.enabled_gdrive_indexing).toBe(true);
+  expect(payload.account.settings.enabled_mcp_tools).toEqual({ inline_visualizations: true });
+  expect(payload.growthbook.features.chat_follow_up_chips_main).toEqual({ defaultValue: true });
+  expect(payload.growthbook.features.cai_opt_in_connector_suggestions).toEqual({ defaultValue: true });
+});
+
+it("lists local dxt/MCP inventory when userData + mcp config provided", async () => {
+  const handle = createCustom3pApiHandler({
+    installId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    ionDistRoot: process.cwd(),
+    getUserDataPath: () => "/tmp/hare-code-custom3p-dxt-test-missing",
+    getMcpServersConfig: () => ({
+      "local-fs": { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem"] },
+    }),
+  });
+  const response = await handle(new Request("app://localhost/api/organizations/local/dxt/extensions"));
+  const body = (await response?.json()) as { extensions: Array<Record<string, unknown>> };
+  expect(Array.isArray(body.extensions)).toBe(true);
+  expect(body.extensions.some((item) => item.id === "mcp-local-fs")).toBe(true);
+});
+
+it("serializes concurrent account/settings PATCH so keys are not clobbered", async () => {
+  const handle = createCustom3pApiHandler({
+    installId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    ionDistRoot: process.cwd(),
+  });
+  await Promise.all([
+    handle(
+      new Request("app://localhost/api/account/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled_saffron_search: true }),
+      }),
+    ),
+    handle(
+      new Request("app://localhost/api/account/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled_saffron: true }),
+      }),
+    ),
+    handle(
+      new Request("app://localhost/api/account/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool_search_mode: "on" }),
+      }),
+    ),
+  ]);
+  const settings = await handle(new Request("app://localhost/api/account/settings"));
+  const body = (await settings?.json()) as Record<string, unknown>;
+  expect(body.enabled_saffron_search).toBe(true);
+  expect(body.enabled_saffron).toBe(true);
+  expect(body.tool_search_mode).toBe("on");
+});

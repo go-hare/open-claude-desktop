@@ -81,10 +81,52 @@ function custom3pConfigList(settings: IpcHandlerContext["settings"]) {
   };
 }
 
+/**
+ * Product residual Quick Entry action for Electron globalShortcut:
+ * open secondary quick window when available; else focus main window.
+ * Official nativeQuickEntry is a separate native engine — this is the
+ * real Electron path used by legacy GlobalShortcut + quickEntryShortcut prefs.
+ */
+function activateQuickEntry(context: IpcHandlerContext): void {
+  const openQuick = context.windows.secondaryWindows?.openQuickWindow;
+  if (typeof openQuick === "function") {
+    void openQuick().catch(() => {
+      context.windows.mainWindow.show();
+      context.windows.mainWindow.focus();
+      context.windows.mainView.webContents.focus();
+    });
+    return;
+  }
+  context.windows.mainWindow.show();
+  context.windows.mainWindow.focus();
+  context.windows.mainView.webContents.focus();
+}
+
+function acceleratorFromQuickEntryPreference(value: unknown): string | null {
+  if (value === "off" || value === null || value === undefined) return null;
+  if (value === "double-tap-option") {
+    // Electron cannot register "double-tap Option"; product residual falls back
+    // to Alt+Space so Quick Entry remains reachable without inventing native engine.
+    return "Alt+Space";
+  }
+  if (typeof value === "string" && value.length > 0) return value;
+  if (typeof value === "object" && value !== null) {
+    const accelerator = (value as { accelerator?: unknown }).accelerator;
+    if (typeof accelerator === "string" && accelerator.length > 0) return accelerator;
+  }
+  return null;
+}
+
 function configureGlobalShortcut(context: IpcHandlerContext, accelerator: unknown): boolean {
   const value = typeof accelerator === "string" && accelerator.length > 0 ? accelerator : null;
   const previous = context.settings.getGlobalShortcut();
-  if (previous) globalShortcut.unregister(previous);
+  if (previous) {
+    try {
+      globalShortcut.unregister(previous);
+    } catch {
+      /* ignore unregister race */
+    }
+  }
   if (!value) {
     const result = context.settings.setGlobalShortcut(null);
     dispatchBridgeEvent(context.windows.mainView.webContents, "claude.settings", "GlobalShortcut", "globalShortcutChange", null);
@@ -92,14 +134,35 @@ function configureGlobalShortcut(context: IpcHandlerContext, accelerator: unknow
   }
 
   const registered = globalShortcut.register(value, () => {
-    context.windows.mainWindow.show();
-    context.windows.mainWindow.focus();
-    context.windows.mainView.webContents.focus();
+    activateQuickEntry(context);
   });
   if (!registered) return false;
   context.settings.setGlobalShortcut(value);
   dispatchBridgeEvent(context.windows.mainView.webContents, "claude.settings", "GlobalShortcut", "globalShortcutChange", value);
   return true;
+}
+
+/**
+ * Sync Electron globalShortcut from quickEntryShortcut preference (native UI residual)
+ * or legacy GlobalShortcut row. Never claims nativeQuickEntry supported.
+ *
+ * Boot: prefer already-persisted globalShortcut (legacy row) so custom shortcuts
+ * survive restart; fall back to quickEntryShortcut mapping (double-tap → Alt+Space).
+ * Preference write of quickEntryShortcut always re-applies from that key.
+ */
+function syncQuickEntryShortcutFromPreferences(
+  context: IpcHandlerContext,
+  opts?: { preferPreference?: boolean },
+): void {
+  const prefs = context.settings.getPreferences();
+  const fromPref = acceleratorFromQuickEntryPreference(prefs.quickEntryShortcut);
+  const legacy = context.settings.getGlobalShortcut();
+  if (opts?.preferPreference) {
+    configureGlobalShortcut(context, fromPref);
+    return;
+  }
+  const accelerator = legacy ?? fromPref;
+  if (accelerator) configureGlobalShortcut(context, accelerator);
 }
 
 async function choosePath(context: IpcHandlerContext, mode: "file" | "directory", options: unknown) {
@@ -236,6 +299,9 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
   const events = originalEventSurface(context);
   // Official keepAwakeEnabled: restore powerSaveBlocker from persisted prefs on boot.
   syncKeepAwakeFromPreferences(settings.getPreferences());
+  // Product residual: register Electron globalShortcut for Quick Entry (opens quick window).
+  // Does not set nativeQuickEntry supported — that stays unavailable without native engine.
+  syncQuickEntryShortcutFromPreferences(context);
 
   // Official wvi/pvi residual: darwin controller only; native API remains null until bridge.
   // Reconcile is honest no-op without API (never invents install/enabled).
@@ -284,6 +350,10 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         const result = settings.setPreference(key, value);
         if (!result) return false;
         await runPreferencePostWriteEffects(key, value, previous);
+        // Product residual: quickEntryShortcut drives Electron globalShortcut → Quick Entry window.
+        if (key === "quickEntryShortcut") {
+          syncQuickEntryShortcutFromPreferences(context, { preferPreference: true });
+        }
         dispatchBridgeEvent(
           mainView,
           "claude.settings",

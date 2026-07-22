@@ -212,7 +212,25 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   } catch (error) {
     console.warn("[growthbook] init residual failed", error);
   }
-  installAppProtocolHandler({ ionDistRoot: options.ionDistRoot ?? paths.ionDistRoot });
+  // Product residual: custom3p lists local plugins/dxt/MCP from userData (no Anthropic cloud invent).
+  installAppProtocolHandler({
+    ionDistRoot: options.ionDistRoot ?? paths.ionDistRoot,
+    custom3p: {
+      getUserDataPath: () => app.getPath("userData"),
+      getMcpServersConfig: () => {
+        try {
+          const file = path.join(app.getPath("userData"), "mcp-servers.json");
+          if (!fs.existsSync(file)) return {};
+          const raw = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+          return typeof raw === "object" && raw !== null && !Array.isArray(raw)
+            ? (raw as Record<string, unknown>)
+            : {};
+        } catch {
+          return {};
+        }
+      },
+    },
+  });
   await runtime.createAndLoadWindow();
 
   if (initialTarget.deepLink || initialTarget.extensionPath || initialTarget.filePaths.length > 0) {

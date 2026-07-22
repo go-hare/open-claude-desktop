@@ -29,6 +29,13 @@ export type Custom3pApiOptions = {
   readAccountSettings?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   upstreamBaseUrl?: string;
   egressRules?: Array<{ host: string; path?: string; pathSuffix?: string; followRedirects?: boolean }>;
+  /**
+   * Product residual: resolve userData so local marketplace / dxt / plugins lists
+   * are real on-disk inventory (never invent Anthropic cloud catalog success).
+   */
+  getUserDataPath?: () => string;
+  /** Optional MCP server config bag for connector directory residual. */
+  getMcpServersConfig?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
 };
 
 function json(data: unknown, init: ResponseInit = {}): Response {
@@ -74,6 +81,20 @@ const FEATURE_FLAGS: Record<string, unknown> = {
   1543157067: { defaultValue: true },
   "4108768567": { defaultValue: true },
   "3070110303": { defaultValue: true },
+  // Product residual named GrowthBook keys used by personal settings (c71860c77 / cc989143e).
+  // Official string keys — present so Discovery / Capabilities arms are usable without inventing Anthropic-only cloud arms.
+  chat_follow_up_chips_main: { defaultValue: true },
+  apps_use_turmeric: { defaultValue: true },
+  claudeai_skills: { defaultValue: true },
+  claudeai_mcp_apps_visualize: { defaultValue: true },
+  claudeai_saffron: { defaultValue: true },
+  melange_enabled_for_chat: { defaultValue: true },
+  claudeai_customize_memory_tab_main: { defaultValue: true },
+  // Official Wt Discovery: only when true (missing → hide). Product residual: on for 3P local connectors.
+  cai_opt_in_connector_suggestions: { defaultValue: true },
+  cache_scoped_prompt_ordering: {
+    defaultValue: { enable_tool_search: true },
+  },
 };
 
 function defaultBootstrapConfig(value: BootstrapPayload | undefined): Required<ThirdPartyBootstrapConfig> {
@@ -219,19 +240,130 @@ async function fetchI18nFile(root: string, pathname: string): Promise<Response> 
   return emptyObject();
 }
 
+/**
+ * Product residual local inventory for plugins / marketplaces / dxt.
+ * Reads on-disk local-desktop-app-uploads + installed extensions only —
+ * does not invent Anthropic remote catalog success.
+ */
+async function listLocalPluginsAndMarketplaces(userDataPath: string): Promise<{
+  plugins: Array<Record<string, unknown>>;
+  marketplaces: Array<Record<string, unknown>>;
+}> {
+  try {
+    const {
+      listAvailableLocalMarketplacePlugins,
+      listInstalledPluginsFromDisk,
+      listKnownMarketplaces,
+      resolveLocalPluginsPaths,
+      resolvePluginsAccountCtx,
+      ensureLocalUploadMarketplace,
+    } = await import("../services/plugins/localPluginsWriter");
+    const ctx = resolvePluginsAccountCtx({}) ?? {
+      accountId: "local-desktop",
+      orgId: "local-default",
+    };
+    const paths = resolveLocalPluginsPaths(userDataPath, ctx);
+    ensureLocalUploadMarketplace(paths);
+    const available = listAvailableLocalMarketplacePlugins(paths);
+    const installed = listInstalledPluginsFromDisk(paths).map((plugin) => ({
+      id: plugin.id,
+      name: plugin.name,
+      version: plugin.version,
+      description: "",
+      marketplaceId: plugin.marketplaceName,
+      marketplaceName: plugin.marketplaceName,
+      path: plugin.installPath,
+      source: plugin.source,
+      pluginSource: plugin.source,
+      installed: true,
+      enabled: plugin.enabled,
+    }));
+    // Prefer available marketplace scan; append installed not already listed.
+    const seen = new Set(available.map((item) => String(item.id ?? "")));
+    const plugins = [
+      ...available,
+      ...installed.filter((item) => !seen.has(String(item.id))),
+    ];
+    const marketplaces = listKnownMarketplaces(paths).map((market) => ({
+      id: market.id,
+      name: market.name,
+      url: market.url,
+      plugins: market.plugins,
+      source: market.source,
+      installLocation: market.installLocation,
+      lastUpdated: market.lastUpdated,
+    }));
+    return { plugins, marketplaces };
+  } catch {
+    return { plugins: [], marketplaces: [] };
+  }
+}
+
+async function listLocalDxtExtensions(userDataPath: string): Promise<Array<Record<string, unknown>>> {
+  try {
+    const { listInstalledExtensions } = await import("../services/extensions/desktopExtensions");
+    const installed = await listInstalledExtensions(userDataPath);
+    return installed.map((extension) => ({
+      id: extension.id,
+      name: extension.manifest?.name ?? extension.id,
+      display_name: extension.displayName,
+      description: extension.manifest?.description ?? "",
+      version: extension.manifest?.version ?? "0.0.0",
+      author: extension.manifest?.author,
+      path: extension.path,
+      is_enabled: extension.settings?.isEnabled !== false,
+      connector_type: "desktop",
+      source: "local-install",
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function mcpConfigToDirectoryItems(config: Record<string, unknown>): Array<Record<string, unknown>> {
+  return Object.entries(config).map(([name, value]) => {
+    const record = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+    const url =
+      typeof record.url === "string"
+        ? record.url
+        : typeof record.command === "string"
+          ? `stdio:${record.command}`
+          : undefined;
+    return {
+      id: `mcp-${name}`,
+      name,
+      description: typeof record.description === "string" ? record.description : url ?? "Local MCP server",
+      url,
+      connector_type: "mcp",
+      source: "local-mcp",
+      is_connected: false,
+    };
+  });
+}
+
 /** Original `frr(ionDistPath, discoveredRendererConfig)` equivalent for the local third-party desktop mode. */
 export function createCustom3pApiHandler(options: Custom3pApiOptions) {
   const root = path.resolve(options.ionDistRoot);
   const installId = options.installId ?? DEFAULT_INSTALL_ID;
   let accountSettings: Record<string, unknown> = {};
+  /** Serialize account settings writes so concurrent PATCH cannot clobber each other. */
+  let accountSettingsWriteChain: Promise<unknown> = Promise.resolve();
 
   const readAccountSettings = async () => ({
     ...(options.readAccountSettings ? await options.readAccountSettings() : {}),
     ...accountSettings,
   });
   const writeAccountSettings = async (updater: (current: Record<string, unknown>) => Record<string, unknown>) => {
-    accountSettings = updater(await readAccountSettings());
-    return accountSettings;
+    const run = accountSettingsWriteChain.then(async () => {
+      accountSettings = updater(await readAccountSettings());
+      return accountSettings;
+    });
+    // Keep chain alive after errors so later writes still serialize.
+    accountSettingsWriteChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   };
   const currentBootstrap = async () => getBootstrap(options, accountSettings);
 
@@ -331,13 +463,44 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
         individual_plan_pricing: [],
       });
     }
-    if (pathname.endsWith("/plugins/list-plugins")) return emptyPluginList();
-    if (pathname.endsWith("/marketplaces/list-default-marketplaces") || pathname.endsWith("/marketplaces/list-account-marketplaces") || pathname.endsWith("/marketplaces/list-org-marketplaces")) return emptyMarketplaceList();
+    if (pathname.endsWith("/plugins/list-plugins")) {
+      const userData = options.getUserDataPath?.();
+      if (!userData) return emptyPluginList();
+      const { plugins } = await listLocalPluginsAndMarketplaces(userData);
+      return json({ plugins, has_more: false });
+    }
+    if (
+      pathname.endsWith("/marketplaces/list-default-marketplaces")
+      || pathname.endsWith("/marketplaces/list-account-marketplaces")
+      || pathname.endsWith("/marketplaces/list-org-marketplaces")
+    ) {
+      const userData = options.getUserDataPath?.();
+      if (!userData) return emptyMarketplaceList();
+      const { marketplaces } = await listLocalPluginsAndMarketplaces(userData);
+      return json({ marketplaces });
+    }
     if (pathname.includes("/dxt/extensions")) {
       if (/\/dxt\/extensions\/[^/]+\/versions\/[^/]+$/.test(pathname)) return json({});
       if (/\/dxt\/extensions\/[^/]+\/versions$/.test(pathname)) return json({ versions: [] });
-      if (/\/dxt\/extensions\/[^/]+$/.test(pathname)) return json({});
-      return json({ extensions: [], has_more: false });
+      if (/\/dxt\/extensions\/[^/]+$/.test(pathname)) {
+        const userData = options.getUserDataPath?.();
+        if (!userData) return json({});
+        const id = pathname.split("/").filter(Boolean).at(-1) ?? "";
+        const extensions = await listLocalDxtExtensions(userData);
+        const match = extensions.find((item) => String(item.id) === id);
+        return json(match ?? {});
+      }
+      const userData = options.getUserDataPath?.();
+      const extensions = userData ? await listLocalDxtExtensions(userData) : [];
+      // Product residual: also surface local MCP configs as directory-adjacent connectors.
+      const mcpConfig = options.getMcpServersConfig
+        ? await options.getMcpServersConfig()
+        : {};
+      const mcpItems = mcpConfigToDirectoryItems(mcpConfig);
+      return json({
+        extensions: [...extensions, ...mcpItems],
+        has_more: false,
+      });
     }
     if (pathname.endsWith("/dust/command_display_names")) return json({ results: [] });
     if (pathname.endsWith("/dust/generate_session_title")) return json({ title: "" });
