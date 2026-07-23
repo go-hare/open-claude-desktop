@@ -441,15 +441,28 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
       if (request.method !== "PUT" && request.method !== "PATCH") return new Response(null, { status: 405 });
       const body = await request.json().catch(() => ({})) as Record<string, unknown>;
       const requested = (body.preferences ?? {}) as Record<string, unknown>;
+      // Deep-merge each feature_preference entry so PATCH of enable_push
+      // does not clobber sibling fields (enable_email) on the same feature key.
+      // Matches official BBe onMutate residual intent for partial feature patches.
+      const prevFeature = (preferences.feature_preference ?? {}) as Record<string, unknown>;
+      const reqFeature = (requested.feature_preference ?? {}) as Record<string, unknown>;
+      const mergedFeature: Record<string, unknown> = { ...prevFeature };
+      for (const [key, value] of Object.entries(reqFeature)) {
+        const prev = prevFeature[key];
+        const prevObj = prev && typeof prev === "object" && !Array.isArray(prev)
+          ? prev as Record<string, unknown>
+          : {};
+        const nextObj = value && typeof value === "object" && !Array.isArray(value)
+          ? value as Record<string, unknown>
+          : {};
+        mergedFeature[key] = { ...prevObj, ...nextObj };
+      }
       const nextPreferences = request.method === "PUT"
         ? requested
         : {
             ...preferences,
             ...requested,
-            feature_preference: {
-              ...((preferences.feature_preference ?? {}) as Record<string, unknown>),
-              ...((requested.feature_preference ?? {}) as Record<string, unknown>),
-            },
+            feature_preference: mergedFeature,
           };
       await writeAccountSettings((settings) => ({ ...settings, __notification_preferences: nextPreferences }));
       return json({ account_id: 0, organization_id: 0, preferences: nextPreferences });

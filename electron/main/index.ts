@@ -26,6 +26,13 @@ import {
   installWindowStateEventDispatch,
   type LaunchTarget,
 } from "./lifecycle";
+import {
+  shouldQuitOnMainWindowClose,
+  syncMenuBarTray,
+} from "./services/settings/menuBarTray";
+import { ensureDevSwiftFonts } from "./services/settings/devSwiftFonts";
+import { ensureDevSwiftLocalizations } from "./services/settings/devSwiftLocalizations";
+import { ensureDevSwiftScreenAssets } from "./services/settings/devSwiftScreenAssets";
 
 export type DesktopAppOptions = {
   paths?: ElectronShellPaths;
@@ -68,8 +75,14 @@ function applyUserDataOverride(): void {
   app.setPath("logs", path.join(userDataDir, "Logs"));
 }
 
-function applyOriginalDevelopmentAppName(): void {
-  if (!app.isPackaged) app.setName("Claude");
+/**
+ * Product display name for menus / about panel.
+ * Must NOT be bare "Claude" — that collides with official Claude Desktop in Dock
+ * naming and confuses TCC. Bundle ID is the real separator; name should match product.
+ */
+function applyProductAppName(): void {
+  const productName = process.env.CLAUDE_PRODUCT_NAME ?? "Claude-Deepseek";
+  if (app.getName() !== productName) app.setName(productName);
 }
 
 function getInitialMainViewUrlOverride(options: DesktopAppOptions): string | undefined {
@@ -127,6 +140,9 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
 
   const createAndLoadWindow = async () => {
     const windowState = createWindowStateKeeper({ defaultWidth: 1200, defaultHeight: 800 });
+    // context is created after window, but close residual needs settings.menuBarEnabled.
+    // Wire tray-disabled quit after IPC context exists (see below).
+    let shouldQuitWhenTrayDisabled = () => false;
     windows = createDesktopWindow({
       paths,
       baseUrl: options.baseUrl ?? "app://localhost",
@@ -137,12 +153,18 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
       desktopEnterpriseConfig: options.desktopEnterpriseConfig,
       desktopTelemetryConfig: options.desktopTelemetryConfig ?? defaultTelemetryConfig(),
       shouldQuitOnClose: quitState.shouldQuitOnClose,
+      shouldQuitWhenTrayDisabled: () => shouldQuitWhenTrayDisabled(),
       windowState,
     });
 
     windowState.manage(windows.mainWindow);
     installWindowStateEventDispatch(windows);
     const context = createDefaultIpcContext(windows);
+    // Official win32: close quits when !gi("menuBarEnabled").
+    shouldQuitWhenTrayDisabled = () =>
+      shouldQuitOnMainWindowClose({
+        menuBarEnabled: context.settings.isMenuBarEnabled(),
+      });
     registerDesktopIpc(context);
     installApplicationMenu(context);
     await windows.loadAll();
@@ -163,6 +185,8 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
       if (!windows || windows.mainWindow.isDestroyed()) return;
       windows.mainWindow.setBackgroundColor(getOriginalWindowBackgroundColor());
       applyOriginalTitleBarOverlay(windows.mainWindow);
+      // Official nativeTheme.updated → lKA() refresh tray icon (win dark/light).
+      syncMenuBarTray();
     },
   });
 
@@ -178,7 +202,7 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
  */
 export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Promise<DesktopAppRuntime> {
   configureOriginalRuntimeModules();
-  applyOriginalDevelopmentAppName();
+  applyProductAppName();
   applyUserDataOverride();
   registerAppProtocolScheme();
   installProcessSignalHandlers();
@@ -188,6 +212,15 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   const initialTarget = extractLaunchTarget(process.argv);
 
   await app.whenReady();
+  // Official Swift FontLoader residual: process.resourcesPath/fonts.
+  // Dev Electron framework Resources has no fonts — symlink project resources/fonts.
+  ensureDevSwiftFonts();
+  // Official Quick Entry share/screenshot residual: Localizable.strings in *.lproj
+  // ("Quickly share content with Claude" / "Send a screenshot of " / permission bar).
+  ensureDevSwiftLocalizations();
+  // Official Quick Entry share residual assets: claude-screen*.png + Assets.car
+  // (QuickScreenshotView strip / NSImage catalog). Dev Electron has none.
+  ensureDevSwiftScreenAssets();
   // Official BbA: y7() + R0A() timer (1h / 5min) + id(() => I9t().finally(R0A)).
   // 3p kni short-circuits network; 1p uses /api/desktop/features + fcache.
   try {

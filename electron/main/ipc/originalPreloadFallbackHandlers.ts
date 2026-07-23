@@ -43,7 +43,13 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
   const lower = method.toLowerCase();
 
   if (method.endsWith("$store$_getState") || method.endsWith("$store$_getStateSync")) return null;
-  if (method === "getInitialLocale") return { messages: {}, locale: "en-US" };
+  if (method === "getInitialLocale") {
+    // Prefer preference locale residual; renderer still loads /i18n catalogs itself.
+    const prefs = context.settings.getPreferences();
+    const fromPref =
+      typeof prefs.locale === "string" && prefs.locale.length > 0 ? prefs.locale : null;
+    return { messages: {}, locale: fromPref || "en-US" };
+  }
   if (method === "getSystemInfo") return { platform: process.platform, arch: process.arch };
   if (method === "getVisibility") return context.windows.mainWindow.isVisible();
   if (method === "getFullscreen") return context.windows.mainWindow.isFullScreen();
@@ -51,21 +57,25 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
   if (method === "captureScreenshot") return null;
   if (method === "getAuthorizationStatus" || method === "requestAuthorization") return "denied";
   if (method === "getPreferences" || method === "getAppConfig" || method === "getMcpServersConfig" || method === "getMcpServersConfigWithStatus") return {};
-  // Official AppFeatures.getSupportedFeatures shape; never invent native supported.
+  // Prefer live SettingsStore map (Dvi nativeQuickEntry residual) when available.
   if (method === "getSupportedFeatures") {
-    return {
-      localSessions: { status: "supported" },
-      scheduledTasks: { status: "supported" },
-      findInPage: { status: "supported" },
-      fileSystem: { status: "supported" },
-      desktopNotifications: { status: "supported" },
-      secondaryWindows: { status: "supported" },
-      customProtocols: { status: "supported" },
-      nativeQuickEntry: { status: "unavailable" },
-      quickEntryDictation: { status: "unavailable" },
-      customQuickEntryDictationShortcut: { status: "unavailable" },
-      wakeScheduler: { status: "unavailable" },
-    };
+    try {
+      return context.settings.getSupportedFeatures();
+    } catch {
+      return {
+        localSessions: { status: "supported" },
+        scheduledTasks: { status: "supported" },
+        findInPage: { status: "supported" },
+        fileSystem: { status: "supported" },
+        desktopNotifications: { status: "supported" },
+        secondaryWindows: { status: "supported" },
+        customProtocols: { status: "supported" },
+        nativeQuickEntry: { status: "unavailable" },
+        quickEntryDictation: { status: "unavailable" },
+        customQuickEntryDictationShortcut: { status: "unavailable" },
+        wakeScheduler: { status: "unavailable" },
+      };
+    }
   }
   if (method === "getAppName") return app.getName();
   if (method === "getBuildProps") return { appVersion: app.getVersion(), platform: process.platform, arch: process.arch };

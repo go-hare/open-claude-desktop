@@ -2,6 +2,7 @@ import { app, Menu, shell } from "electron";
 import type { IpcHandlerContext } from "./context";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
 import { setOriginalIncognitoTitleBarMode } from "../windows/createMainWindow";
+import { activateQuickEntry } from "./settingsHandlers";
 
 function navigationState(context: IpcHandlerContext) {
   const { mainView } = context.windows;
@@ -26,7 +27,7 @@ function popupMainMenu(context: IpcHandlerContext): void {
       submenu: [
         { label: "About", click: () => void secondaryWindows.openAboutWindow() },
         { type: "separator" },
-        { label: "Quick Entry", accelerator: "CommandOrControl+K", click: () => void secondaryWindows.openQuickWindow() },
+        { label: "Quick Entry", accelerator: "CommandOrControl+K", click: () => void activateQuickEntry(context) },
         { label: "Buddy", click: () => void secondaryWindows.openBuddyWindow() },
         { type: "separator" },
         { label: "Reload Main View", accelerator: "CommandOrControl+R", click: () => mainView.webContents.reload() },
@@ -124,7 +125,9 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
         return true;
       },
       requestSkooch: async () => {
-        await secondaryWindows.openQuickWindow();
+        // Official yst residual: native H9i (Swift QuickScreenshotView share strip)
+        // then Electron quick panel fallback — not openQuickWindow alone.
+        await activateQuickEntry(context);
         return true;
       },
     },

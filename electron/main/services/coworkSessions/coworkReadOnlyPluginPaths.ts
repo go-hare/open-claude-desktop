@@ -23,6 +23,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isCoworkGrowthBookFeatureOn } from "../coworkHostLoop/coworkGrowthBookFeatures";
+import {
+  pluginCollectAccountPairs,
+} from "../plugins/localPluginsWriter";
 import { coworkAccountStorageDir } from "./coworkAutoMemoryPaths";
 import {
   stageCoworkPluginPaths,
@@ -244,9 +247,17 @@ export function collectCoworkReadOnlyPluginPaths(
     if (isNonEmptyString(extra)) push(extra);
   }
 
-  const accountId = input.accountId?.trim();
-  const orgId = input.orgId?.trim();
-  if (accountId && orgId) {
+  // Collect from real account/org when present + local-desktop fallback residual
+  // so user-downloaded plugins installed before login still load in sessions.
+  const accountPairs = pluginCollectAccountPairs({
+    accountId: input.accountId,
+    orgId: input.orgId,
+  });
+  const remoteEnabled =
+    input.remotePluginPathsEnabled
+    ?? isCoworkRemotePluginPathsFeatureEnabled();
+
+  for (const { accountId, orgId } of accountPairs) {
     const installedFile = coworkInstalledPluginsFile(
       input.userDataPath,
       accountId,
@@ -258,19 +269,13 @@ export function collectCoworkReadOnlyPluginPaths(
     }
 
     // Official H6e: if !ft("2340532315") → no remote paths.
-    const remoteEnabled =
-      input.remotePluginPathsEnabled
-      ?? isCoworkRemotePluginPathsFeatureEnabled();
     if (remoteEnabled) {
       // Official eFA residual — load enabledPlugins when caller did not inject.
       // Product residual still collects on-disk remote installs; does not
       // invent network marketplace sync (gQ.fetchEnabledState / install).
-      // Keep map materialization so residual path exercises eFA disk read.
       const enabledMap =
         input.enabledPluginsMap
         ?? readCoworkEnabledPluginsMap(input.userDataPath, accountId, orgId);
-      // Map is reserved for future pQe filter parity; presence alone is enough
-      // for on-disk rpm walk residual (do not invent installs from map keys).
       void enabledMap;
       for (const remoteRoot of coworkRemotePluginDirs(
         input.userDataPath,

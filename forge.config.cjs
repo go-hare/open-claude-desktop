@@ -35,6 +35,53 @@ if (fs.existsSync(claudeCodeBinRoot)) {
   extraResource.push(claudeCodeBinRoot);
 }
 
+// Official Hot() tray assets (TrayIconTemplate*.png / Tray-Win32*.ico) must sit in
+// Contents/Resources so nativeImage.createFromPath(resourcesPath + icon) works.
+for (const trayAsset of [
+  "TrayIconTemplate.png",
+  "TrayIconTemplate@2x.png",
+  "TrayIconTemplate@3x.png",
+  "TrayIconTemplate-Dark.png",
+  "TrayIconTemplate-Dark@2x.png",
+  "TrayIconTemplate-Dark@3x.png",
+  "Tray-Win32.ico",
+  "Tray-Win32-Dark.ico",
+]) {
+  const trayPath = path.join(resourcesDir, trayAsset);
+  if (fs.existsSync(trayPath)) extraResource.push(trayPath);
+}
+
+// Official Swift FontLoader residual: Contents/Resources/fonts/Anthropic*.ttf
+// (native Quick Entry overlay). Pack as directory when present.
+const fontsDir = path.join(resourcesDir, "fonts");
+if (fs.existsSync(fontsDir)) {
+  extraResource.push(fontsDir);
+}
+
+// Official Swift Quick Entry share residual assets (QuickScreenshotView strip icons + Assets.car).
+// Align package also copies them from official Resources; forge must ship them for non-align paths.
+for (const screenAsset of [
+  "claude-screen.png",
+  "claude-screen-dark.png",
+  "Assets.car",
+]) {
+  const screenPath = path.join(resourcesDir, screenAsset);
+  if (fs.existsSync(screenPath)) extraResource.push(screenPath);
+}
+
+// Official Swift Quick Entry i18n residual: Contents/Resources/*.lproj/Localizable.strings
+// Share/screenshot strip ("Quickly share content with Claude", "Send a screenshot of ", …).
+const swiftLprojRoot = path.join(resourcesDir, "swift-lproj");
+if (fs.existsSync(swiftLprojRoot)) {
+  for (const name of fs.readdirSync(swiftLprojRoot)) {
+    if (!name.endsWith(".lproj")) continue;
+    const lprojPath = path.join(swiftLprojRoot, name);
+    if (fs.statSync(lprojPath).isDirectory()) {
+      extraResource.push(lprojPath);
+    }
+  }
+}
+
 module.exports = {
   packagerConfig: {
     name: "Claude-Deepseek",

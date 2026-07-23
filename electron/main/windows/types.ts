@@ -40,6 +40,11 @@ export type DesktopWindowOptions = {
   sidebarMode?: SidebarMode;
   hasRendererConfig?: boolean;
   shouldQuitOnClose?: () => boolean;
+  /**
+   * Official win32 residual when tray disabled: close quits the app.
+   * When true (and not already quitting), close proceeds without hide.
+   */
+  shouldQuitWhenTrayDisabled?: () => boolean;
   onMainWindowReady?: (mainWindow: BrowserWindow) => void;
   onMainViewDomReady?: (mainView: WebContentsView) => void;
   onMainViewFocus?: (mainView: WebContentsView) => void;

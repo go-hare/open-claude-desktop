@@ -49,12 +49,41 @@ describe("parseInstalledPluginInstallPaths", () => {
 });
 
 describe("collectCoworkReadOnlyPluginPaths", () => {
-  it("returns empty without account/org and does not invent roots", () => {
+  it("returns empty when no on-disk installs (does not invent roots)", () => {
+    // Still scans local-desktop fallback layout; empty when nothing installed.
     expect(
       collectCoworkReadOnlyPluginPaths({
         userDataPath: mkTemp(),
       }),
     ).toEqual([]);
+  });
+
+  it("collects fallback local-desktop installs without login identity", () => {
+    const userData = mkTemp();
+    const pluginDir = path.join(userData, "plugin-local");
+    fs.mkdirSync(pluginDir, { recursive: true });
+    const file = coworkInstalledPluginsFile(
+      userData,
+      "local-desktop",
+      "local-default",
+    );
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          "demo@local-desktop-app-uploads": [
+            { installPath: pluginDir, scope: "user" },
+          ],
+        },
+      }),
+    );
+    const collected = collectCoworkReadOnlyPluginPaths({
+      userDataPath: userData,
+      remotePluginPathsEnabled: false,
+    });
+    expect(collected).toContain(path.resolve(pluginDir));
   });
 
   it("collects existing install paths from installed_plugins.json", () => {

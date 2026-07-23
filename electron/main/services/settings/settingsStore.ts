@@ -12,6 +12,7 @@ import {
   writeOfficialGlobalShortcutSegment,
   writeOfficialPreferencesSegment,
 } from "./officialConfigJson";
+import { resolveNativeQuickEntryFeature } from "./nativeQuickEntryFeature";
 
 export type Custom3pConfigRecord = {
   id: string;
@@ -104,11 +105,23 @@ export class SettingsStore {
       // Dual-read residual: seed from official config.json preferences under shell prefs.
       const officialPrefs = readOfficialPreferencesSegment(this.officialConfigPath) ?? {};
       const shellPrefs = raw.preferences ?? {};
-      const combinedStored = { ...officialPrefs, ...shellPrefs };
+      // Legacy shell top-level menuBarEnabled (pre-preference path) → seed prefs once.
+      const legacyMenuBar =
+        typeof raw.menuBarEnabled === "boolean"
+        && shellPrefs.menuBarEnabled === undefined
+        && officialPrefs.menuBarEnabled === undefined
+          ? { menuBarEnabled: raw.menuBarEnabled }
+          : {};
+      const combinedStored = { ...officialPrefs, ...shellPrefs, ...legacyMenuBar };
+      const preferences = mergeAppPreferences(combinedStored);
       return {
         ...base,
         ...raw,
-        preferences: mergeAppPreferences(combinedStored),
+        preferences,
+        menuBarEnabled:
+          typeof preferences.menuBarEnabled === "boolean"
+            ? preferences.menuBarEnabled
+            : (raw.menuBarEnabled ?? base.menuBarEnabled),
         appFeatures: { ...base.appFeatures, ...(raw.appFeatures ?? {}) },
         mcpServersConfig: { ...base.mcpServersConfig, ...(raw.mcpServersConfig ?? {}) },
         custom3pConfigs: { ...base.custom3pConfigs, ...(raw.custom3pConfigs ?? {}) },
@@ -162,12 +175,15 @@ export class SettingsStore {
    * YK(features, key) → e[key] || { status: "unavailable" }.
    *
    * Product shell capabilities that this process actually provides are supported.
-   * nativeQuickEntry / quickEntryDictation / customQuickEntryDictationShortcut /
-   * wakeScheduler stay unavailable until a real native API exists — never invent supported.
+   * nativeQuickEntry follows official Dvi (darwin + macOS 13+) — not invented.
+   * Runtime overlay still requires real @ant/claude-swift load (Y9i / i2A).
+   * quickEntryDictation / customQuickEntryDictationShortcut / wakeScheduler stay
+   * unavailable until those native APIs are honestly wired.
    */
-  getSupportedFeatures(): Record<string, { status: string }> {
+  getSupportedFeatures(): Record<string, { status: string; reason?: string; unsupportedCode?: string }> {
     const supported = { status: "supported" as const };
     const unavailable = { status: "unavailable" as const };
+    const nativeQuickEntry = resolveNativeQuickEntryFeature();
     return {
       // Honest product shell surface (desktop residual, not official X3t keys alone).
       localSessions: supported,
@@ -177,8 +193,15 @@ export class SettingsStore {
       desktopNotifications: supported,
       secondaryWindows: supported,
       customProtocols: supported,
-      // Official pw() keys that gate Desktop General / onboarding — no native API yet.
-      nativeQuickEntry: unavailable,
+      // Official pw().nativeQuickEntry (Dvi).
+      nativeQuickEntry: {
+        status: nativeQuickEntry.status,
+        ...(nativeQuickEntry.reason ? { reason: nativeQuickEntry.reason } : {}),
+        ...(nativeQuickEntry.unsupportedCode
+          ? { unsupportedCode: nativeQuickEntry.unsupportedCode }
+          : {}),
+      },
+      // Dictation / wake remain unavailable until real residual wiring.
       quickEntryDictation: unavailable,
       customQuickEntryDictationShortcut: unavailable,
       wakeScheduler: unavailable,
@@ -202,18 +225,30 @@ export class SettingsStore {
     const parsed = validateAppPreference(key, value);
     if (!parsed.ok) return false;
     this.state.preferences[parsed.key] = parsed.value;
+    // Official gi("menuBarEnabled") lives on preferences; keep top-level mirror for shell dual-read.
+    if (parsed.key === "menuBarEnabled") {
+      this.state.menuBarEnabled = parsed.value === true;
+    }
     this.save();
     return true;
   }
 
+  /**
+   * Official EKA.isMenuBarEnabled → gi("menuBarEnabled").
+   * Prefer preferences bag; fall back to legacy top-level shell field.
+   */
   isMenuBarEnabled(): boolean {
-    return this.state.menuBarEnabled;
+    const fromPrefs = this.getPreferences().menuBarEnabled;
+    if (typeof fromPrefs === "boolean") return fromPrefs;
+    return this.state.menuBarEnabled !== false;
   }
 
+  /**
+   * Official EKA.setMenuBarEnabled → xn("menuBarEnabled", e).
+   * Writes preference (SSA key) so Rh/post-write effects + getPreferences stay consistent.
+   */
   setMenuBarEnabled(enabled: boolean): boolean {
-    this.state.menuBarEnabled = enabled;
-    this.save();
-    return true;
+    return this.setPreference("menuBarEnabled", enabled);
   }
 
   getGlobalShortcut(): string | null {

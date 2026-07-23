@@ -69,6 +69,33 @@ it("builds dual-exec SDK options with guest cwd and VM spawn (not host bash inve
   expect(options.disallowedTools).toBeUndefined();
 });
 
+it("passes installed plugins as SDK plugins --plugin-dir residual (host + guest)", () => {
+  const host = buildCoworkSdkOptions(
+    input({
+      hostLoopMode: true,
+      readOnlyPluginPaths: ["/tmp/plugins/demo-plugin"],
+    }),
+    { executable: "/opt/claude", spawnClaudeCodeProcess: vi.fn() },
+  );
+  expect(host.plugins).toEqual([
+    { type: "local", path: "/tmp/plugins/demo-plugin" },
+  ]);
+
+  const guest = buildCoworkSdkOptions(
+    input({
+      hostLoopMode: false,
+      vmProcessName: "vm-1",
+      readOnlyPluginPaths: ["/tmp/plugins/demo-plugin"],
+      hostClaudeConfigDir: "/tmp/sess/.claude",
+      hostOutputsDir: "/tmp/sess/outputs",
+    }),
+    { executable: "/opt/claude", spawnClaudeCodeProcess: vi.fn() },
+  );
+  expect(guest.plugins).toEqual([
+    { type: "local", path: "/sessions/vm-1/mnt/demo-plugin" },
+  ]);
+});
+
 it("appends official auto-memory host allow rules in host-loop mode", () => {
   const withMemory = buildCoworkSdkOptions(
     input({

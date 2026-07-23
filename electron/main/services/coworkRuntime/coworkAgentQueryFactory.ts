@@ -263,6 +263,40 @@ function resolveDualExecSpawn(
   });
 }
 
+/**
+ * Official UXe residual: zA.plugins = [{ type:"local", path }] for each install.
+ * Host-loop uses host installPath; dual-exec uses guest mount
+ * `/sessions/<vm>/mnt/<basename>` matching pluginMountsFromReadOnlyPaths.
+ * Only paths that exist (host) or have a mount name (guest) are included —
+ * never invent plugin dirs.
+ */
+export function sdkPluginsFromReadOnlyPaths(
+  paths: readonly string[] | null | undefined,
+  mode: "host" | "guest",
+  vmProcessName?: string | null,
+): NonNullable<Options["plugins"]> | undefined {
+  const cleaned = (paths ?? []).filter(
+    (p): p is string => typeof p === "string" && p.trim().length > 0,
+  );
+  if (cleaned.length === 0) return undefined;
+
+  if (mode === "host") {
+    const plugins = cleaned.map((hostPath) => ({
+      type: "local" as const,
+      path: hostPath,
+    }));
+    return plugins.length > 0 ? plugins : undefined;
+  }
+
+  if (!vmProcessName) return undefined;
+  const mounts = pluginMountsFromReadOnlyPaths(cleaned);
+  if (mounts.length === 0) return undefined;
+  return mounts.map((m) => ({
+    type: "local" as const,
+    path: `/sessions/${vmProcessName}/mnt/${m.mountName}`,
+  }));
+}
+
 export function buildCoworkSdkOptions(
   input: CoworkQueryFactoryInput,
   options: CoworkAgentQueryFactoryOptions = {},
@@ -294,6 +328,7 @@ export function buildCoworkSdkOptions(
     );
   }
 
+  const pluginMounts = pluginMountsFromReadOnlyPaths(input.readOnlyPluginPaths);
   const dualExec =
     !input.hostLoopMode && input.vmProcessName
       ? computeCoworkDualExecMounts({
@@ -304,11 +339,18 @@ export function buildCoworkSdkOptions(
           hostOutputsDir: input.hostOutputsDir,
           hostUploadsDir: input.hostUploadsDir,
           networkDriveFolders: input.networkDriveFolders,
-          pluginMounts: pluginMountsFromReadOnlyPaths(input.readOnlyPluginPaths),
+          pluginMounts,
           userSelectedFolders: folders,
           vmProcessName: input.vmProcessName,
         })
       : null;
+
+  // Official it[] → zA.plugins=dKi(it) residual — load installed plugins via --plugin-dir.
+  const plugins = sdkPluginsFromReadOnlyPaths(
+    input.readOnlyPluginPaths,
+    input.hostLoopMode ? "host" : "guest",
+    input.vmProcessName,
+  );
 
   const sdkOptions: Options = {
     additionalDirectories: input.hostLoopMode
@@ -331,6 +373,7 @@ export function buildCoworkSdkOptions(
       : // Official dual-exec: guest binary at /usr/local/bin/claude
         "/usr/local/bin/claude",
     permissionMode: permissionMode(input.permissionMode),
+    plugins,
     resume: input.resume,
     resumeSessionAt: input.resumeSessionAt,
     systemPrompt: input.systemPrompt,

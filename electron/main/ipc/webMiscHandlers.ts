@@ -4,6 +4,7 @@ import path from "node:path";
 import type { IpcHandlerContext } from "./context";
 import { createFileSystemHandlers } from "./fileSystemHandlers";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
+import { applyRecentChatsFromWeb } from "../services/settings/quickEntryNative";
 
 const SEARCH_FILE_LIMIT = 500;
 const SEARCH_TEXT_BYTES = 512 * 1024;
@@ -130,8 +131,16 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
 
   registerNamespaceHandlers("claude.web", {
     QuickEntry: {
-      setRecentChats: async (_event, chats) => {
-        recentChats = Array.isArray(chats) ? chats : [];
+      /**
+       * Official WX residual:
+       *   setRecentChats(chats, activeChatId)
+       *   chats: AUe[] = { chatId, chatName } (ion-dist maps uuid→chatId, name→chatName)
+       *   activeChatId: string | null
+       * Forwards into Swift overlay setRecentChats / setActiveChatId (p5t/D5t → w5t/m5t).
+       */
+      setRecentChats: async (_event, chats, activeChatId) => {
+        const normalized = applyRecentChatsFromWeb(chats, activeChatId);
+        recentChats = normalized;
         return true;
       },
     },
@@ -175,15 +184,37 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
         await shell.openExternal("x-apple.systempreferences:com.apple.preference.notifications");
         return true;
       },
-      showNotification: async (_event, input) => {
+      /**
+       * Official residual (g6t / nT.showNotification):
+       *   showNotification(title, body, id?)
+       * Also accept a single options object { title, body, id } for flexibility.
+       */
+      showNotification: async (_event, titleOrInput, bodyArg?, idArg?) => {
         if (!Notification.isSupported()) return false;
-        const opts = asObject(input);
+        let title = "Claude";
+        let body = "";
+        let id: string | null = null;
+        if (typeof titleOrInput === "string") {
+          title = titleOrInput;
+          body = asString(bodyArg) ?? "";
+          id = asString(idArg);
+        } else {
+          const opts = asObject(titleOrInput);
+          title = asString(opts.title) ?? "Claude";
+          body = asString(opts.body) ?? asString(opts.message) ?? "";
+          id = asString(opts.id);
+        }
         const notification = new Notification({
-          title: asString(opts.title) ?? "Claude-Deepseek",
-          body: asString(opts.body) ?? asString(opts.message) ?? "",
+          title,
+          body,
         });
         notification.on("click", () => {
-          dispatchBridgeEvent(mainView.webContents, "claude.web", "DesktopNotifications", "onNotificationClicked", { input, clickedAt: new Date().toISOString() });
+          dispatchBridgeEvent(mainView.webContents, "claude.web", "DesktopNotifications", "onNotificationClicked", {
+            title,
+            body,
+            id,
+            clickedAt: new Date().toISOString(),
+          });
         });
         notification.show();
         return true;

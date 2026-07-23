@@ -330,6 +330,7 @@ export class CoworkSessionRuntimeController {
     }
     // Official session.readOnlyPluginPaths (UXe: Ke.readOnlyPluginPaths=Ve).
     // Fill from installed_plugins.json / remote plugin dirs when session has none yet.
+    // Scans real identity + local-desktop fallback so user downloads work pre-login.
     // Do not invent roots — collect only existing host install paths.
     if (
       !session.readOnlyPluginPaths
@@ -339,10 +340,10 @@ export class CoworkSessionRuntimeController {
       const userDataPath = resolveCoworkUserDataFromSessionStorage(
         sessionStorageDir,
       );
-      if (userDataPath && identity?.accountUuid && identity?.organizationUuid) {
+      if (userDataPath) {
         const collected = collectCoworkReadOnlyPluginPaths({
-          accountId: identity.accountUuid,
-          orgId: identity.organizationUuid,
+          accountId: identity?.accountUuid ?? null,
+          orgId: identity?.organizationUuid ?? null,
           userDataPath,
         });
         if (collected.length > 0) {

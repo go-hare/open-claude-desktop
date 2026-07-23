@@ -1,28 +1,89 @@
 {
-  "generated_at": "2026-07-08T09:29:55.012Z",
-  "project_root": "D:\\work\\py\\claude\\open-claude-desktop-worktree",
-  "platform": "win32",
-  "packaged_root": "D:\\work\\py\\claude\\open-claude-desktop-worktree\\out\\Claude-Deepseek-win32-x64",
+  "generated_at": "2026-07-23T17:03:05.329Z",
+  "project_root": "/Users/apple/work-py/hare-code/open-claude-desktop",
+  "original_app": "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app",
+  "packaged_app": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app",
   "executable": {
-    "exists": true,
-    "sha256": "485d15d2fad79bcdb8cc3a2563b8e1e2fad9a368e7c0447cb1cead3ef4827933"
+    "original_exists": true,
+    "packaged_exists": true,
+    "generated_deepseek_executable_exists": false,
+    "original_sha256": "4a53a36e6b113b881433c4576adb1120d34670b49521abbc4660d597c33ce478",
+    "packaged_sha256": "dac6a2194d1eda21c657045862c0bb6d7d0262c39e322cd03bec8742314c6b34",
+    "hash_aligned": false,
+    "hash_ok_after_product_codesign": true
+  },
+  "info": {
+    "CFBundleExecutable": {
+      "original": "Claude",
+      "packaged": "Claude"
+    },
+    "CFBundleShortVersionString": {
+      "original": "1.6608.2",
+      "packaged": "1.6608.2"
+    },
+    "CFBundleName": {
+      "original": "Claude",
+      "packaged": "Claude"
+    },
+    "CFBundleIdentifier": {
+      "original": "com.anthropic.claudefordesktop",
+      "packaged": "com.local.claude-deepseek.desktop"
+    }
   },
   "resources": {
-    "app_asar_exists": true,
-    "ion_dist_exists": true,
-    "original_runtime_exists": true,
-    "claude_code_binary_exists": true,
-    "claude_code_binary_size": 128822272,
-    "claude_code_binary_sha256": "2132b711a49b0c618e7aca08f131fd5595504f370e4a806b44454feff660a301",
-    "claude_code_manifest_exists": true,
-    "missing_original_runtime_entries": []
+    "original_top_level_count": 95,
+    "packaged_top_level_count": 95,
+    "missing_original_resource_entries_except_app_asar": [],
+    "extra_packaged_resource_entries": []
+  },
+  "frameworks": {
+    "missing": [],
+    "extra": []
+  },
+  "helpers": {
+    "missing": [],
+    "extra": []
+  },
+  "symlinks": {
+    "packaged_electron_framework_top_level": [
+      {
+        "name": "Electron Framework",
+        "target": "Versions/Current/Electron Framework"
+      },
+      {
+        "name": "Helpers",
+        "target": "Versions/Current/Helpers"
+      },
+      {
+        "name": "Libraries",
+        "target": "Versions/Current/Libraries"
+      },
+      {
+        "name": "Resources",
+        "target": "Versions/Current/Resources"
+      }
+    ],
+    "has_absolute_framework_symlink": false
   },
   "asar": {
-    "entry_count": 485,
-    "contains_vite_index": true,
-    "contains_vite_preload": true,
-    "contains_package_json": true,
-    "contains_smoke_user_data": false
+    "original_sha256": "a7f105ee5e073c37bb27b3a2129614074dd00a557c86e1ea39b9c390de75edc3",
+    "packaged_sha256": "e5fc1a18c3fac54bd4dfac4688d37b2ce9a89179866cbcf9e97ca7dba91cc734",
+    "intentionally_rebuilt": true,
+    "packaged_header_sha256": "36188e8e93f50475d606502b7996b057f3d2f0b99488d8bbb57320812133fc0d",
+    "plist_integrity_hash": "36188e8e93f50475d606502b7996b057f3d2f0b99488d8bbb57320812133fc0d",
+    "plist_integrity_matches_packaged_asar": true,
+    "contains_smoke_user_data": false,
+    "missing_runtime_node_modules_entries": [],
+    "missing_unpacked_runtime_entries": []
+  },
+  "product_identity": {
+    "expected_bundle_id": "com.local.claude-deepseek.desktop",
+    "expected_name": "Claude-Deepseek",
+    "official_bundle_id": "com.anthropic.claudefordesktop",
+    "residual_info_aligned": true,
+    "product_identity_ok": true,
+    "codesign_identifier": "com.local.claude-deepseek.desktop",
+    "codesign_identity_ok": true
   },
   "ok": true
 }

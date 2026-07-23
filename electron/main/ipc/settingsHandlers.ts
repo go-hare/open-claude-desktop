@@ -23,14 +23,24 @@ import {
   syncKeepAwakeFromPreferences,
 } from "../services/settings/keepAwake";
 import {
+  configureMenuBarTray,
+  showMainWindowFromTray,
+  syncMenuBarTray,
+} from "../services/settings/menuBarTray";
+import {
   runPreferencePostWriteEffects,
   runPreferencePreWriteHook,
 } from "../services/settings/preferenceEffects";
+import { resolveElectronShellPaths } from "../paths/electronShellPaths";
 import {
   ensureWakeSchedulerController,
   getWakeSchedulerStatus,
   openWakeSchedulerSettings,
 } from "../services/settings/wakeScheduler";
+import {
+  ensureNativeQuickEntry,
+  tryActivateNativeQuickEntry,
+} from "../services/settings/quickEntryNative";
 import type { IpcHandlerContext } from "./context";
 import { originalEventSurface } from "./originalEventSurface";
 import { dispatchBridgeEvent, registerInterfaceSyncHandlers, registerNamespaceHandlers } from "./registerIpc";
@@ -81,25 +91,105 @@ function custom3pConfigList(settings: IpcHandlerContext["settings"]) {
   };
 }
 
+function quickEntryNativeDeps(context: IpcHandlerContext) {
+  return {
+    getMainWindow: () => context.windows.mainWindow,
+    getMainViewWebContents: () => context.windows.mainView.webContents,
+    account: context.coworkAccount,
+    // Official owe residual: gi("quickEntryShortcut")
+    getQuickEntryShortcut: () => context.settings.getPreferences().quickEntryShortcut,
+    onSubmit: (payload: {
+      text: string;
+      images: Array<{ base64: string; mimeType: string; filename?: string }>;
+      chatId?: string;
+    }) => {
+      // Official IKA / K9i → requestQuickWindowDismissWithPayload residual.
+      dispatchBridgeEvent(
+        context.windows.mainView.webContents,
+        "claude.web",
+        "QuickEntry",
+        "onQuickEntrySubmit",
+        payload,
+      );
+    },
+    onNavigateToChat: (chatId: string) => {
+      try {
+        const wc = context.windows.mainView.webContents;
+        if (!wc || wc.isDestroyed()) return;
+        // Official cEr residual shape: /chat/:id?allow_dangling_human_message=1
+        const current = wc.getURL();
+        let origin = "https://claude.ai";
+        try {
+          origin = new URL(current).origin;
+        } catch {
+          /* keep default */
+        }
+        void wc.loadURL(
+          `${origin}/chat/${encodeURIComponent(chatId)}?allow_dangling_human_message=1`,
+        );
+      } catch {
+        /* ignore */
+      }
+    },
+    showMainWindow: () => {
+      showMainWindowFromTray(() => context.windows.mainWindow);
+      try {
+        context.windows.mainView.webContents.focus();
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+}
+
 /**
- * Product residual Quick Entry action for Electron globalShortcut:
- * open secondary quick window when available; else focus main window.
- * Official nativeQuickEntry is a separate native engine — this is the
- * real Electron path used by legacy GlobalShortcut + quickEntryShortcut prefs.
+ * Official Lst → yst residual:
+ *   1) if i2A() (nr loaded + nativeQuickEntry supported): OSe ? H9i toggle : false
+ *      → bottom native overlay + screenshot (Swift quickAccess.overlay)
+ *   2) else Electron BrowserWindow quick panel (legacy, center residual)
+ *   3) return false → Lst shows main
+ *
+ * Does not invent native success without real overlay.toggle.
  */
-function activateQuickEntry(context: IpcHandlerContext): void {
+export async function activateQuickEntry(context: IpcHandlerContext): Promise<boolean> {
+  // Official yst native branch first.
+  try {
+    const native = await tryActivateNativeQuickEntry(quickEntryNativeDeps(context));
+    console.info("[settingsHandlers] yst native branch:", native);
+    if (native === "handled") return true;
+    if (native === "logged-out") {
+      // Official: i2A && !OSe → return false → Lst shows main.
+      try {
+        showMainWindowFromTray(() => context.windows.mainWindow);
+        context.windows.mainView.webContents.focus();
+      } catch {
+        /* ignore */
+      }
+      return false;
+    }
+  } catch (error) {
+    console.warn("[settingsHandlers] native quick entry failed", error);
+  }
+
+  // Official yst Electron residual (legacyQuickEntry path when native unavailable).
   const openQuick = context.windows.secondaryWindows?.openQuickWindow;
   if (typeof openQuick === "function") {
-    void openQuick().catch(() => {
-      context.windows.mainWindow.show();
-      context.windows.mainWindow.focus();
-      context.windows.mainView.webContents.focus();
-    });
-    return;
+    try {
+      const win = await openQuick();
+      // null = official toggle-dismiss while visible — still "handled" by yst.
+      // BrowserWindow = shown. Either means Lst should not also open main.
+      if (win === null || (win && !win.isDestroyed())) return true;
+    } catch {
+      /* fall through to main */
+    }
   }
-  context.windows.mainWindow.show();
-  context.windows.mainWindow.focus();
-  context.windows.mainView.webContents.focus();
+  try {
+    showMainWindowFromTray(() => context.windows.mainWindow);
+    context.windows.mainView.webContents.focus();
+  } catch {
+    /* ignore */
+  }
+  return false;
 }
 
 function acceleratorFromQuickEntryPreference(value: unknown): string | null {
@@ -134,7 +224,7 @@ function configureGlobalShortcut(context: IpcHandlerContext, accelerator: unknow
   }
 
   const registered = globalShortcut.register(value, () => {
-    activateQuickEntry(context);
+    void activateQuickEntry(context);
   });
   if (!registered) return false;
   context.settings.setGlobalShortcut(value);
@@ -144,7 +234,7 @@ function configureGlobalShortcut(context: IpcHandlerContext, accelerator: unknow
 
 /**
  * Sync Electron globalShortcut from quickEntryShortcut preference (native UI residual)
- * or legacy GlobalShortcut row. Never claims nativeQuickEntry supported.
+ * or legacy GlobalShortcut row. nativeQuickEntry flag itself follows official Dvi.
  *
  * Boot: prefer already-persisted globalShortcut (legacy row) so custom shortcuts
  * survive restart; fall back to quickEntryShortcut mapping (double-tap → Alt+Space).
@@ -299,8 +389,23 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
   const events = originalEventSurface(context);
   // Official keepAwakeEnabled: restore powerSaveBlocker from persisted prefs on boot.
   syncKeepAwakeFromPreferences(settings.getPreferences());
-  // Product residual: register Electron globalShortcut for Quick Entry (opens quick window).
-  // Does not set nativeQuickEntry supported — that stays unavailable without native engine.
+  // Official lKA / Rh.on("menuBarEnabled"): tray from gi("menuBarEnabled") on boot + toggle.
+  // Official Lst click: yst() quick entry first, else show main (Qst).
+  configureMenuBarTray({
+    getEnabled: () => settings.isMenuBarEnabled(),
+    getMainWindow: () => context.windows.mainWindow,
+    resourcesRoot: resolveElectronShellPaths().resourcesRoot,
+    // Official Lst → yst: native overlay (i2A/H9i) then Electron panel, then main.
+    openQuickEntry: () => activateQuickEntry(context),
+  });
+  syncMenuBarTray();
+  // Official Y9i residual: load @ant/claude-swift when Dvi says supported.
+  // Fail soft — never invents overlay without real toggle.
+  void ensureNativeQuickEntry(quickEntryNativeDeps(context)).catch((error) => {
+    console.warn("[settingsHandlers] ensureNativeQuickEntry failed", error);
+  });
+  // Product residual: register Electron globalShortcut for Quick Entry.
+  // nativeQuickEntry status follows official Dvi (darwin + macOS 13+).
   syncQuickEntryShortcutFromPreferences(context);
 
   // Official wvi/pvi residual: darwin controller only; native API remains null until bridge.
@@ -370,8 +475,23 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         app.setLoginItemSettings({ openAtLogin: Boolean(enabled) });
         return app.getLoginItemSettings().openAtLogin === Boolean(enabled);
       },
+      // Official EKA: is → gi; set → xn("menuBarEnabled") which emits Rh → lKA + preferencesChanged.
       isMenuBarEnabled: async () => settings.isMenuBarEnabled(),
-      setMenuBarEnabled: async (_event, enabled) => settings.setMenuBarEnabled(Boolean(enabled)),
+      setMenuBarEnabled: async (_event, enabled) => {
+        const next = Boolean(enabled);
+        const previous = settings.isMenuBarEnabled();
+        const ok = settings.setMenuBarEnabled(next);
+        if (!ok) return false;
+        await runPreferencePostWriteEffects("menuBarEnabled", next, previous);
+        dispatchBridgeEvent(
+          mainView,
+          "claude.settings",
+          "AppPreferences",
+          "preferencesChanged",
+          settings.getPreferences(),
+        );
+        return true;
+      },
     },
     GlobalShortcut: {
       setGlobalShortcut: async (_event, accelerator) => configureGlobalShortcut(context, accelerator),
@@ -587,17 +707,36 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
     },
   });
 
+  // Official shape: { messages, locale }. Renderer loads /i18n/{locale}.json itself
+  // (index-BELzQL5P G0t). Prefer stored preference locale over OS locale.
+  // hybridBridgeSpec: getInitialLocale sync; electronIntl also exposes sync now.
+  // Keep invoke for any residual that still calls ipcRenderer.invoke.
+  const getInitialLocalePayload = () => {
+    const prefs = settings.getPreferences();
+    const fromPref =
+      typeof prefs.locale === "string" && prefs.locale.length > 0 ? prefs.locale : null;
+    return {
+      messages: {},
+      locale: fromPref || app.getLocale() || "en-US",
+    };
+  };
   registerNamespaceHandlers("claude.hybrid", {
     DesktopIntl: {
       requestLocaleChange: async (_event, locale) => {
-        settings.setPreference("locale", locale);
-        dispatchBridgeEvent(mainView, "claude.hybrid", "DesktopIntl", "localeChanged", locale);
+        // Official residual: renderer owns /i18n catalogs (G0t fetch). Main only
+        // persists preference + dispatches localeChanged. messages stay empty.
+        const next =
+          typeof locale === "string" && locale.length > 0
+            ? locale
+            : (settings.getPreferences().locale as string | undefined) || app.getLocale() || "en-US";
+        settings.setPreference("locale", next);
+        dispatchBridgeEvent(mainView, "claude.hybrid", "DesktopIntl", "localeChanged", next);
         return true;
       },
+      getInitialLocale: async () => getInitialLocalePayload(),
     },
   });
-
   registerInterfaceSyncHandlers("claude.hybrid", "DesktopIntl", {
-    getInitialLocale: () => ({ messages: {}, locale: app.getLocale() || "en-US" }),
+    getInitialLocale: () => getInitialLocalePayload(),
   });
 }

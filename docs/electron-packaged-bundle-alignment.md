@@ -1,20 +1,24 @@
 # Electron packaged bundle 对齐审计
 
-生成时间：2026-07-08T09:29:55.012Z
+生成时间：2026-07-23T17:03:05.329Z
 
-## Windows packaged 结论
+## 结论
 
-- exe 存在：是
-- app.asar 存在：是
-- ion-dist 资源存在：是
-- original-runtime-node_modules 存在：是
-- Claude Code binary 存在：是
-- Claude Code binary 大小：128822272
-- Claude Code manifest 存在：是
-- runtime 缺失条目数：0
-- app.asar 含 .vite 主入口：是
-- app.asar 含 preload：是
+- Claude 二进制 hash 对齐：否
+- 生成的 Claude-Deepseek 二进制是否已移除：是
+- Info.plist 残差字段（Executable/Version）是否对齐原包：是
+- 产品身份（Bundle ID / Name）是否独立于官方：是
+- codesign Identifier 是否为产品 ID：是（com.local.claude-deepseek.desktop）
+- 产品 Bundle ID：com.local.claude-deepseek.desktop（期望 com.local.claude-deepseek.desktop）
+- 原包 Resources 配套项缺失数（不含 app.asar）：0
+- Resources 额外项数：0
+- Frameworks 缺失/额外：0/0
+- Helpers 缺失/额外：0/0
+- Electron Framework 是否存在绝对 symlink：否
+- app.asar integrity 是否已重算：是
+- app.asar runtime node_modules 缺失数：0
+- app.asar.unpacked runtime 缺失数：0
 - app.asar 是否误打入 smoke user data：否
 - 是否通过：是
 
-说明：当前主机生成的是 Windows package；macOS 外层 bundle 对齐仅在 darwin .app 产物存在时审计。
+说明：外层 macOS Frameworks/Helpers/二进制对齐原包；CFBundleIdentifier/Name 必须是独立产品身份（不能等于 com.anthropic.claudefordesktop），避免与官方 Dock/TCC 合并；app.asar 保留当前重建主进程。

@@ -533,7 +533,9 @@ function createApplicationMenuTemplate(context: IpcHandlerContext): MenuItemCons
 }
 
 export function installApplicationMenu(context: IpcHandlerContext): void {
-  app.setName("Claude");
+  // Keep menu app name on product identity — never bare "Claude" (official collision).
+  const productName = process.env.CLAUDE_PRODUCT_NAME ?? "Claude-Deepseek";
+  if (app.getName() !== productName) app.setName(productName);
   Menu.setApplicationMenu(Menu.buildFromTemplate(createApplicationMenuTemplate(context)));
 }
 

@@ -24,6 +24,7 @@ import {
   type DictationShortcutValue,
 } from "./desktopDialogI18n";
 import { applyKeepAwakeEnabled } from "./keepAwake";
+import { applyMenuBarEnabled } from "./menuBarTray";
 import { getActiveCoworkGrowthBookLifecycle } from "../coworkHostLoop/coworkGrowthBookLifecycle";
 import { reconcileWakeScheduler } from "./wakeScheduler";
 
@@ -200,6 +201,7 @@ const PRE_WRITE_HOOKS: Record<string, PreferencePreWriteHook> = {
 /**
  * Post-write effects (after successful store write).
  * keepAwakeEnabled → ble claim residual.
+ * menuBarEnabled → Rh.on → lKA tray residual.
  * chicagoEnabled → UrA / y7 GrowthBook refresh residual.
  * wakeSchedulerEnabled → pvi.reconcile residual (no-op without API).
  */
@@ -210,6 +212,11 @@ export async function runPreferencePostWriteEffects(
 ): Promise<void> {
   if (key === "keepAwakeEnabled") {
     applyKeepAwakeEnabled(value === true);
+    return;
+  }
+  if (key === "menuBarEnabled") {
+    // Official Rh.on("menuBarEnabled", () => lKA())
+    applyMenuBarEnabled(value === true);
     return;
   }
   if (key === "chicagoEnabled") {

@@ -24,7 +24,9 @@ function syncTrafficLightPosition(mainWindow: BrowserWindow, mainView: WebConten
 
 function installCloseBehavior(mainWindow: BrowserWindow, options: DesktopWindowOptions): void {
   mainWindow.on("close", (event) => {
+    // Official: quitting → allow close. win32 + !menuBarEnabled → quit (no hide).
     if (options.shouldQuitOnClose?.()) return;
+    if (options.shouldQuitWhenTrayDisabled?.()) return;
 
     event.preventDefault();
     const hide = () => mainWindow.hide();
