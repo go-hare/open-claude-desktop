@@ -45,29 +45,90 @@ function showAndFocusMainWindow(context: IpcHandlerContext): void {
   mainView.webContents.focus();
 }
 
-function loadAppPath(context: IpcHandlerContext, pathname: string): void {
-  const url = new URL("app://localhost");
-  url.pathname = pathname;
-  void getMainView(context).loadURL(url.toString());
+/** Official SPA navigation residual (asar dispatchNavigate) — keep origin + pushState. */
+function softNavigate(context: IpcHandlerContext, pathname: string): void {
   showAndFocusMainWindow(context);
+  const mainView = getMainView(context);
+  if (mainView.isDestroyed()) return;
+
+  const script = `(() => {
+    const path = ${JSON.stringify(pathname)};
+    if (location.pathname + location.search === path) return false;
+    history.pushState({}, "", path);
+    window.dispatchEvent(new Event("app:navigation"));
+    return true;
+  })()`;
+
+  void mainView.executeJavaScript(script).catch(() => {
+    // Fallback full load when executeJavaScript fails (crashed/loading).
+    let origin = "app://localhost";
+    try {
+      const current = mainView.getURL();
+      if (current) origin = new URL(current).origin;
+    } catch {
+      /* keep app:// */
+    }
+    const url = new URL(pathname, origin.endsWith("/") ? origin : `${origin}/`);
+    void mainView.loadURL(url.toString());
+  });
+}
+
+/**
+ * Official asar `Y1t` / `w1`: code (epitaxy) mode when path is /epitaxy or /code.
+ * Our shell uses `/code` as code home; keep `/epitaxy` for official parity.
+ */
+function isCodeModeMainView(context: IpcHandlerContext): boolean {
+  try {
+    const url = getMainView(context).getURL();
+    if (!url) return false;
+    const { pathname } = new URL(url);
+    return (
+      pathname === "/code"
+      || pathname.startsWith("/code/")
+      || pathname === "/epitaxy"
+      || pathname.startsWith("/epitaxy/")
+    );
+  } catch {
+    return false;
+  }
 }
 
 function openSettings(context: IpcHandlerContext): void {
-  loadAppPath(context, "/settings/desktop");
+  // Official Windows File → Settings (asar rEr) — ONLY:
+  // XC.dispatchNavigate(w1() ? "/settings/claude-code" : "/settings/desktop")
+  // → claude.web.Navigation.navigate → ion-dist B0t onNavigate → router.push.
+  // Do not softNavigate/executeJS here; that is not the official chain.
+  showAndFocusMainWindow(context);
+  const mainView = getMainView(context);
+  if (mainView.isDestroyed()) return;
+  const path = isCodeModeMainView(context) ? "/settings/claude-code" : "/settings/desktop";
+  dispatchBridgeEvent(mainView, "claude.web", "Navigation", "navigate", path);
 }
 
+/**
+ * Official File → New Conversation (asar `gKA`):
+ * show/focus main window, then `mainView.webContents.send("cmdK")`.
+ * Renderer registers via `claudeAppBindings.registerBinding("cmdK", …)`
+ * (ion-dist `q6t` / `Px(zx.cmdK, …)` → `claude:new-conversation` + mode-aware home).
+ * Never hard-navigate to `/task/new` — that breaks code-mode 新会话.
+ */
 function newConversation(context: IpcHandlerContext): void {
-  loadAppPath(context, "/task/new");
+  showAndFocusMainWindow(context);
+  const mainView = getMainView(context);
+  if (mainView.isDestroyed()) return;
+  mainView.send("cmdK");
 }
 
-async function openFile(context: IpcHandlerContext): Promise<void> {
-  const result = await dialog.showOpenDialog(context.windows.mainWindow, {
-    title: "打开文件",
-    properties: ["openFile"],
-  });
-  const filePath = result.filePaths[0];
-  if (result.canceled || !filePath) return;
-  await shell.openPath(filePath);
+/**
+ * Official File → Open File… only in code mode (asar `Ist` when `w1()`).
+ * `oEr` → dispatcher.dispatchOpenFile() → MenuEvents.openFile residual.
+ */
+function openFile(context: IpcHandlerContext): void {
+  showAndFocusMainWindow(context);
+  const mainView = getMainView(context);
+  if (mainView.isDestroyed()) return;
+  // Official residual: ask renderer to open the epitaxy/code file viewer picker.
+  dispatchBridgeEvent(mainView, "claude.web", "MenuEvents", "openFile");
 }
 
 function copyCurrentUrl(context: IpcHandlerContext): void {
@@ -354,9 +415,30 @@ async function installUnpackedExtension(context: IpcHandlerContext): Promise<voi
   revealPath(installed.path);
 }
 
+/**
+ * Official asar `dst` (File → Close Window):
+ * If focused window is not main, or mainView loading/crashed/special flag → hard close.
+ * Else dispatch MenuEvents.closeWindow so renderer can cancel via `claude:close-window`
+ * (ion-dist `iXt`), then fall back to WindowControl.close.
+ */
 function closeFocusedWindow(context: IpcHandlerContext): void {
   const browserWindow = BrowserWindow.getFocusedWindow() ?? context.windows.mainWindow;
-  if (!browserWindow.isDestroyed()) browserWindow.close();
+  if (browserWindow.isDestroyed()) return;
+
+  const { mainWindow, mainView } = context.windows;
+  const mainContents = mainView.webContents;
+  const isMain = browserWindow === mainWindow;
+  if (
+    !isMain
+    || mainContents.isDestroyed()
+    || mainContents.isLoadingMainFrame()
+    || mainContents.isCrashed()
+  ) {
+    browserWindow.close();
+    return;
+  }
+
+  dispatchBridgeEvent(mainContents, "claude.web", "MenuEvents", "closeWindow");
 }
 
 function createMacAppMenu(context: IpcHandlerContext): MenuItemConstructorOptions {
@@ -380,15 +462,36 @@ function createMacAppMenu(context: IpcHandlerContext): MenuItemConstructorOption
 }
 
 function createFileMenu(context: IpcHandlerContext): MenuItemConstructorOptions {
-  return {
-    label: "文件",
-    submenu: [
-      { label: "新会话", accelerator: "CommandOrControl+N", click: () => newConversation(context) },
-      { label: "打开文件…", accelerator: "CommandOrControl+O", click: () => void openFile(context) },
-      { type: "separator" },
-      { label: "关闭窗口", accelerator: "CommandOrControl+W", click: () => closeFocusedWindow(context) },
-    ],
-  };
+  // Official Windows `rEr` File menu:
+  // New Conversation, [Open File… if code], Settings…, sep, Close Window, Exit.
+  // macOS File is thinner (Settings live under app menu); keep Open File when code.
+  const isCode = isCodeModeMainView(context);
+  const isMac = process.platform === "darwin";
+  const submenu: MenuItemConstructorOptions[] = [
+    { label: "新会话", accelerator: "CommandOrControl+N", click: () => newConversation(context) },
+  ];
+  if (isCode) {
+    submenu.push({
+      label: "打开文件…",
+      accelerator: isMac ? "CommandOrControl+O" : undefined,
+      click: () => openFile(context),
+    });
+  }
+  if (!isMac) {
+    submenu.push({
+      label: "设置…",
+      accelerator: "CommandOrControl+,",
+      click: () => openSettings(context),
+    });
+  }
+  submenu.push(
+    { type: "separator" },
+    { label: "关闭窗口", accelerator: "CommandOrControl+W", click: () => closeFocusedWindow(context) },
+  );
+  if (!isMac) {
+    submenu.push({ label: "退出", click: () => app.quit() });
+  }
+  return { label: "文件", submenu };
 }
 
 function createEditMenu(context: IpcHandlerContext): MenuItemConstructorOptions {
@@ -411,12 +514,27 @@ function createEditMenu(context: IpcHandlerContext): MenuItemConstructorOptions 
 }
 
 function createViewMenu(context: IpcHandlerContext): MenuItemConstructorOptions {
+  // Official View: Reload, Back/Forward (hidden, Command+[ / ]), zoom, Copy URL.
+  // Windows residual: Alt+Left/Right for back/forward accelerators.
+  const isMac = process.platform === "darwin";
   return {
-    label: "看法",
+    label: "视图",
     submenu: [
       { label: "重新加载此页面", accelerator: "CommandOrControl+R", click: () => getMainView(context).reload() },
-      { label: "后退", accelerator: "Command+[", click: () => getMainView(context).navigationHistory.goBack() },
-      { label: "前进", accelerator: "Command+]", click: () => getMainView(context).navigationHistory.goForward() },
+      {
+        label: "后退",
+        accelerator: isMac ? "Command+[" : "Alt+Left",
+        visible: false,
+        acceleratorWorksWhenHidden: true,
+        click: () => getMainView(context).navigationHistory.goBack(),
+      },
+      {
+        label: "前进",
+        accelerator: isMac ? "Command+]" : "Alt+Right",
+        visible: false,
+        acceleratorWorksWhenHidden: true,
+        click: () => getMainView(context).navigationHistory.goForward(),
+      },
       { type: "separator" },
       { id: "actual-size", label: "实际大小", accelerator: "CommandOrControl+0", click: () => resetZoom(context) },
       { label: "放大", accelerator: "CommandOrControl+Plus", click: () => zoom(context, 1) },
@@ -503,8 +621,14 @@ function createHelpMenu(context: IpcHandlerContext): MenuItemConstructorOptions 
       {
         label: "故障排除",
         submenu: [
-          { label: "在 Finder 中显示日志", click: () => revealPath(context.settings.getLogsDir()) },
-          { label: "在 Finder 中显示会话数据", click: () => revealPath(context.settings.getUserDataDir()) },
+          {
+            label: process.platform === "darwin" ? "在 Finder 中显示日志" : "在资源管理器中显示日志",
+            click: () => revealPath(context.settings.getLogsDir()),
+          },
+          {
+            label: process.platform === "darwin" ? "在 Finder 中显示会话数据" : "在资源管理器中显示会话数据",
+            click: () => revealPath(context.settings.getUserDataDir()),
+          },
           { label: "复制安装 ID", click: () => clipboard.writeText(getInstallationId(context)) },
           { label: "生成诊断报告", click: () => void handleSupportBundleAction(context, "open") },
           { label: "记录网络日志（30 秒）", click: () => void recordNetLog(context) },
@@ -536,7 +660,27 @@ export function installApplicationMenu(context: IpcHandlerContext): void {
   // Keep menu app name on product identity — never bare "Claude" (official collision).
   const productName = process.env.CLAUDE_PRODUCT_NAME ?? "Claude-Deepseek";
   if (app.getName() !== productName) app.setName(productName);
-  Menu.setApplicationMenu(Menu.buildFromTemplate(createApplicationMenuTemplate(context)));
+
+  const rebuild = () => {
+    Menu.setApplicationMenu(Menu.buildFromTemplate(createApplicationMenuTemplate(context)));
+  };
+  rebuild();
+
+  /**
+   * Official asar `x1t` + `ILA`:
+   * Rebuild application menu when mainView leaves/enters code (epitaxy) mode so
+   * File → Open File… visibility tracks `w1()` / `isCodeModeMainView`.
+   */
+  let lastCodeMode = isCodeModeMainView(context);
+  const onNavigation = () => {
+    const next = isCodeModeMainView(context);
+    if (next === lastCodeMode) return;
+    lastCodeMode = next;
+    rebuild();
+  };
+  const { mainView } = context.windows;
+  mainView.webContents.on("did-navigate", onNavigation);
+  mainView.webContents.on("did-navigate-in-page", onNavigation);
 }
 
 export function getApplicationMenuSummary(): string[] {

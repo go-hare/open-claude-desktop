@@ -220,16 +220,38 @@ export class OriginalRendererEventSurface {
     dispatchBridgeEvent(this.mainView(), "claude.web", "ClaudeVM", "apiReachability_$store$_update", state);
   }
 
+  /**
+   * Official Buddy events land on the Hardware Buddy window webContents
+   * (Yrr.for(buddyWindow).setImplementation). Fall back to mainView for
+   * any residual mainView buddyBle bridge listeners.
+   */
+  private buddyTargets(): WebContents[] {
+    const targets: WebContents[] = [];
+    const buddyWin = this.context.windows.secondaryWindows.getWindow("buddy");
+    if (buddyWin && !buddyWin.isDestroyed()) {
+      targets.push(buddyWin.webContents);
+    }
+    const mainView = this.mainView();
+    if (!mainView.isDestroyed()) targets.push(mainView);
+    return targets;
+  }
+
   buddyProgress(msg: string): void {
-    dispatchBridgeEvent(this.mainView(), "claude.buddy", "Buddy", "progress", msg);
+    for (const target of this.buddyTargets()) {
+      dispatchBridgeEvent(target, "claude.buddy", "Buddy", "progress", msg);
+    }
   }
 
   buddyPairingPrompt(deviceName: string): void {
-    dispatchBridgeEvent(this.mainView(), "claude.buddy", "Buddy", "pairingPrompt", deviceName);
+    for (const target of this.buddyTargets()) {
+      dispatchBridgeEvent(target, "claude.buddy", "Buddy", "pairingPrompt", deviceName);
+    }
   }
 
   buddyBleTx(line: string): void {
-    dispatchBridgeEvent(this.mainView(), "claude.buddy", "BuddyBleTransport", "tx", line);
+    for (const target of this.buddyTargets()) {
+      dispatchBridgeEvent(target, "claude.buddy", "BuddyBleTransport", "tx", line);
+    }
   }
 }
 

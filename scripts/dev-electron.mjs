@@ -38,11 +38,17 @@ function runNode(scriptArgs, label) {
 }
 
 function runElectron() {
+  // Claude Code / nested Electron sessions often set ELECTRON_RUN_AS_NODE=1.
+  // That makes electron.exe parse argv as Node and reject Chromium flags
+  // ("bad option: --remote-debugging-port=..."). Always clear it for the app.
   const env = {
     ...process.env,
     CLAUDE_DESKTOP_MAIN_VIEW_URL: mainViewUrl,
     CLAUDE_DESKTOP_RESOURCES_ROOT: resourcesRoot,
   };
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.ELECTRON_NO_ASAR;
+
   const child = spawn(process.execPath, [electronCli, "--remote-debugging-port=9223", "--remote-allow-origins=*", ...electronArgs, "."], {
     cwd: root,
     env,

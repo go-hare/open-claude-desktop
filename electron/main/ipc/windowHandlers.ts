@@ -2,7 +2,6 @@ import { app, Menu, shell } from "electron";
 import type { IpcHandlerContext } from "./context";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
 import { setOriginalIncognitoTitleBarMode } from "../windows/createMainWindow";
-import { activateQuickEntry } from "./settingsHandlers";
 
 function navigationState(context: IpcHandlerContext) {
   const { mainView } = context.windows;
@@ -19,25 +18,24 @@ function emitNavigationState(context: IpcHandlerContext): void {
   dispatchBridgeEvent(mainView.webContents, "claude.web", "BrowserNavigation", "navigationState_$store$_update", navigationState(context));
 }
 
+/**
+ * Windows topbar hamburger (official ion-dist `tVt` → BrowserNavigation.requestMainMenuPopup).
+ * Official app pops the full application menu under the menu button — not a stub About/Quit menu.
+ * Topbar layout (cbc59a8af `Yn`): h-[36px] flex items-center gap-1 px-3; first control is Menu.
+ */
 function popupMainMenu(context: IpcHandlerContext): void {
-  const { mainWindow, mainView, secondaryWindows } = context.windows;
-  const menu = Menu.buildFromTemplate([
-    {
-      label: "Claude-Deepseek",
-      submenu: [
-        { label: "About", click: () => void secondaryWindows.openAboutWindow() },
-        { type: "separator" },
-        { label: "Quick Entry", accelerator: "CommandOrControl+K", click: () => void activateQuickEntry(context) },
-        { label: "Buddy", click: () => void secondaryWindows.openBuddyWindow() },
-        { type: "separator" },
-        { label: "Reload Main View", accelerator: "CommandOrControl+R", click: () => mainView.webContents.reload() },
-        { label: "Toggle Developer Tools", accelerator: "Alt+CommandOrControl+I", click: () => mainView.webContents.toggleDevTools() },
-        { type: "separator" },
-        { label: "Quit", role: "quit" },
-      ],
-    },
-  ]);
-  menu.popup({ window: mainWindow });
+  const { mainWindow } = context.windows;
+  if (mainWindow.isDestroyed()) return;
+
+  const menu = Menu.getApplicationMenu();
+  if (!menu) return;
+
+  // Anchor under the Windows chrome hamburger (px-3 → 12, bar height 36).
+  menu.popup({
+    window: mainWindow,
+    x: 12,
+    y: 36,
+  });
 }
 
 export function registerWindowHandlers(context: IpcHandlerContext): void {

@@ -19,6 +19,7 @@ import {
   resolveCoworkAutoMemoryDir,
 } from "../services/coworkSessions/coworkAutoMemoryPaths";
 import { getCoworkClaudeVmService } from "../services/coworkVm/coworkClaudeVm";
+import { getHardwareBuddyService } from "../services/buddy/hardwareBuddyService";
 import {
   addLocalDirectoryMarketplace,
   installPluginByIdFromDisk,
@@ -293,8 +294,6 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   let framebufferSource: Record<string, unknown> | null = null;
   let activeOfficeFileId: string | null = null;
   let miniExpanded = false;
-  let buddyInstalled = true;
-  let buddyDevice: Record<string, unknown> | null = null;
   let grandPrixPaired = false;
   let previewUrl: string | null = null;
   const localSessions = () => [
@@ -389,46 +388,59 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     return next;
   };
 
+  // Official Buddy residual (validators Trr/brr/Vrt/Orr in app.asar):
+  // status → {connected, error, paired:{id,name}|null}
+  // deviceStatus → null | {name, owner?, sec?, bat, sys, stats}
+  // pairDevice() → boolean; pickDevice(id) → boolean; setName → boolean
+  // scanDevices → {id,name}[]; preview(folder) → gif|text|null; install(folder) throws + progress
+  const buddy = getHardwareBuddyService();
+  buddy.setProgressSink((msg) => events.buddyProgress(msg));
+  buddy.setPairingPromptSink((deviceName) => events.buddyPairingPrompt(deviceName));
+
   registerNamespaceHandlers("claude.buddy", {
     Buddy: {
-      status: async () => ({ status: "ready", installed: buddyInstalled, paired: Boolean(buddyDevice), device: buddyDevice }),
-      deviceStatus: async () => ({ connected: Boolean(buddyDevice), paired: Boolean(buddyDevice), device: buddyDevice }),
-      setName: async (_event, name) => {
-        buddyDevice = { ...(buddyDevice ?? { id: "local-buddy" }), name: String(name ?? "Claude Buddy") };
-        return ok({ name });
+      status: async () => buddy.status(),
+      deviceStatus: async () => buddy.deviceStatus(),
+      setName: async (_event, name) => buddy.setName(String(name ?? "")),
+      // Official: pairDevice has zero args (reconnect).
+      pairDevice: async () => buddy.pairDevice(),
+      scanDevices: async () => buddy.scanDevices(),
+      // Official: pickDevice(id: string) → boolean
+      pickDevice: async (_event, deviceId) => buddy.pickDevice(String(deviceId ?? "")),
+      cancelScan: async () => {
+        await buddy.cancelScan();
       },
-      pairDevice: async (_event, device) => {
-        buddyDevice = { id: id("buddy"), name: "Local Buddy", pairedAt: new Date().toISOString(), ...asObject(device) };
-        events.buddyPairingPrompt(String(buddyDevice.name ?? "Local Buddy"));
-        events.buddyProgress("paired");
-        return { paired: true, device: buddyDevice };
+      // Official: submitPin(pin: string|null) → void
+      submitPin: async (_event, pin) => {
+        await buddy.submitPin(pin === null || pin === undefined ? null : String(pin));
       },
-      scanDevices: async () => {
-        events.buddyProgress("scanning");
-        return buddyDevice ? [buddyDevice] : [{ id: "local-buddy", name: "Local Buddy", transport: "local" }];
-      },
-      pickDevice: async (_event, device) => device ?? null,
-      cancelScan: async () => true,
-      submitPin: async () => ({ paired: Boolean(buddyDevice), device: buddyDevice }),
       forgetDevice: async () => {
-        buddyDevice = null;
-        return true;
+        await buddy.forgetDevice();
       },
       pickFolder: async () => {
-        const result = await dialog.showOpenDialog(context.windows.mainWindow, { properties: ["openDirectory"] });
-        return result.canceled ? null : result.filePaths[0] ?? null;
+        const buddyWin = context.windows.secondaryWindows.getWindow("buddy");
+        return buddy.pickFolder(buddyWin ?? context.windows.mainWindow);
       },
-      preview: async (_event, options) => ({ preview: true, options }),
-      install: async () => {
-        buddyInstalled = true;
-        return { success: true };
+      // Official: preview(folderPath: string)
+      preview: async (_event, folderPath) => {
+        if (typeof folderPath !== "string" || !folderPath) return null;
+        return buddy.preview(folderPath);
+      },
+      // Official: install(folderPath: string) — void, progress via Buddy.progress events
+      install: async (_event, folderPath) => {
+        if (typeof folderPath !== "string" || !folderPath) {
+          throw new Error("folderPath required");
+        }
+        await buddy.install(folderPath);
       },
     },
     BuddyBleTransport: {
-      rx: async (_event, payload) => ok({ received: payload }),
-      reportState: async (_event, state, details) => {
+      rx: async (_event, payload) => buddy.bleRx(payload),
+      reportState: async (_event, state, _details) => {
+        const result = await buddy.reportBleState(state);
+        // Official: main may also push tx frames to the transport side.
         events.buddyBleTx(String(state ?? ""));
-        return ok({ state, details });
+        return result;
       },
       log: async (_event, message) => {
         console.log(`[buddy] ${String(message ?? "")}`);

@@ -635,6 +635,15 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         app.exit(0);
         return true;
       },
+      // Official residual (featureHandlers + settingsBridge): setup UI may call this on open.
+      setDeploymentMode: async (_event, mode) => {
+        if (typeof mode === "string" && mode.length > 0) {
+          settings.setPreference("deploymentMode", mode);
+        }
+        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
+        return true;
+      },
+      bootstrapState_$store$_getState: async () => custom3pBootstrapState(),
     },
     Extensions: {
       getInstalledExtensionsWithState: async () => listInstalledExtensions(extensionUserDataDir(context)),

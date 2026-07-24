@@ -89,8 +89,16 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
       canGoForward: history.canGoForward(),
     };
   }
-  if (method === "status" && iface === "Buddy") return { status: "fallback" };
-  if (method === "deviceStatus") return { status: "fallback" };
+  // Official Trr / brr residual shapes when fallback path is hit.
+  if (method === "status" && iface === "Buddy") {
+    return { connected: false, error: null, paired: null };
+  }
+  if (method === "deviceStatus" && iface === "Buddy") return null;
+  if (method === "scanDevices" && iface === "Buddy") return [];
+  if (method === "pairDevice" && iface === "Buddy") return false;
+  if (method === "pickDevice" && iface === "Buddy") return false;
+  if (method === "setName" && iface === "Buddy") return false;
+  if (method === "preview" && iface === "Buddy") return null;
 
   if (/^(is|has|can|check)/.test(method)) return false;
   if (/^(list|search|fetch|getAll|getAvailable|getInstalled|getExtensions|getExtensionVersions|getConnected|getSessions|getAgents|getLocal|getDirect)/.test(method)) return [];
