@@ -353,6 +353,8 @@ function wireEvents(nr: ClaudeSwiftAddon, next: QuickEntryNativeDeps): void {
   unsubscribeAccount?.();
   unsubscribeAccount = null;
 
+  // Official Y9i: nr.on("quickEntrySubmitted", K9i)
+  // K9i maps prompt/images/filePaths/chatId then requestQuickWindowDismissWithPayload(IKA).
   nr.on("quickEntrySubmitted", (payload: unknown) => {
     void (async () => {
       try {
@@ -365,12 +367,28 @@ function wireEvents(nr: ClaudeSwiftAddon, next: QuickEntryNativeDeps): void {
                 chatId?: unknown;
               })
             : {};
+        console.info("[quickEntryNative] quickEntrySubmitted (official K9i)", {
+          promptLen: typeof record.prompt === "string" ? record.prompt.length : 0,
+          images: Array.isArray(record.images) ? record.images.length : 0,
+          filePaths: Array.isArray(record.filePaths) ? record.filePaths.length : 0,
+          chatId: typeof record.chatId === "string" ? record.chatId : null,
+          hasOnSubmit: typeof deps?.onSubmit === "function",
+        });
         const mapped = await mapNativeSubmit(record);
+        // Official IKA gate lives in onSubmit residual; K9i always forwards mapped payload.
+        // Keep a minimal empty filter so we never invent a blank chat from a no-op event.
         const hasContent =
           (mapped.text && mapped.text.trim().length > 0) || mapped.images.length > 0;
-        if (!hasContent) return;
-        deps?.onSubmit(mapped);
-        deps?.showMainWindow?.();
+        if (!hasContent) {
+          console.info("[quickEntryNative] K9i empty payload — skip (no text/images)");
+          return;
+        }
+        if (!deps?.onSubmit) {
+          console.warn("[quickEntryNative] K9i: deps.onSubmit missing");
+          return;
+        }
+        deps.onSubmit(mapped);
+        deps.showMainWindow?.();
       } catch (error) {
         console.warn("[quickEntryNative] quickEntrySubmitted failed", error);
       }

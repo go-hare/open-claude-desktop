@@ -110,8 +110,27 @@ export class CoworkAccountContext {
       };
       const onChange: AccountListener = (details) => {
         const identity = identityFromDetails(details, this.organizationUuid);
-        if (identity || details.isLoggedOut) finish(identity);
+        // Soft SPA: accountUuid may land before org is known — kick bootstrap org
+        // resolution instead of waiting the full timeout (was ~5s "Loading Cowork").
+        if (identity) {
+          finish(identity);
+          return;
+        }
+        if (details.isLoggedOut) {
+          finish(null);
+          return;
+        }
+        if (details.accountUuid && !this.organizationUuid) {
+          void this.loadFallbackIdentity().then((resolved) => {
+            if (resolved) finish(resolved);
+          });
+        }
       };
+      // Soft 3p after clear: bootstrap may already have synthetic account while
+      // setAccountDetails has not run yet — resolve org/account from eMA immediately.
+      void this.loadFallbackIdentity().then((resolved) => {
+        if (resolved) finish(resolved);
+      });
       const timer = setTimeout(() => {
         void this.loadFallbackIdentity().then(finish);
       }, timeoutMs);
@@ -123,8 +142,19 @@ export class CoworkAccountContext {
     const fallback = await this.loadBootstrapIdentity?.().catch(() => null);
     if (!fallback) return null;
     this.organizationUuid = fallback.organizationUuid;
+    // Soft SPA clear→3p: sticky isLoggedOut from a prior setAccountDetails must not
+    // block bootstrap identity once eMA synthesizes account again (krA==="3p").
     const accountUuid = this.details?.accountUuid ?? fallback.accountUuid;
-    if (!accountUuid || this.details?.isLoggedOut) return null;
+    if (!accountUuid) return null;
+    if (this.details?.isLoggedOut && fallback.accountUuid) {
+      this.details = {
+        ...this.details,
+        isLoggedOut: false,
+        accountUuid: fallback.accountUuid,
+      };
+    } else if (this.details?.isLoggedOut) {
+      return null;
+    }
     return { accountUuid, organizationUuid: fallback.organizationUuid };
   }
 }

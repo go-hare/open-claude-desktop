@@ -340,8 +340,8 @@ export class CoworkSessionManager {
         resolveCoworkK2AllowSkipAllOutsideUnsupervised(
           options.accountContext.getAccountDetails(),
         ));
-    // Official YM() residual inject — default true (no invent chicagoEnabled off).
-    this.isComputerUseEnabled = options.isComputerUseEnabled ?? (() => true);
+    // Official YM() residual inject — gi("chicagoEnabled"); default false matches HSA.
+    this.isComputerUseEnabled = options.isComputerUseEnabled ?? (() => false);
     this.getAllowAllBrowserActions =
       options.getAllowAllBrowserActions ?? (() => false);
     this.getScheduledTaskChromePermissions =
@@ -977,7 +977,7 @@ export class CoworkSessionManager {
    *   missing session → S.warn + return
    *   i.cuMentionedWindows = t  (assign only; no saveSession / session_updated)
    * YM() = platform darwin|win32 && doA() && gi("chicagoEnabled") residual inject
-   * as isComputerUseEnabled (default true; no invent full chicago product store).
+   * as isComputerUseEnabled (default false; matches HSA chicagoEnabled:!1).
    */
   noteCuWindowMentions(
     sessionId: string,
@@ -1947,6 +1947,9 @@ export class CoworkSessionManager {
           this.updateChromePermission(session.sessionId, mode, domains),
         // Residual: queryTabUrl extension bridge + getCurrentBrowserDeviceId not product.
       }),
+      // Official gi("chicagoEnabled") for computer-use gFi/QHA residual.
+      // Prefer explicit settings inject; fall back to isComputerUseEnabled (YM).
+      isChicagoEnabled: () => this.isComputerUseEnabled(),
       // Official P4 dialog when request_cowork_directory omits path.
       pickDirectory: options.pickDirectory,
       // Official mountFolderForSession → addUserSelectedFolder(Mh kind) + host watch restart.

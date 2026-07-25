@@ -10,7 +10,12 @@ export {
 export { getFindInPageBounds } from "./findInPageBounds";
 export { layoutDesktopViews, layoutFindInPageView, layoutMainView } from "./layoutChildViews";
 export { defaultNavigationPolicy, handleNavigationUrl, installNavigationGuards, isInternalNavigationUrl } from "./navigationPolicy";
-export { normalizeSidebarMode, resolveInitialMainViewUrl } from "./routeMode";
+export {
+  anthropicOriginUrl,
+  normalizeSidebarMode,
+  resolveInitialMainViewUrl,
+  resolveMainWindowLoadUrl,
+} from "./routeMode";
 export type { DesktopTelemetryConfig, DesktopWindowOptions, DesktopWindowParts, InitialRouteMode, SidebarMode } from "./types";
 export { createSecondaryWindowManager } from "./secondaryWindows";
 export type { SecondaryWindowManager, SecondaryWindowName } from "./secondaryWindows";

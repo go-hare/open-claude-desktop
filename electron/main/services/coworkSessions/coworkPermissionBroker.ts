@@ -32,6 +32,17 @@ export type CoworkPermissionBrokerOptions = {
 const requestDirectoryTool = "mcp__cowork__request_cowork_directory";
 const defaultStalledAfterMs = 300_000;
 
+/**
+ * Official mit residual (app.asar G6i):
+ *   new Set([ql, "computer:request_access", "computer:request_teach_access"])
+ * Always-allow updatedPermissions stripped for these tools.
+ */
+const alwaysAllowSuppressedTools = new Set([
+  requestDirectoryTool,
+  "computer:request_access",
+  "computer:request_teach_access",
+]);
+
 function ownerSessionId(permission: CoworkPermissionRequestOptions): string {
   return permission.ownerSessionId ?? permission.sessionId;
 }
@@ -219,7 +230,11 @@ export class CoworkPermissionBroker {
         decision === "always" ? "user_permanent" : "user_temporary",
       updatedInput: updatedInput ?? pending.input,
     };
-    if (decision === "always" && pending.toolName !== requestDirectoryTool) {
+    // Official G6i: strip always-allow for ql + computer:request_* tools.
+    if (
+      decision === "always"
+      && !alwaysAllowSuppressedTools.has(pending.toolName)
+    ) {
       resolution.updatedPermissions = pending.suggestions;
     }
     return resolution;

@@ -67,6 +67,19 @@ describe("SettingsStore AppPreferences residual", () => {
     expect(store.getPreferences().totallyUnknownPref).toBeUndefined();
   });
 
+  it("deletePreference clears residual deploymentMode (jsA undefined / clear)", () => {
+    const file = mkStoreFile();
+    const store = new SettingsStore(file);
+    expect(store.setPreference("deploymentMode", "3p")).toBe(true);
+    expect(store.getPreferences().deploymentMode).toBe("3p");
+    expect(store.deletePreference("deploymentMode")).toBe(true);
+    expect(store.getPreferences().deploymentMode).toBeUndefined();
+    const reloaded = new SettingsStore(file);
+    expect(reloaded.getPreferences().deploymentMode).toBeUndefined();
+    // Unknown keys still rejected.
+    expect(store.deletePreference("totallyUnknownPref")).toBe(false);
+  });
+
   it("loads sparse on-disk prefs under SSA defaults", () => {
     const file = mkStoreFile();
     fs.mkdirSync(path.dirname(file), { recursive: true });

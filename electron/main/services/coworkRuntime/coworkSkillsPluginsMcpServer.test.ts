@@ -24,6 +24,32 @@ it("merges mcp-registry, skills, and plugins into mcpServers", () => {
   expect(merged["mcp-registry"]).toBeTruthy();
   expect(merged.skills).toBeTruthy();
   expect(merged.plugins).toBeTruthy();
+  expect(merged["computer-use"]).toBeUndefined();
+});
+
+it("injects computer-use when gFi options provided on supported platform", () => {
+  const merged = withCoworkAlwaysLoadMcpServers(
+    "sid-cu",
+    undefined,
+    undefined,
+    {
+      isChicagoEnabled: () => false,
+      onPermissionRequest: async () => ({
+        granted: [],
+        denied: [],
+        flags: {
+          clipboardRead: false,
+          clipboardWrite: false,
+          systemKeyCombos: false,
+        },
+      }),
+    },
+  );
+  if (process.platform === "darwin" || process.platform === "win32") {
+    expect(merged["computer-use"]).toBeTruthy();
+  } else {
+    expect(merged["computer-use"]).toBeUndefined();
+  }
 });
 
 it("skills list_skills resolves reverse-RPC when tools present", async () => {

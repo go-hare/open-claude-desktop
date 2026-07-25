@@ -18,6 +18,10 @@ import {
 } from "./coworkSkillsSlashBridge";
 import { createCoworkMcpRegistryServerConfig } from "./coworkMcpRegistryServer";
 import { wrapLocalMcpToolHandler } from "./coworkLocalMcpPathTranslate";
+import {
+  createCoworkComputerUseMcpServerConfig,
+  type CoworkComputerUseMcpOptions,
+} from "./coworkComputerUseMcpServer";
 
 export type CoworkMcpPathContextResolver = () =>
   | CoworkVmPathContext
@@ -207,11 +211,19 @@ export function createCoworkPluginsMcpServerConfig(
   });
 }
 
-/** Merge official mcp-registry + skills + plugins into session mcpServers. */
+/**
+ * Merge official mcp-registry + skills + plugins (+ computer-use residual gFi)
+ * into session mcpServers.
+ *
+ * Official: `uoA() && t.push(await gFi(e))` — computer-use when platform supports.
+ * Product: inject createCoworkComputerUseMcpServerConfig when options provided
+ * (host-loop permission broker wired by runtime controller).
+ */
 export function withCoworkAlwaysLoadMcpServers(
   sessionId: string,
   existing: Record<string, unknown> | undefined,
   resolvePathContext?: CoworkMcpPathContextResolver,
+  computerUse?: CoworkComputerUseMcpOptions | null,
 ): Record<string, unknown> {
   const registry = createCoworkMcpRegistryServerConfig(
     sessionId,
@@ -222,10 +234,15 @@ export function withCoworkAlwaysLoadMcpServers(
     sessionId,
     resolvePathContext,
   );
-  return {
+  const out: Record<string, unknown> = {
     ...(existing ?? {}),
     "mcp-registry": registry,
     skills,
     plugins,
   };
+  if (computerUse) {
+    const cu = createCoworkComputerUseMcpServerConfig(computerUse);
+    if (cu) out["computer-use"] = cu;
+  }
+  return out;
 }

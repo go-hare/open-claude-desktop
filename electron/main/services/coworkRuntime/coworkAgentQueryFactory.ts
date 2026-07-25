@@ -9,11 +9,13 @@ import {
   type SDKUserMessage,
   type SpawnedProcess,
 } from "@anthropic-ai/claude-agent-sdk";
+import { app } from "electron";
 import {
   createCoworkHostProcessAdapter,
   createCoworkHostProcessRegistry,
   createMacDisclaimerResolver,
 } from "../coworkHostLoop/coworkHostProcess";
+import { buildClaudeCliSpawnEnv } from "../custom3p/custom3pCliEnv";
 import {
   createCoworkHostFileDenyResult,
   coworkAutoMemoryAllowedToolRules,
@@ -104,6 +106,18 @@ function sessionStorageDirFromFactoryInput(
   return null;
 }
 
+/**
+ * Official computer-use MCP tools (`mcp__computer-use__*`) run through
+ * gFi handleToolCall / CFi, which emit `computer:request_access` themselves.
+ * canUseTool must not open a second permission card on the raw MCP name.
+ */
+function isCoworkComputerUseMcpTool(toolName: string): boolean {
+  return (
+    toolName === "mcp__computer-use"
+    || toolName.startsWith("mcp__computer-use__")
+  );
+}
+
 function createCanUseTool(input: CoworkQueryFactoryInput): CanUseTool {
   return async (toolName, toolInput, options) => {
     const denied = input.hostLoopMode
@@ -113,6 +127,16 @@ function createCanUseTool(input: CoworkQueryFactoryInput): CanUseTool {
         )
       : undefined;
     if (denied) return denied;
+
+    // Official: CU MCP handleToolCall owns enable/app permission UI (CFi /
+    // createComputerUsePermissionHandler → computer:request_*). Auto-allow
+    // the outer MCP tool call so the inner request can surface Uge/Fge/Oge.
+    if (isCoworkComputerUseMcpTool(toolName)) {
+      return permissionResult({
+        behavior: "allow",
+        updatedInput: toolInput as Record<string, unknown>,
+      });
+    }
 
     // Official aze canUseTool CIC residual (before generic permission UI).
     // Non-CIC tools return undefined and fall through.
@@ -307,6 +331,15 @@ export function buildCoworkSdkOptions(
   // workspace MCP + mounts + Ohe(config)/plugins + memory.
   if (input.hostLoopMode) {
     enabled.push(...HOST_LOOP_WORKSPACE_TOOLS);
+    // Official residual allowedTools includes "mcp__computer-use" when CU MCP injected.
+    // Prefix allow so request_access / screenshot / … are not stripped by allowlist.
+    if (
+      input.mcpServers &&
+      typeof input.mcpServers === "object" &&
+      "computer-use" in (input.mcpServers as Record<string, unknown>)
+    ) {
+      enabled.push("mcp__computer-use");
+    }
     enabled.push(
       ...coworkSessionMountAllowedToolRules({
         folderPermissionPaths: folders,
@@ -352,6 +385,19 @@ export function buildCoworkSdkOptions(
     input.vmProcessName,
   );
 
+  // Official HFi/G4 residual: host-managed 3p from userData desktop-shell-settings
+  // (applied custom3p) is injected into CLI env — not ~/.claude as primary source.
+  let userDataPath: string | undefined;
+  try {
+    userDataPath = app.getPath("userData");
+  } catch {
+    userDataPath = process.env.CLAUDE_USER_DATA_DIR || undefined;
+  }
+  const spawnEnv = buildClaudeCliSpawnEnv({
+    processEnv: process.env,
+    userDataPath,
+  });
+
   const sdkOptions: Options = {
     additionalDirectories: input.hostLoopMode
       ? folders.length > 0
@@ -363,6 +409,7 @@ export function buildCoworkSdkOptions(
     allowedTools: enabled.length > 0 ? enabled : undefined,
     canUseTool: createCanUseTool(input),
     cwd: resolveCoworkSdkCwd(input),
+    env: spawnEnv,
     forwardSubagentText: true,
     forkSession: input.forkSession,
     includePartialMessages: true,

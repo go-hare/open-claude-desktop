@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { resolveDeploymentMode } from "../services/custom3p/deploymentMode";
 import { createCustom3pApiHandler } from "./custom3pApi";
 
 it("publishes the persisted install identity through every bootstrap identity field", async () => {
@@ -144,6 +145,93 @@ it("persists Capabilities account keys used by GrowthBook residual arms", async 
   expect(payload.account.settings.enabled_mcp_tools).toEqual({ inline_visualizations: true });
   expect(payload.growthbook.features.chat_follow_up_chips_main).toEqual({ defaultValue: true });
   expect(payload.growthbook.features.cai_opt_in_connector_suggestions).toEqual({ defaultValue: true });
+});
+
+it("1p deployment mode returns logged-out bootstrap without account uuid", async () => {
+  const handle = createCustom3pApiHandler({
+    installId: "11111111-1111-4111-8111-111111111111",
+    ionDistRoot: process.cwd(),
+    getDeploymentMode: () => "1p",
+  });
+  const response = await handle(new Request("app://localhost/api/bootstrap"));
+  const payload = (await response?.json()) as {
+    account: null | { uuid?: string };
+    deployment_mode?: string;
+  };
+  expect(payload.account).toBeNull();
+  expect(payload.deployment_mode).toBe("1p");
+});
+
+it("3p deployment mode still synthesizes third-party account", async () => {
+  const handle = createCustom3pApiHandler({
+    installId: "22222222-2222-4222-8222-222222222222",
+    ionDistRoot: process.cwd(),
+    getDeploymentMode: () => "3p",
+  });
+  const response = await handle(new Request("app://localhost/api/bootstrap"));
+  const payload = (await response?.json()) as {
+    account: { uuid: string; tagged_id: string };
+    deployment_mode?: string;
+  };
+  expect(payload.account.uuid).toBe("22222222-2222-4222-8222-222222222222");
+  expect(payload.account.tagged_id).toBe("cowork_3p_22222222-2222-4222-8222-222222222222");
+  expect(payload.deployment_mode).toBe("3p");
+});
+
+it("bootstrap injects bag inferenceModels into org config + cowork_model feature (u2/ote residual)", async () => {
+  const handle = createCustom3pApiHandler({
+    installId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    ionDistRoot: process.cwd(),
+    getDeploymentMode: () => "3p",
+    // Official product residual: userData/configLibrary inferenceModels → bootstrap seed.
+    bootstrap: {
+      provider: "gateway",
+      inferenceModels: [{ name: "deepseek-v4-pro", supports1m: true }],
+    },
+  });
+  const response = await handle(new Request("app://localhost/api/bootstrap"));
+  const payload = (await response?.json()) as {
+    account: {
+      memberships: Array<{
+        organization: { claude_ai_bootstrap_models_config: Array<{ model: string; name: string }> };
+      }>;
+    };
+    growthbook: { features: Record<string, { defaultValue?: Record<string, unknown> }> };
+  };
+  const orgModels = payload.account.memberships[0]?.organization.claude_ai_bootstrap_models_config;
+  expect(orgModels).toEqual([{ model: "deepseek-v4-pro", name: "deepseek-v4-pro" }]);
+  // String keys used by official ote("cowork_model")
+  expect(payload.growthbook.features.cowork_model?.defaultValue).toMatchObject({
+    model: "deepseek-v4-pro",
+    allowed_models: expect.arrayContaining(["deepseek-v4-pro", "deepseek-v4-pro[1m]"]),
+  });
+  expect(payload.growthbook.features.ccr_model?.defaultValue).toMatchObject({
+    model: "deepseek-v4-pro",
+  });
+  // Must not invent Anthropic Sonnet/Opus ids.
+  const allowed = payload.growthbook.features.cowork_model?.defaultValue?.allowed_models as string[];
+  expect(allowed.some((id) => id.includes("claude-opus") || id.includes("claude-sonnet"))).toBe(false);
+});
+
+it("Sign out clear residual: SM 3p shell without persisted 3p → account null (eMA krA)", async () => {
+  // Official eMA: account: krA()==="3p" ? HGi : null
+  // After NQt("clear")/jsA(void), bag may remain but chooser mode is void → login gate.
+  const handle = createCustom3pApiHandler({
+    installId: "33333333-3333-4333-8333-333333333333",
+    ionDistRoot: process.cwd(),
+    getDeploymentMode: () =>
+      resolveDeploymentMode({
+        enterprise: { inferenceProvider: "gateway" },
+        persistedDeploymentMode: undefined,
+      }),
+  });
+  const response = await handle(new Request("app://localhost/api/bootstrap"));
+  const payload = (await response?.json()) as {
+    account: null | { uuid?: string };
+    deployment_mode?: string;
+  };
+  expect(payload.account).toBeNull();
+  expect(payload.deployment_mode).toBe("3p");
 });
 
 it("lists local dxt/MCP inventory when userData + mcp config provided", async () => {

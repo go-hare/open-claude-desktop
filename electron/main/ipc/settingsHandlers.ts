@@ -2,7 +2,24 @@ import { app, dialog, globalShortcut, net, shell } from "electron";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { custom3pBootstrapState, custom3pHealth, custom3pLoginDesktopStatus } from "../services/custom3p/custom3pStatus";
+import {
+  createCustom3pConfigLibraryEntry,
+  deleteCustom3pConfigLibraryEntry,
+  duplicateCustom3pConfigLibraryEntry,
+  listCustom3pConfigLibrary,
+  migrateLegacyShellCustom3pConfigsToLibrary,
+  readCustom3pConfigLibrary,
+  renameCustom3pConfigLibraryEntry,
+  revealCustom3pConfigLibraryPath,
+  setAppliedCustom3pConfigLibraryId,
+  writeCustom3pConfigLibrary,
+} from "../services/custom3p/custom3pConfigLibrary";
+import {
+  getConfigHealth as getCustom3pConfigHealth,
+  invalidateConfigHealthCache,
+  recheckConfigHealth as recheckCustom3pConfigHealth,
+} from "../services/custom3p/custom3pConfigHealth";
+import { custom3pBootstrapState, custom3pLoginDesktopStatus } from "../services/custom3p/custom3pStatus";
 import {
   deleteInstalledExtension,
   ensureExtensionFolders,
@@ -65,30 +82,123 @@ function configNameFromInput(input: unknown): string {
   return asString(record.name) ?? asString(record.id) ?? "Custom config";
 }
 
+/**
+ * Official Cgr residual: create starts with empty bag (or explicit config).
+ * Do not invent `{ inferenceProvider: "gateway" }` — that false-activates 3p.
+ */
 function custom3pConfigInput(input: unknown): unknown {
+  if (input == null || typeof input === "string") return {};
   const record = asObject(input);
-  return record.config ?? input ?? { inferenceProvider: "gateway" };
+  if ("config" in record) return record.config ?? {};
+  const rest: Record<string, unknown> = { ...record };
+  delete rest.name;
+  delete rest.id;
+  return rest;
 }
 
-function ensureCustom3pConfig(settings: IpcHandlerContext["settings"]) {
-  const existing = settings.listCustom3pConfigs();
-  if (existing.length > 0) {
-    if (!settings.getAppliedCustom3pConfigId()) settings.setAppliedCustom3pConfig(existing[0]!.id);
-    return existing;
+function settingsUserDataPath(context: IpcHandlerContext): string {
+  try {
+    return path.dirname(context.settings.getSettingsFile());
+  } catch {
+    return app.getPath("userData");
   }
-  const created = settings.createCustom3pConfig("Claude-Deepseek Gateway", { inferenceProvider: "gateway" });
-  settings.setAppliedCustom3pConfig(created.id);
-  return [created];
 }
 
-function custom3pConfigList(settings: IpcHandlerContext["settings"]) {
-  const entries = ensureCustom3pConfig(settings).map(({ id, name, createdAt, updatedAt }) => ({ id, name, createdAt, updatedAt }));
-  return {
-    entries,
-    appliedId: settings.getAppliedCustom3pConfigId() ?? entries[0]?.id ?? "",
-    isManaged: false,
-    platform: process.platform,
+/**
+ * Official wrA residual: multi-config lives in userData/configLibrary.
+ * One-shot migrate legacy desktop-shell-settings custom3pConfigs when library empty.
+ */
+function ensureCustom3pConfigLibrary(context: IpcHandlerContext): string {
+  const userDataPath = settingsUserDataPath(context);
+  try {
+    migrateLegacyShellCustom3pConfigsToLibrary(userDataPath, {
+      appliedCustom3pConfigId: context.settings.getAppliedCustom3pConfigId?.() ?? null,
+      custom3pConfigs: Object.fromEntries(
+        (context.settings.listCustom3pConfigs?.() ?? []).map((row) => [
+          row.id,
+          { id: row.id, name: row.name, config: row.config },
+        ]),
+      ),
+    });
+  } catch {
+    // Migration is best-effort; library APIs still work on empty dir.
+  }
+  return userDataPath;
+}
+
+/**
+ * Official cgr residual list shape (+ product isManaged/platform fields).
+ */
+function custom3pConfigList(context: IpcHandlerContext) {
+  const userDataPath = ensureCustom3pConfigLibrary(context);
+  return listCustom3pConfigLibrary(userDataPath);
+}
+
+function publishCustom3pBootstrapState(context: IpcHandlerContext): unknown {
+  // Config write/apply invalidates health cache so next get/recheck re-probes.
+  invalidateConfigHealthCache();
+  const state = custom3pBootstrapState(settingsUserDataPath(context));
+  // IpcHandlerContext has no `events` field — use originalEventSurface residual
+  // (same as registerSettingsHandlers local `events`). context.events was always
+  // undefined → setDeploymentMode threw after writing bag → renderer first Gateway
+  // click looked dead (IPC reject) until a second click.
+  originalEventSurface(context).custom3pBootstrapStateUpdated(state);
+  return state;
+}
+
+/**
+ * Official IKA residual (app.asar Sst.requestQuickWindowDismissWithPayload):
+ *   if (text.trim().length > 2 || images.length) {
+ *     analytics + process
+ *     if chatId === undefined → FSe (new chat dispatchOnQuickEntrySubmit)
+ *     else if main visible → svi(payload) else FSe
+ *   } else restore prior focus (mst) — short prompts are residual no-op
+ *
+ * FSe: if mainView loaded → dispatchOnQuickEntrySubmit; else loadURL root then dispatch.
+ * Product: mainView already hosts open-claude-web; dispatch + show/focus matches FSe/svi.
+ */
+function dispatchQuickEntrySubmitPayload(
+  context: IpcHandlerContext,
+  payload: {
+    text: string;
+    images: Array<{ base64: string; mimeType: string; filename?: string }>;
+    chatId?: string;
+  },
+): void {
+  const wc = context.windows.mainView.webContents;
+  if (!wc || wc.isDestroyed()) {
+    console.warn("[settingsHandlers] IKA: mainView webContents unavailable; dropping payload");
+    return;
+  }
+  const send = () => {
+    console.info("[settingsHandlers] IKA dispatchOnQuickEntrySubmit", {
+      textLen: payload.text?.trim?.().length ?? 0,
+      images: payload.images?.length ?? 0,
+      chatId: payload.chatId ?? null,
+      url: (() => {
+        try {
+          return wc.getURL();
+        } catch {
+          return null;
+        }
+      })(),
+    });
+    dispatchBridgeEvent(wc, "claude.web", "QuickEntry", "onQuickEntrySubmit", payload);
+    try {
+      showMainWindowFromTray(() => context.windows.mainWindow);
+      context.windows.mainWindow.focus();
+      wc.focus();
+    } catch {
+      /* ignore */
+    }
   };
+  // Official FSe: if still loading, wait for navigation then dispatch.
+  if (wc.isLoading()) {
+    console.info("[settingsHandlers] IKA: mainView loading — defer dispatch until did-finish-load");
+    wc.once("did-finish-load", () => send());
+    return;
+  }
+  send();
 }
 
 function quickEntryNativeDeps(context: IpcHandlerContext) {
@@ -103,14 +213,29 @@ function quickEntryNativeDeps(context: IpcHandlerContext) {
       images: Array<{ base64: string; mimeType: string; filename?: string }>;
       chatId?: string;
     }) => {
-      // Official IKA / K9i → requestQuickWindowDismissWithPayload residual.
-      dispatchBridgeEvent(
-        context.windows.mainView.webContents,
-        "claude.web",
-        "QuickEntry",
-        "onQuickEntrySubmit",
-        payload,
-      );
+      // Official K9i → IKA residual (not raw always-dispatch).
+      const text = typeof payload.text === "string" ? payload.text : "";
+      const images = Array.isArray(payload.images) ? payload.images : [];
+      const longEnough = text.trim().length > 2;
+      const hasImages = images.length > 0;
+      if (!longEnough && !hasImages) {
+        // Official IKA else branch: short prompt — no web dispatch (Swift already shows
+        // "Quick access prompts must be at least 3 characters").
+        console.info("[settingsHandlers] IKA short prompt residual no-op", {
+          textLen: text.trim().length,
+        });
+        return;
+      }
+      console.info("[settingsHandlers] IKA process quick entry", {
+        textLen: text.trim().length,
+        images: images.length,
+        chatId: payload.chatId ?? null,
+      });
+      dispatchQuickEntrySubmitPayload(context, {
+        text,
+        images,
+        chatId: payload.chatId,
+      });
     },
     onNavigateToChat: (chatId: string) => {
       try {
@@ -124,6 +249,7 @@ function quickEntryNativeDeps(context: IpcHandlerContext) {
         } catch {
           /* keep default */
         }
+        // Dev main view is localhost open-claude-web — keep current origin.
         void wc.loadURL(
           `${origin}/chat/${encodeURIComponent(chatId)}?allow_dangling_human_message=1`,
         );
@@ -286,10 +412,13 @@ function extensionDirectoryUrl(context: IpcHandlerContext): string {
 
 async function exportCustom3pConfig(context: IpcHandlerContext, id: unknown, format: unknown) {
   if (typeof id !== "string") return { ok: false, error: "invalid id" };
-  const record = context.settings.readCustom3pConfig(id);
-  if (!record) return { ok: false, error: "config not found" };
+  const userDataPath = ensureCustom3pConfigLibrary(context);
+  const listed = listCustom3pConfigLibrary(userDataPath);
+  const entry = listed.entries.find((row) => row.id === id);
+  const read = readCustom3pConfigLibrary(userDataPath, id);
+  if (!entry || !read.ok) return { ok: false, error: "config not found" };
   const exportFormat = format === "reg" ? "reg" : "mobileconfig";
-  const defaultName = `${record.name.replace(/[^a-z0-9._-]+/gi, "-") || "claude-3p-config"}.${exportFormat}`;
+  const defaultName = `${entry.name.replace(/[^a-z0-9._-]+/gi, "-") || "claude-3p-config"}.${exportFormat}`;
   const result = await dialog.showSaveDialog(context.windows.mainWindow, {
     title: "Export Claude configuration",
     defaultPath: defaultName,
@@ -303,7 +432,7 @@ async function exportCustom3pConfig(context: IpcHandlerContext, id: unknown, for
         "Windows Registry Editor Version 5.00",
         "",
         "[HKEY_CURRENT_USER\\Software\\Anthropic\\Claude\\ThirdParty]",
-        `"Config"=${JSON.stringify(JSON.stringify(record.config))}`,
+        `"Config"=${JSON.stringify(JSON.stringify(read.config))}`,
         "",
       ].join("\r\n")
     : [
@@ -313,9 +442,9 @@ async function exportCustom3pConfig(context: IpcHandlerContext, id: unknown, for
         "<dict>",
         "  <key>PayloadType</key><string>com.anthropic.claude.third-party</string>",
         "  <key>PayloadVersion</key><integer>1</integer>",
-        `  <key>PayloadIdentifier</key><string>com.anthropic.claude.${record.id}</string>`,
-        `  <key>PayloadDisplayName</key><string>${record.name.replace(/[<>&]/g, "")}</string>`,
-        `  <key>ConfigJSON</key><string>${JSON.stringify(record.config).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</string>`,
+        `  <key>PayloadIdentifier</key><string>com.anthropic.claude.${entry.id}</string>`,
+        `  <key>PayloadDisplayName</key><string>${entry.name.replace(/[<>&]/g, "")}</string>`,
+        `  <key>ConfigJSON</key><string>${JSON.stringify(read.config).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</string>`,
         "</dict>",
         "</plist>",
         "",
@@ -581,47 +710,95 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       },
     },
     Custom3pSetup: {
-      listConfigs: async () => custom3pConfigList(settings),
+      // Official cgr/Igr/Egr/Cgr/ugr/dgr residual — userData/configLibrary
+      listConfigs: async () => custom3pConfigList(context),
       readConfig: async (_event, id) => {
         if (typeof id !== "string") return { ok: false, error: "invalid id" };
-        const record = settings.readCustom3pConfig(id);
-        return record ? { ok: true, config: record.config } : { ok: false, error: "config not found" };
+        return readCustom3pConfigLibrary(ensureCustom3pConfigLibrary(context), id);
       },
       writeConfig: async (_event, id, config) => {
         if (typeof id !== "string") return { ok: false, error: "invalid id" };
-        const record = settings.writeCustom3pConfig(id, custom3pConfigInput(config));
-        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
-        return record ? { ok: true } : { ok: false, error: "config not found" };
+        const result = writeCustom3pConfigLibrary(
+          ensureCustom3pConfigLibrary(context),
+          id,
+          custom3pConfigInput(config),
+        );
+        publishCustom3pBootstrapState(context);
+        return result;
       },
       createConfig: async (_event, input) => {
-        const record = settings.createCustom3pConfig(configNameFromInput(input), custom3pConfigInput(input));
-        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
-        return record;
+        const userDataPath = ensureCustom3pConfigLibrary(context);
+        // Official Cgr: uuid + bag + meta; first create sets appliedId when none.
+        const entry = createCustom3pConfigLibraryEntry(
+          userDataPath,
+          configNameFromInput(input),
+          custom3pConfigInput(input),
+        );
+        publishCustom3pBootstrapState(context);
+        return entry;
       },
-      duplicateConfig: async (_event, id, name) => (typeof id === "string" ? settings.duplicateCustom3pConfig(id, asString(name) ?? undefined) : null),
-      renameConfig: async (_event, id, name) => (typeof id === "string" && typeof name === "string" ? settings.renameCustom3pConfig(id, name) : null),
+      duplicateConfig: async (_event, id, name) => {
+        if (typeof id !== "string") return null;
+        const entry = duplicateCustom3pConfigLibraryEntry(
+          ensureCustom3pConfigLibrary(context),
+          id,
+          asString(name) ?? undefined,
+        );
+        if (entry) publishCustom3pBootstrapState(context);
+        return entry;
+      },
+      renameConfig: async (_event, id, name) => {
+        if (typeof id !== "string" || typeof name !== "string") return null;
+        return renameCustom3pConfigLibraryEntry(
+          ensureCustom3pConfigLibrary(context),
+          id,
+          name,
+        );
+      },
       deleteConfig: async (_event, id) => {
-        if (typeof id === "string") settings.deleteCustom3pConfig(id);
-        return custom3pConfigList(settings);
+        const userDataPath = ensureCustom3pConfigLibrary(context);
+        if (typeof id === "string") {
+          try {
+            return deleteCustom3pConfigLibraryEntry(userDataPath, id);
+          } catch (error) {
+            // Official Qgr: cannot delete the last configuration.
+            if (
+              error instanceof Error
+              && error.message.includes("cannot delete the last configuration")
+            ) {
+              return listCustom3pConfigLibrary(userDataPath);
+            }
+            throw error;
+          }
+        }
+        return listCustom3pConfigLibrary(userDataPath);
       },
       exportConfig: async (_event, id, format) => exportCustom3pConfig(context, id, format),
       setAppliedConfig: async (_event, id) => {
-        const ok = typeof id === "string" ? settings.setAppliedCustom3pConfig(id) : false;
-        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
+        const ok =
+          typeof id === "string"
+            ? setAppliedCustom3pConfigLibraryId(ensureCustom3pConfigLibrary(context), id)
+            : false;
+        publishCustom3pBootstrapState(context);
         return ok;
       },
-      revealConfig: async () => {
-        shell.showItemInFolder(settings.getSettingsFile());
-        return true;
+      revealConfig: async (_event, id) => {
+        const target = revealCustom3pConfigLibraryPath(
+          ensureCustom3pConfigLibrary(context),
+          typeof id === "string" ? id : null,
+        );
+        if (target) shell.showItemInFolder(target);
+        return Boolean(target);
       },
-      getConfigHealth: async () => custom3pHealth(),
-      recheckConfigHealth: async () => custom3pHealth(),
+      // Official KPe/KbA: get returns cache-or-recompute; recheck forces X6t probe.
+      getConfigHealth: async () => getCustom3pConfigHealth(ensureCustom3pConfigLibrary(context)),
+      recheckConfigHealth: async () => recheckCustom3pConfigHealth(ensureCustom3pConfigLibrary(context)),
       probeEgressHosts: async (_event, hosts) => Promise.all((Array.isArray(hosts) ? hosts : []).filter((host): host is string => typeof host === "string").map(probeEgressHost)),
       probeMcpServer: async (_event, config) => probeMcpServerConfig(config),
       authorizeAndProbeMcpServer: async (_event, config) => probeMcpServerConfig(config),
       forgetMcpOAuth: async () => true,
       triggerBootstrapAuth: async () => {
-        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
+        publishCustom3pBootstrapState(context);
         return { ok: true };
       },
       openSetupWindow: async () => {
@@ -629,21 +806,46 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         return true;
       },
       openDeviceCodeWindowForE2e: async () => true,
-      getLoginDesktop3pStatus: async () => custom3pLoginDesktopStatus(),
+      getLoginDesktop3pStatus: async () => custom3pLoginDesktopStatus(settingsUserDataPath(context)),
       relaunchApp: async () => {
         app.relaunch();
         app.exit(0);
         return true;
       },
-      // Official residual (featureHandlers + settingsBridge): setup UI may call this on open.
+      // Official residual pot/got/jsA (app.asar):
+      //   pot(e) → got(e==="clear"?void 0:e, enterprise)
+      //   jsA writes preferences.deploymentMode (void on clear)
+      //   if mode !== "3p" → clear session residual + relaunchApp
+      // Tjt validation: mode ∈ {"1p","3p","clear"}
       setDeploymentMode: async (_event, mode) => {
-        if (typeof mode === "string" && mode.length > 0) {
-          settings.setPreference("deploymentMode", mode);
+        if (mode !== "1p" && mode !== "3p" && mode !== "clear") {
+          throw new Error(
+            'Argument "mode" at position 0 to method "setDeploymentMode" in interface "Custom3pSetup" failed to pass validation',
+          );
         }
-        events.custom3pBootstrapStateUpdated(custom3pBootstrapState());
+        if (mode === "1p" || mode === "3p") {
+          settings.setPreference("deploymentMode", mode);
+        } else {
+          // Official jsA(undefined): delete persisted chooser mode.
+          settings.deletePreference("deploymentMode");
+        }
+        publishCustom3pBootstrapState(context);
+        // Official got: mode !== "3p" process relaunch after write.
+        // Product soft SPA host (open-claude-web):
+        //   - "3p": write only (renderer soft-leaves to Cowork)
+        //   - "clear": write only (renderer soft-leaves to /login after signed-out
+        //     interstitial). Process kill here made countdown-end wait for full
+        //     relaunch (~seconds) and flashed chooser mid-exit.
+        //   - "1p": still schedule relaunch (Anthropic host residual).
+        if (mode === "1p") {
+          setImmediate(() => {
+            app.relaunch();
+            app.exit(0);
+          });
+        }
         return true;
       },
-      bootstrapState_$store$_getState: async () => custom3pBootstrapState(),
+      bootstrapState_$store$_getState: async () => custom3pBootstrapState(settingsUserDataPath(context)),
     },
     Extensions: {
       getInstalledExtensionsWithState: async () => listInstalledExtensions(extensionUserDataDir(context)),

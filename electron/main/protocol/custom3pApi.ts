@@ -5,6 +5,12 @@ import { net } from "electron";
 import { JSON_HEADERS, THIRD_PARTY_NOT_AVAILABLE_BODY } from "./constants";
 import { isApiLikePath, normalizeApiPath } from "./apiPath";
 import { resolveInsideRoot } from "./safePath";
+import {
+  type DeploymentModeResolution,
+  type DesktopDeploymentMode,
+  resolveDeploymentMode,
+  resolveDeploymentModeFromUserData,
+} from "../services/custom3p/deploymentMode";
 
 export type BootstrapPayload = Record<string, unknown> & {
   system_prompts?: unknown;
@@ -36,6 +42,14 @@ export type Custom3pApiOptions = {
   getUserDataPath?: () => string;
   /** Optional MCP server config bag for connector directory residual. */
   getMcpServersConfig?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
+  /**
+   * Official N1e residual gate for bootstrap account synthesis.
+   * - "1p" → logged-out bootstrap (no account uuid; product does not invent Anthropic OAuth).
+   * - "3p" → synthetic third-party bootstrap (Cai residual).
+   * When omitted: resolve from getUserDataPath desktop-shell-settings; if no path, default "3p"
+   * for unit tests that only exercise the 3p handler.
+   */
+  getDeploymentMode?: () => DesktopDeploymentMode | DeploymentModeResolution;
 };
 
 function json(data: unknown, init: ResponseInit = {}): Response {
@@ -97,39 +111,97 @@ const FEATURE_FLAGS: Record<string, unknown> = {
   },
 };
 
+function normalizeBootstrapModels(value: unknown): BootstrapModel[] {
+  if (!Array.isArray(value)) return [];
+  const models: BootstrapModel[] = [];
+  for (const row of value) {
+    if (typeof row === "string" && row.length > 0) {
+      models.push({ id: row, name: row });
+      continue;
+    }
+    if (!row || typeof row !== "object") continue;
+    const bag = row as Record<string, unknown>;
+    // Official SC residual: inferenceModels[{name,supports1m}]
+    // Bootstrap residual: models[{id,name}] or [{model,name}]
+    const id =
+      (typeof bag.id === "string" && bag.id) ||
+      (typeof bag.model === "string" && bag.model) ||
+      (typeof bag.name === "string" && bag.name) ||
+      "";
+    if (!id) continue;
+    const name = typeof bag.name === "string" && bag.name.length > 0 ? bag.name : id;
+    models.push({ id, name });
+  }
+  return models;
+}
+
 function defaultBootstrapConfig(value: BootstrapPayload | undefined): Required<ThirdPartyBootstrapConfig> {
-  const record = (value ?? {}) as ThirdPartyBootstrapConfig;
-  const models = Array.isArray(record.models) && record.models.length > 0
-    ? record.models
-    : [{ id: "deepseek-chat", name: "DeepSeek Chat" }];
+  const record = (value ?? {}) as ThirdPartyBootstrapConfig & {
+    inferenceModels?: unknown;
+    supports1mContextModels?: unknown;
+  };
+  // Prefer explicit bootstrap.models; else bag residual inferenceModels (userData/configLibrary).
+  const modelsFromValue = normalizeBootstrapModels(record.models);
+  const modelsFromBag = normalizeBootstrapModels(record.inferenceModels);
+  const models =
+    modelsFromValue.length > 0
+      ? modelsFromValue
+      : modelsFromBag.length > 0
+        ? modelsFromBag
+        : // Last-resort empty: do not invent Anthropic Sonnet/Opus ids.
+          [];
+  const supports1mFromBag = Array.isArray(record.supports1mContextModels)
+    ? record.supports1mContextModels.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+  // Also collect supports1m from inferenceModels residual rows.
+  const supports1mFromModels: string[] = [];
+  if (Array.isArray(record.inferenceModels)) {
+    for (const row of record.inferenceModels) {
+      if (!row || typeof row !== "object") continue;
+      const bag = row as Record<string, unknown>;
+      if (bag.supports1m === true) {
+        const id =
+          (typeof bag.name === "string" && bag.name) ||
+          (typeof bag.id === "string" && bag.id) ||
+          (typeof bag.model === "string" && bag.model) ||
+          "";
+        if (id) supports1mFromModels.push(id);
+      }
+    }
+  }
   return {
     provider: typeof record.provider === "string" ? record.provider : "gateway",
     orgUuid: typeof record.orgUuid === "string" ? record.orgUuid : DEFAULT_ORG_UUID,
     models,
-    supports1mContextModels: Array.isArray(record.supports1mContextModels) ? record.supports1mContextModels : [],
+    supports1mContextModels: [...new Set([...supports1mFromBag, ...supports1mFromModels])],
   };
 }
 
+/**
+ * Official ote residual feature keys are string names:
+ *   Sc("cowork_model"|"ccr_model", "allowed_models"|"model"|"supports_1m_context"|...)
+ * Numeric ids remain for older residual consumers; string keys are the ote source of truth.
+ */
 function modelFeatureConfig(config: Required<ThirdPartyBootstrapConfig>): Record<string, unknown> {
   const modelIds = config.models.map((model) => model.id);
   const defaultModel = modelIds[0] ?? "";
   const allowedModels = [...new Set([...modelIds, ...config.supports1mContextModels.map((model) => `${model}[1m]`)])];
+  const modelDefaultValue = {
+    allowed_models: allowedModels,
+    model: defaultModel,
+    supports_1m_context: config.supports1mContextModels,
+    legacy_models: [] as string[],
+    // Empty → ote takes bootstrap allModelOptions path (not synthetic_allowed_models branch).
+    synthetic_allowed_models: {} as Record<string, string>,
+  };
   return {
     ...FEATURE_FLAGS,
-    1736264167: {
-      defaultValue: {
-        allowed_models: allowedModels,
-        model: defaultModel,
-        supports_1m_context: config.supports1mContextModels,
-      },
-    },
-    "3110209724": {
-      defaultValue: {
-        allowed_models: allowedModels,
-        model: defaultModel,
-        supports_1m_context: config.supports1mContextModels,
-      },
-    },
+    // Official string keys used by ote("cowork_model") / ote("ccr_model").
+    cowork_model: { defaultValue: modelDefaultValue },
+    ccr_model: { defaultValue: modelDefaultValue },
+    // Legacy numeric residual ids kept for older product readers.
+    1736264167: { defaultValue: modelDefaultValue },
+    "3110209724": { defaultValue: modelDefaultValue },
     "2973881027": {
       defaultValue: {
         model: defaultModel,
@@ -159,8 +231,62 @@ function createOrganization(config: Required<ThirdPartyBootstrapConfig>): Record
   };
 }
 
-function createThirdPartyBootstrap(value: BootstrapPayload | undefined, accountSettings: Record<string, unknown>, installId: string): BootstrapPayload {
-  if (value?.account && value?.statsig && value?.growthbook) return { ...value, account_settings: accountSettings };
+/**
+ * Official hai / 1p logged-out residual for product shell bootstrap.
+ * accountDetailsFromBootstrap: isLoggedOut = !account.uuid — omit uuid entirely.
+ * Does NOT invent Anthropic OAuth success or a fake signed-in 1p account.
+ */
+function createLoggedOutBootstrap(
+  value: BootstrapPayload | undefined,
+  accountSettings: Record<string, unknown>,
+): BootstrapPayload {
+  if (value?.account === null || (value && !value.account && value.statsig && value.growthbook)) {
+    return { ...value, account: null, account_settings: accountSettings };
+  }
+  const profile = (accountSettings.__account_profile ?? {}) as Record<string, unknown>;
+  return {
+    // Explicit null so web residual treats as logged-out (no uuid).
+    account: null,
+    locale: typeof profile.locale === "string" ? profile.locale : null,
+    statsig: { user: {}, values: {}, values_hash: "logged-out-1p" },
+    growthbook: { features: { ...FEATURE_FLAGS } },
+    intercom_account_hash: null,
+    system_prompts: {
+      cowork_system_prompt: {
+        value: { prompt: "" },
+        on: true,
+        off: false,
+        source: "defaultValue",
+        ruleId: null,
+      },
+    },
+    account_settings: accountSettings,
+    deployment_mode: "1p",
+    ...(value && !value.account ? value : {}),
+  };
+}
+
+/**
+ * Official eMA residual (app.asar):
+ *   account: krA() === "3p" ? HGi(...) : null
+ * SM/Cai can still be 3p shell while persisted mode is void (Sign out clear) —
+ * then account is null → ion Pos isLoggedOut → /login → LoginDesktop chooser.
+ */
+function createThirdPartyBootstrap(
+  value: BootstrapPayload | undefined,
+  accountSettings: Record<string, unknown>,
+  installId: string,
+  options?: { synthesizeAccount?: boolean },
+): BootstrapPayload {
+  const synthesizeAccount = options?.synthesizeAccount !== false;
+  if (
+    synthesizeAccount
+    && value?.account
+    && value?.statsig
+    && value?.growthbook
+  ) {
+    return { ...value, account_settings: accountSettings };
+  }
 
   const config = defaultBootstrapConfig(value);
   const identity = (accountSettings.__account_identity ?? {}) as Record<string, unknown>;
@@ -175,22 +301,24 @@ function createThirdPartyBootstrap(value: BootstrapPayload | undefined, accountS
   };
 
   return {
-    account: {
-      tagged_id: `cowork_3p_${installId}`,
-      uuid: installId,
-      email_address: "cowork-3p@localhost",
-      full_name: typeof identity.full_name === "string" ? identity.full_name : "Claude-Deepseek",
-      display_name: typeof identity.display_name === "string" ? identity.display_name : "Claude-Deepseek",
-      created_at: DEFAULT_CREATED_AT,
-      updated_at: DEFAULT_CREATED_AT,
-      accepted_clickwrap_versions: {},
-      is_verified: true,
-      age_is_verified: true,
-      memberships: [membership],
-      workspace_memberships: [],
-      invites: [],
-      settings: { ...settings, enabled_geolocation: false },
-    },
+    account: synthesizeAccount
+      ? {
+          tagged_id: `cowork_3p_${installId}`,
+          uuid: installId,
+          email_address: "cowork-3p@localhost",
+          full_name: typeof identity.full_name === "string" ? identity.full_name : "Claude-Deepseek",
+          display_name: typeof identity.display_name === "string" ? identity.display_name : "Claude-Deepseek",
+          created_at: DEFAULT_CREATED_AT,
+          updated_at: DEFAULT_CREATED_AT,
+          accepted_clickwrap_versions: {},
+          is_verified: true,
+          age_is_verified: true,
+          memberships: [membership],
+          workspace_memberships: [],
+          invites: [],
+          settings: { ...settings, enabled_geolocation: false },
+        }
+      : null,
     locale: typeof profile.locale === "string" ? profile.locale : null,
     statsig: { user: { userID: installId }, values: {}, values_hash: "custom3p" },
     growthbook: { features: modelFeatureConfig(config) },
@@ -205,8 +333,35 @@ function createThirdPartyBootstrap(value: BootstrapPayload | undefined, accountS
       },
     },
     account_settings: accountSettings,
+    // Still 3p protocol residual (Cai shell); account null means signed-out chooser.
+    deployment_mode: "3p",
     ...(value ?? {}),
+    // Explicit null must win over any value.account from options.bootstrap seed.
+    ...(synthesizeAccount ? {} : { account: null }),
   };
+}
+
+function resolveHandlerDeploymentMode(options: Custom3pApiOptions): DeploymentModeResolution {
+  if (options.getDeploymentMode) {
+    const raw = options.getDeploymentMode();
+    if (typeof raw === "string") {
+      return resolveDeploymentMode({
+        enterprise: raw === "3p" ? { inferenceProvider: "gateway" } : null,
+        // String override is an explicit chooser residual ("1p" | "3p"), not void clear.
+        persistedDeploymentMode: raw === "1p" || raw === "3p" ? raw : undefined,
+      });
+    }
+    return raw;
+  }
+  const userData = options.getUserDataPath?.();
+  if (userData) {
+    return resolveDeploymentModeFromUserData(userData).resolution;
+  }
+  // Unit tests / bare handler: explicit 3p chooser so eMA synthesizes account.
+  return resolveDeploymentMode({
+    enterprise: { inferenceProvider: "gateway" },
+    persistedDeploymentMode: "3p",
+  });
 }
 
 async function getBootstrap(
@@ -215,10 +370,23 @@ async function getBootstrap(
 ): Promise<BootstrapPayload> {
   const value = typeof options.bootstrap === "function" ? await options.bootstrap() : options.bootstrap;
   const persisted = options.readAccountSettings ? await options.readAccountSettings() : {};
+  const settings = { ...persisted, ...runtimeAccountSettings };
   // Official personal settings mutate account.settings via PATCH /api/account/settings and
   // identity via PUT /api/account. Runtime handler state must win over disk defaults so
   // bootstrap reflects in-session updates (c0db37792 profile + cc989143e PR settings).
-  return createThirdPartyBootstrap(value, { ...persisted, ...runtimeAccountSettings }, options.installId ?? DEFAULT_INSTALL_ID);
+  //
+  // Official N1e shell: !SM → hai (1p); SM → Cai (3p).
+  // Official eMA account: krA() === "3p" ? HGi : null  (Sign out clear → null → /login).
+  const deployment = resolveHandlerDeploymentMode(options);
+  if (deployment.mode === "1p") {
+    return createLoggedOutBootstrap(value, settings);
+  }
+  return createThirdPartyBootstrap(
+    value,
+    settings,
+    options.installId ?? DEFAULT_INSTALL_ID,
+    { synthesizeAccount: deployment.persistedDeploymentMode === "3p" },
+  );
 }
 
 function matchEgressRule(hostname: string, pathname: string, options: Custom3pApiOptions) {

@@ -1,3 +1,5 @@
+import { app } from "electron";
+import path from "node:path";
 import { custom3pBootstrapState } from "../services/custom3p/custom3pStatus";
 import { getSupportBundleState } from "../services/support/supportBundle";
 import type { IpcHandlerContext } from "./context";
@@ -20,6 +22,14 @@ function getBrowserNavigationState(context: IpcHandlerContext) {
   };
 }
 
+function settingsUserDataPath(context: IpcHandlerContext): string {
+  try {
+    return path.dirname(context.settings.getSettingsFile());
+  } catch {
+    return app.getPath("userData");
+  }
+}
+
 function registerStoreState(definition: StoreStateDefinition): void {
   const asyncHandlers: Record<string, IpcHandler> = {
     [`${definition.storeName}_$store$_getState`]: async () => definition.getState(),
@@ -36,7 +46,7 @@ export function registerStoreStateHandlers(context: IpcHandlerContext): void {
     namespace: "claude.settings",
     iface: "Custom3pSetup",
     storeName: "bootstrapState",
-    getState: () => custom3pBootstrapState(),
+    getState: () => custom3pBootstrapState(settingsUserDataPath(context)),
   });
   registerStoreState({
     namespace: "claude.settings",

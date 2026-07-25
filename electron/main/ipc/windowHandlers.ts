@@ -1,4 +1,4 @@
-import { app, Menu, shell } from "electron";
+import { app, Menu, screen, shell } from "electron";
 import type { IpcHandlerContext } from "./context";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
 import { setOriginalIncognitoTitleBarMode } from "../windows/createMainWindow";
@@ -43,8 +43,61 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
 
   registerNamespaceHandlers("claude.web", {
     WindowControl: {
-      resize: async (_event, width, height) => {
-        if (typeof width === "number" && typeof height === "number") mainWindow.setSize(width, height);
+      /**
+       * Official app.asar residual `mnr` (WindowControl.resize) — exact math:
+       *   n = e.getBounds()
+       *   o = { width:t, height:i, x:n.x, y:n.y }
+       *   if n.width>0 && n.height>0:
+       *     o.x = n.x + floor((n.width-t)/2)
+       *     o.y = n.y + floor((n.height-i)/2)
+       *   if r?.center:
+       *     display = getDisplayMatching(n) || getPrimaryDisplay()
+       *     {workAreaSize:a} = display
+       *     o.x = max(0, floor((a.width-t)/2))
+       *     o.y = max(0, floor((a.height-i)/2))
+       *   e.setBounds(o, true); e.show()
+       *
+       * Official LoginRoute jn: resize(600,600,{center:true}) usually runs after
+       * process relaunch while main window still opacity:0 (createMainWindow), so
+       * animated setBounds is invisible. Product soft SPA → /login keeps opacity 1;
+       * Electron/macOS animated setBounds then paints a corner-shrink (window origin
+       * path) before landing centered — looks like "从左上角缩到小窗口".
+       * For center:true while window is already opaque/visible, apply final bounds
+       * without animate so the chooser appears centered in one frame (same end
+       * geometry as official mnr).
+       */
+      resize: async (_event, width, height, opts) => {
+        if (typeof width !== "number" || typeof height !== "number") return true;
+        if (mainWindow.isDestroyed()) return true;
+        const w = Math.round(width);
+        const h = Math.round(height);
+        const current = mainWindow.getBounds();
+        const next = { width: w, height: h, x: current.x, y: current.y };
+        if (current.width > 0 && current.height > 0) {
+          next.x = current.x + Math.floor((current.width - w) / 2);
+          next.y = current.y + Math.floor((current.height - h) / 2);
+        }
+        const center =
+          typeof opts === "object" && opts !== null && (opts as { center?: boolean }).center === true;
+        if (center) {
+          const display =
+            screen.getDisplayMatching(current.width > 0 ? current : { x: 0, y: 0, width: 0, height: 0 })
+            || screen.getPrimaryDisplay();
+          if (display) {
+            // Official mnr uses workAreaSize (not workArea origin) — keep residual.
+            const { workAreaSize } = display;
+            next.x = Math.max(0, Math.floor((workAreaSize.width - w) / 2));
+            next.y = Math.max(0, Math.floor((workAreaSize.height - h) / 2));
+          }
+        }
+        // Official mnr: setBounds(o, true) while createMainWindow still opacity:0 after
+        // process relaunch — animation is invisible. Soft SPA is already opaque;
+        // animate:true paints shrink/grow frames ("闪"), and setOpacity(0) blinks
+        // the whole window. Always animate:false when the window is already opaque.
+        const opaqueVisible =
+          mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.getOpacity() > 0.01;
+        mainWindow.setBounds(next, !opaqueVisible);
+        if (!mainWindow.isVisible()) mainWindow.show();
         return true;
       },
       focus: async () => {

@@ -6,7 +6,12 @@ function invoke(method: string, ...args: unknown[]) {
 }
 
 export const electronWindowControl = {
-  resize: (width: number, height: number, animate?: boolean) => invoke("resize", width, height, animate),
+  // Official LoginRoute: resize(600, 600, { center: true })
+  resize: (
+    width: number,
+    height: number,
+    opts?: boolean | { center?: boolean },
+  ) => invoke("resize", width, height, opts),
   focus: () => invoke("focus"),
   close: () => invoke("close"),
   captureScreenshot: () => invoke("captureScreenshot"),

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveElectronShellPaths, type ElectronShellPaths } from "./paths/electronShellPaths";
 import { installAppProtocolHandler, registerAppProtocolScheme } from "./protocol";
+import { resolveDeploymentModeFromUserData } from "./services/custom3p/deploymentMode";
 import { bundledClaudeExecutable, defaultClaudeExecutable } from "./services/localSessions/claudeCliRunner";
 import { configureOriginalRuntimeModules } from "./services/originalRuntime/originalRuntimeModules";
 import { createDefaultIpcContext, registerDesktopIpc } from "./ipc";
@@ -12,6 +13,7 @@ import {
   applyOriginalTitleBarOverlay,
   createDesktopWindow,
   getOriginalWindowBackgroundColor,
+  resolveMainWindowLoadUrl,
   type DesktopTelemetryConfig,
   type DesktopWindowParts,
   type SidebarMode,
@@ -53,10 +55,18 @@ export type DesktopAppRuntime = {
 };
 
 function defaultTelemetryConfig(): DesktopTelemetryConfig {
+  // Official N1e residual — do not hardcode "3p"; empty userData bag is 1p.
+  // Official vst residual: cookielessOrigin: e.type === "3p"
+  let deploymentMode: "1p" | "3p" = "1p";
+  try {
+    deploymentMode = resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
+  } catch {
+    deploymentMode = "1p";
+  }
   return {
-    deploymentMode: "3p",
+    deploymentMode,
     appVersion: app.getVersion(),
-    cookielessOrigin: true,
+    cookielessOrigin: deploymentMode === "3p",
   };
 }
 
@@ -85,20 +95,34 @@ function applyProductAppName(): void {
   if (app.getName() !== productName) app.setName(productName);
 }
 
-function getInitialMainViewUrlOverride(options: DesktopAppOptions): string | undefined {
-  const value = options.initialMainViewUrl ?? process.env.CLAUDE_DESKTOP_MAIN_VIEW_URL;
-  if (!value) return undefined;
-  const url = new URL(value);
-  if (!["app:", "http:", "https:"].includes(url.protocol)) throw new Error(`Unsupported CLAUDE_DESKTOP_MAIN_VIEW_URL protocol: ${url.protocol}`);
-  // The original compiled mainView preload only exposes `claude.web` on the
-  // official origins plus `localhost`/`app://localhost`. Keep the user's
-  // loopback dev URL working, but load it through the origin the original JS
-  // actually trusts so the desktop bridge is present before the React bundle
-  // initializes.
-  if ((url.hostname === "127.0.0.1" || url.hostname === "::1") && (url.protocol === "http:" || url.protocol === "https:")) {
-    url.hostname = "localhost";
+/**
+ * Official getMainWindowUrl residual (two layers — do not collapse):
+ *   1p Anthropic binary → mN https://claude.ai (ion then /login LoginRoute email form)
+ *   3p → app://localhost
+ * Product shell always hosts open-claude-web / app:// so LoginDesktop sVt/M5t can run.
+ * CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW=1 opts into official mN host (rare debug).
+ */
+function getInitialMainViewUrlOverride(options: DesktopAppOptions): string {
+  let deploymentMode: "1p" | "3p" = "1p";
+  try {
+    deploymentMode =
+      options.desktopTelemetryConfig?.deploymentMode === "3p" || options.desktopTelemetryConfig?.deploymentMode === "1p"
+        ? options.desktopTelemetryConfig.deploymentMode
+        : resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
+  } catch {
+    deploymentMode = "1p";
   }
-  return url.toString();
+
+  const productMainViewUrl =
+    options.initialMainViewUrl ?? process.env.CLAUDE_DESKTOP_MAIN_VIEW_URL;
+
+  return resolveMainWindowLoadUrl({
+    deploymentMode,
+    baseUrl: options.baseUrl ?? "app://localhost",
+    productMainViewUrl,
+    sidebarMode: options.sidebarMode,
+    hasRendererConfig: options.hasRendererConfig ?? true,
+  });
 }
 
 function maybeCompleteSmoke(runtime: DesktopAppRuntime): void {
@@ -230,10 +254,12 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
     const { COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES } = await import(
       "./services/coworkHostLoop/coworkGrowthBookFeatures"
     );
+    // Official N1e residual: 1p uses remote features/fcache; 3p kni short-circuits.
+    // Prefer userData desktop-shell-settings over hard default "3p".
     const deploymentMode =
       process.env.CLAUDE_DEPLOYMENT_MODE
       ?? (options.desktopTelemetryConfig?.deploymentMode as string | undefined)
-      ?? "3p";
+      ?? resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
     await startCoworkGrowthBookLifecycle({
       getHardcodedFeatures: () =>
         deploymentMode === "1p" ? null : COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES,
@@ -246,10 +272,42 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
     console.warn("[growthbook] init residual failed", error);
   }
   // Product residual: custom3p lists local plugins/dxt/MCP from userData (no Anthropic cloud invent).
+  // Official N1e: bootstrap account synthesis gated by deployment mode from
+  // userData/desktop-shell-settings applied bag (Hzt/SM). Empty bag → 1p logged-out.
   installAppProtocolHandler({
     ionDistRoot: options.ionDistRoot ?? paths.ionDistRoot,
     custom3p: {
       getUserDataPath: () => app.getPath("userData"),
+      getDeploymentMode: () =>
+        resolveDeploymentModeFromUserData(app.getPath("userData")).resolution,
+      // Official eMA/u2 residual: bootstrap models come from applied enterprise bag
+      // (userData/configLibrary inferenceModels), not hardcoded Sonnet/Opus.
+      bootstrap: () => {
+        const snapshot = resolveDeploymentModeFromUserData(app.getPath("userData"));
+        const bag =
+          snapshot.appliedConfig && typeof snapshot.appliedConfig === "object"
+            ? (snapshot.appliedConfig as Record<string, unknown>)
+            : {};
+        return {
+          provider: typeof bag.inferenceProvider === "string" ? bag.inferenceProvider : undefined,
+          inferenceModels: Array.isArray(bag.inferenceModels) ? bag.inferenceModels : [],
+          models: Array.isArray(bag.inferenceModels)
+            ? bag.inferenceModels
+                .map((row) => {
+                  if (!row || typeof row !== "object") return null;
+                  const item = row as Record<string, unknown>;
+                  const id =
+                    (typeof item.name === "string" && item.name) ||
+                    (typeof item.id === "string" && item.id) ||
+                    (typeof item.model === "string" && item.model) ||
+                    "";
+                  if (!id) return null;
+                  return { id, name: id };
+                })
+                .filter((row): row is { id: string; name: string } => row !== null)
+            : [],
+        };
+      },
       getMcpServersConfig: () => {
         try {
           const file = path.join(app.getPath("userData"), "mcp-servers.json");

@@ -1291,64 +1291,32 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         };
       },
     },
-    // Official lr (c11959232): listSources(cwd), attach(cwd, sessionName) → {sessionId,name,width,height}.
+    // Official lr (c11959232 YR):
+    //   T = capabilities.framebufferPreview.status === "supported"
+    //   A = listSources(cwd) real simulator/device streams
+    //   Screen menu: T && (A || pane open)
+    // Product residual: RFB / simulator framebuffer MessagePort is NOT wired.
+    // Do not invent support via desktopCapturer screen/window sources — that made
+    // Screen always appear unlike official (Preview/Diff/Terminal/Tasks/Plan only).
     FramebufferPreview: {
+      /** Explicit capability residual for web T gate. Always unsupported until RFB lands. */
+      getStatus: async () => ({ status: "unsupported" as const }),
+      isSupported: async () => false,
       listSources: async (_event, _cwd?: unknown) => {
-        const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 320, height: 200 } });
-        return sources.map((source) => ({
-          id: source.id,
-          name: source.name,
-          displayId: source.display_id,
-          origin: source.display_id || source.id,
-          appIcon: source.appIcon?.isEmpty() ? undefined : source.appIcon?.toDataURL(),
-          thumbnail: source.thumbnail.isEmpty() ? undefined : source.thumbnail.toDataURL(),
-        }));
+        // Official listSources returns device/sim framebuffer origins, not Electron
+        // desktopCapturer screen:/window: ids. Empty until real sources exist.
+        return [];
       },
-      attach: async (_event, cwdOrSource: unknown, sessionName?: unknown) => {
-        // Official web: attach(cwd: string, sessionName: string).
-        // Legacy/stub: attach(source: object) still accepted.
-        if (typeof cwdOrSource === "string") {
-          const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 1, height: 1 } });
-          const primary = sources[0];
-          if (!primary) return null;
-          const name = asString(sessionName) || primary.name || "Screen";
-          const sessionId = `${cwdOrSource}::${name}`;
-          const width = 1280;
-          const height = 720;
-          framebufferSource = {
-            id: sessionId,
-            name,
-            width,
-            height,
-            sourceId: primary.id,
-            cwd: cwdOrSource,
-          };
-          events.framebufferSessionResized(sessionId, width, height);
-          return { sessionId, name, width, height, attached: true, source: framebufferSource };
-        }
-        framebufferSource = asObject(cwdOrSource);
-        const sessionId = String(framebufferSource.id ?? framebufferSource.sessionId ?? "default");
-        const width = Number(framebufferSource.width ?? 0) || 0;
-        const height = Number(framebufferSource.height ?? 0) || 0;
-        events.framebufferSessionResized(sessionId, width, height);
-        return {
-          sessionId,
-          name: asString(framebufferSource.name) ?? undefined,
-          width,
-          height,
-          attached: true,
-          source: framebufferSource,
-        };
+      attach: async (_event, _cwdOrSource: unknown, _sessionName?: unknown) => {
+        // Honest residual: cannot attach a live framebuffer stream yet.
+        return null;
       },
       detach: async (_event, _sessionId?: unknown) => {
-        // Official: detach is intentional unmount — do NOT emit sessionFatal
-        // (that event is for hard failures; Strict Mode remount + cleanup would
-        // otherwise race the next attach into the error UI).
         framebufferSource = null;
         return true;
       },
       requestFramePort: async () => {
-        // Full RFB frame MessagePort not wired in open-claude-desktop yet — UI canvas shell after attach.
+        // Full RFB frame MessagePort not wired in open-claude-desktop yet.
         if (!framebufferSource) return { attached: false };
         return { attached: true, source: framebufferSource, sessionId: framebufferSource.id };
       },
@@ -1501,17 +1469,10 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     isAvailable: () => true,
   }, "claude.web.Launch");
 
+  // Custom3pSetup is fully owned by settingsHandlers (pot/got/jsA residual).
+  // Do not re-register any Custom3pSetup methods here — registerDirectInvokeHandler
+  // replaces handlers and would clobber clear/relaunch.
   registerNamespaceHandlers("claude.settings", {
-    Custom3pSetup: {
-      writeConfig: async (_event, idOrInput, maybeConfig) => {
-        const idValue = asString(idOrInput);
-        if (idValue) return context.settings.writeCustom3pConfig(idValue, maybeConfig);
-        const input = asObject(idOrInput);
-        return context.settings.createCustom3pConfig(asString(input.name) ?? "Custom config", input.config ?? input);
-      },
-      setDeploymentMode: async (_event, mode) => context.settings.setPreference("deploymentMode", mode),
-      triggerBootstrapAuth: async () => ({ ok: false, reason: "bootstrap_auth_not_required" }),
-    },
     Extensions: {
       isExtensionsEnabled: async () => true,
       isDirectoryEnabled: async () => true,

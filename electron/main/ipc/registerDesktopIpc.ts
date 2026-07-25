@@ -108,6 +108,10 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
   const localAgentModeSessions = new CoworkSessionManager({
     accountContext: coworkAccount,
     desktopNotificationService,
+    // Official YM() / gi("chicagoEnabled"): computer-use fully on only after enable.
+    // Also drives QHA stub path (featureDisabled enable prompt) when false.
+    isComputerUseEnabled: () =>
+      settings.getPreferences().chicagoEnabled === true,
     // Official idle onClick: yz() focus main + dispatchNavigate residual.
     // Full XC.getDispatcher product not invented — focus main window only.
     navigateToLocalSession: (_sessionId) => {

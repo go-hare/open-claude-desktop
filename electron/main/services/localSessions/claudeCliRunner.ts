@@ -3,6 +3,13 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { app } from "electron";
+import {
+  buildClaudeCliSpawnEnv,
+  readAppliedCustom3pFromDesktopShellSettings,
+  resolveCliModelArg,
+  type Custom3pEnterpriseConfig,
+} from "../custom3p/custom3pCliEnv";
 import { getLocalSessionEnvironmentSync } from "./localSessionEnvironmentStore";
 import type { LocalSession, LocalSessionStore, LocalToolPermissionRequest } from "./localSessionStore";
 
@@ -120,12 +127,37 @@ export function defaultClaudeExecutable(): string {
   return candidates.find((candidate): candidate is string => Boolean(candidate && fs.existsSync(candidate))) ?? "claude.cmd";
 }
 
+/**
+ * Official HFi residual (product host local-session spawn):
+ * process.env + userData local-session-environment + applied custom3p from
+ * userData/desktop-shell-settings.json (G4 + sessionEnvVars) — not ~/.claude as primary 3p source.
+ */
+function resolveDesktopUserDataPath(): string | undefined {
+  try {
+    return app.getPath("userData");
+  } catch {
+    return process.env.CLAUDE_USER_DATA_DIR || undefined;
+  }
+}
+
+function resolveLocalSessionEnvironment(userDataPath: string | undefined): Record<string, string> {
+  try {
+    // Never pass undefined into path.join (would create "undefined/local-session-environment.json").
+    return userDataPath
+      ? getLocalSessionEnvironmentSync(userDataPath)
+      : getLocalSessionEnvironmentSync();
+  } catch {
+    return {};
+  }
+}
+
 export function spawnClaude(executable: string, args: string[], cwd: string): ChildProcessWithoutNullStreams {
-  const env = {
-    ...process.env,
-    ...getLocalSessionEnvironmentSync(),
-    CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT ?? "sdk-ts",
-  };
+  const userDataPath = resolveDesktopUserDataPath();
+  const env = buildClaudeCliSpawnEnv({
+    processEnv: process.env,
+    localSessionEnv: resolveLocalSessionEnvironment(userDataPath),
+    userDataPath,
+  });
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(executable)) {
     return spawn("cmd.exe", ["/d", "/s", "/c", executable, ...args], { cwd, env, windowsHide: true });
   }
@@ -147,10 +179,25 @@ function normalizeEffort(value: string | undefined): string | undefined {
   return mapped && ["low", "medium", "high", "max"].includes(mapped) ? mapped : undefined;
 }
 
-function normalizeModel(value: string | undefined): string | undefined {
-  if (!value || value === "default" || value === "opus-4") return undefined;
-  if (value === "sonnet-4") return "sonnet";
-  return value;
+/**
+ * Map UI / session model → CLI --model.
+ * With applied configLibrary bag, drop shell-leaked ids (grok/kimi) and map shortnames to bag.
+ */
+function normalizeModel(
+  value: string | undefined,
+  enterprise?: Custom3pEnterpriseConfig | null,
+): string | undefined {
+  return resolveCliModelArg(value, enterprise ?? null);
+}
+
+function resolveAppliedEnterpriseForSpawn(): Custom3pEnterpriseConfig | null {
+  try {
+    const userDataPath = resolveDesktopUserDataPath();
+    if (!userDataPath) return null;
+    return readAppliedCustom3pFromDesktopShellSettings(userDataPath).enterprise;
+  } catch {
+    return null;
+  }
 }
 
 function contentText(value: unknown): string | undefined {
@@ -199,7 +246,10 @@ function buildClaudeArgs(session: LocalSession, request: Record<string, unknown>
   if (forkSession) args.push("--fork-session");
   pushStringOption(args, "--name", request.title ?? session.title);
 
-  const model = normalizeModel(stringValue(request.model)) ?? normalizeModel(session.model);
+  const enterprise = resolveAppliedEnterpriseForSpawn();
+  const model =
+    normalizeModel(stringValue(request.model), enterprise)
+    ?? normalizeModel(session.model, enterprise);
   if (model) args.push("--model", model);
 
   const permissionMode = normalizePermissionMode(stringValue(request.permissionMode) ?? session.permissionMode);

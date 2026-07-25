@@ -5,7 +5,11 @@ import {
   mergeAppPreferences,
   OFFICIAL_APP_PREFERENCE_DEFAULTS,
 } from "./appPreferencesDefaults";
-import { validateAppPreference } from "./appPreferencesSchema";
+import {
+  isOfficialAppPreferenceKey,
+  isProductResidualPreferenceKey,
+  validateAppPreference,
+} from "./appPreferencesSchema";
 import {
   resolveOfficialAppConfigPath,
   readOfficialPreferencesSegment,
@@ -13,6 +17,12 @@ import {
   writeOfficialPreferencesSegment,
 } from "./officialConfigJson";
 import { resolveNativeQuickEntryFeature } from "./nativeQuickEntryFeature";
+import {
+  getAppliedCustom3pConfigLibraryBag,
+  getAppliedCustom3pConfigLibraryId,
+  listCustom3pConfigLibrary,
+  readCustom3pConfigLibraryBag,
+} from "../custom3p/custom3pConfigLibrary";
 
 export type Custom3pConfigRecord = {
   id: string;
@@ -234,6 +244,31 @@ export class SettingsStore {
   }
 
   /**
+   * Official jsA(undefined) residual for setDeploymentMode("clear"):
+   * write void deploymentMode (delete key) so next launch re-resolves SM/N1e.
+   * validateAppPreference rejects undefined, so clear cannot go through setPreference.
+   */
+  deletePreference(key: string): boolean {
+    if (typeof key !== "string" || key.length === 0) return false;
+    if (
+      !isOfficialAppPreferenceKey(key)
+      && !isProductResidualPreferenceKey(key)
+    ) {
+      return false;
+    }
+    if (!(key in this.state.preferences)) {
+      this.save();
+      return true;
+    }
+    delete this.state.preferences[key];
+    if (key === "menuBarEnabled") {
+      this.state.menuBarEnabled = true;
+    }
+    this.save();
+    return true;
+  }
+
+  /**
    * Official EKA.isMenuBarEnabled → gi("menuBarEnabled").
    * Prefer preferences bag; fall back to legacy top-level shell field.
    */
@@ -276,7 +311,28 @@ export class SettingsStore {
     return true;
   }
 
+  /**
+   * Legacy shell multi-config list (desktop-shell-settings.json).
+   * Custom3pSetup IPC uses official configLibrary residual; this remains for
+   * one-shot migration input and support diagnostics.
+   */
   listCustom3pConfigs(): Custom3pConfigRecord[] {
+    // Prefer official configLibrary residual when present.
+    try {
+      const userDataDir = this.getUserDataDir();
+      const listed = listCustom3pConfigLibrary(userDataDir);
+      if (listed.entries.length > 0) {
+        return listed.entries.map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          createdAt: entry.createdAt ?? "",
+          updatedAt: entry.updatedAt ?? "",
+          config: readCustom3pConfigLibraryBag(userDataDir, entry.id),
+        }));
+      }
+    } catch {
+      // fall through
+    }
     return Object.values(this.state.custom3pConfigs).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
@@ -333,7 +389,29 @@ export class SettingsStore {
   }
 
   getAppliedCustom3pConfigId(): string | null {
+    try {
+      const fromLibrary = getAppliedCustom3pConfigLibraryId(this.getUserDataDir());
+      if (fromLibrary) return fromLibrary;
+    } catch {
+      // fall through to legacy shell bag
+    }
     return this.state.appliedCustom3pConfigId;
+  }
+
+  /**
+   * Applied custom3p enterprise bag from official configLibrary residual
+   * (legacy shell bag fallback). Main injects this bag as env (G4/HFi).
+   */
+  getAppliedCustom3pConfig(): unknown | null {
+    try {
+      const fromLibrary = getAppliedCustom3pConfigLibraryBag(this.getUserDataDir());
+      if (fromLibrary.id) return fromLibrary.config;
+    } catch {
+      // fall through
+    }
+    const id = this.state.appliedCustom3pConfigId;
+    if (!id) return null;
+    return this.state.custom3pConfigs[id]?.config ?? null;
   }
 
   getCredentialHelperLastRun(): unknown {

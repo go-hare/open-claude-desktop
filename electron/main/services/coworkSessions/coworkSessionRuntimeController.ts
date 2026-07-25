@@ -9,6 +9,11 @@ import {
 } from "../coworkRuntime/coworkDirectoryMcpServer";
 import { withCoworkAlwaysLoadMcpServers } from "../coworkRuntime/coworkSkillsPluginsMcpServer";
 import {
+  createCoworkComputerUsePermissionHandler,
+  type CoworkComputerUseMcpOptions,
+} from "../coworkRuntime/coworkComputerUseMcpServer";
+import { getComputerUseTccState } from "../tcc/computerUseTcc";
+import {
   resolveCoworkWorkspaceAllowedDomains,
   withCoworkWorkspaceMcpServer,
   type CoworkVmEgressPolicy,
@@ -154,6 +159,11 @@ type CoworkSessionRuntimeControllerOptions = {
   buildCicCanUseTool?: (
     session: CoworkSessionRuntimeState,
   ) => CoworkQueryFactoryInput["cicCanUseTool"];
+  /**
+   * Official gi("chicagoEnabled") for computer-use gFi / QHA residual.
+   * When unset, computer-use MCP is not injected (honest residual).
+   */
+  isChicagoEnabled?: () => boolean;
   queryFactory: CoworkQueryFactory;
   requestPermission: (
     session: CoworkSessionRuntimeState,
@@ -182,6 +192,7 @@ export class CoworkSessionRuntimeController {
   private readonly onBecameIdle?: CoworkSessionRuntimeControllerOptions["onBecameIdle"];
   private readonly onQueryCompleted?: (sessionId: string) => void;
   private readonly buildCicCanUseTool?: CoworkSessionRuntimeControllerOptions["buildCicCanUseTool"];
+  private readonly isChicagoEnabled?: () => boolean;
   private readonly pickDirectory?: CoworkSessionRuntimeControllerOptions["pickDirectory"];
   private readonly queryFactory: CoworkQueryFactory;
   private readonly recordDetectedFile?: CoworkSessionRuntimeControllerOptions["recordDetectedFile"];
@@ -213,6 +224,7 @@ export class CoworkSessionRuntimeController {
     this.now = options.now;
     this.onBecameIdle = options.onBecameIdle;
     this.buildCicCanUseTool = options.buildCicCanUseTool;
+    this.isChicagoEnabled = options.isChicagoEnabled;
     this.onMarkTaskComplete = options.onMarkTaskComplete;
     this.onQueryCompleted = options.onQueryCompleted;
     this.pickDirectory = options.pickDirectory;
@@ -432,12 +444,14 @@ export class CoworkSessionRuntimeController {
       // Path context wires LocalMcp XL/DeA staging (createSdkServer).
       // Official UXe host-loop also injects workspace MCP (x1i: bash + web_fetch).
       // Official WA.cowork = dXe({ mountFolder, getSessionStorageDir, ... }).
+      // Official uoA()&&t.push(await gFi(e)) computer-use MCP residual.
       mcpServers: withCoworkDirectoryMcpServer(
         withCoworkWorkspaceMcpServer(
           withCoworkAlwaysLoadMcpServers(
             session.sessionId,
             session.mcpServers as Record<string, unknown> | undefined,
             () => this.buildPathContext(session),
+            this.buildComputerUseMcpOptions(session),
           ),
           session.hostLoopMode
             ? (() => {
@@ -593,6 +607,103 @@ export class CoworkSessionRuntimeController {
       translateMessage: (message) => this.translateMessagePaths(session, message),
     });
     void runtime.run();
+  }
+
+  /**
+   * Official gFi computer-use MCP options for always-load inject.
+   * Requires isChicagoEnabled inject (gi("chicagoEnabled") residual).
+   * Permission maps to computer:request_access via broker (createComputerUsePermissionHandler).
+   */
+  private buildComputerUseMcpOptions(
+    session: CoworkSessionRuntimeState,
+  ): CoworkComputerUseMcpOptions | null {
+    if (!this.isChicagoEnabled) return null;
+    const onPermissionRequest = createCoworkComputerUsePermissionHandler({
+      sessionId: session.sessionId,
+      requestPermission: async (options) => {
+        const resolution = await this.requestPermission(session, {
+          input: options.input,
+          sessionId: options.sessionId,
+          signal: options.signal,
+          suggestions: options.suggestions as CoworkPermissionRequestOptions["suggestions"],
+          toolName: options.toolName,
+        });
+        return {
+          behavior: resolution.behavior,
+          updatedInput:
+            resolution.behavior === "allow"
+              ? resolution.updatedInput
+              : undefined,
+        };
+      },
+    });
+    return {
+      // Official IFi getAllowedApps → session.cuAllowedApps (empty until Oge grant).
+      getAllowedApps: () => session.cuAllowedApps ?? [],
+      getTccState: () => getComputerUseTccState(),
+      isChicagoEnabled: this.isChicagoEnabled,
+      onPermissionRequest: async (request, signal) => {
+        const response = await onPermissionRequest(request, signal);
+        // Official ddi onAllowedAppsChanged → onCuPermissionUpdated residual.
+        if (response.granted.length > 0) {
+          session.cuAllowedApps = response.granted.map((g) => ({
+            bundleId: g.bundleId,
+            displayName: g.displayName,
+            grantedAt: g.grantedAt,
+            tier: g.tier,
+          })) as CoworkSessionRuntimeState["cuAllowedApps"];
+          session.cuGrantFlags = {
+            clipboardRead: response.flags.clipboardRead === true,
+            clipboardWrite: response.flags.clipboardWrite === true,
+            systemKeyCombos: response.flags.systemKeyCombos === true,
+          };
+        }
+        return response;
+      },
+      // Teach uses same permission surface residual (computer:request_access UI path
+      // via teach toolName residual when product maps teach separately later).
+      onTeachPermissionRequest: async (request, signal) => {
+        const resolution = await this.requestPermission(session, {
+          input: request,
+          sessionId: session.sessionId,
+          signal,
+          toolName: "computer:request_teach_access",
+        });
+        if (resolution.behavior !== "allow") {
+          return {
+            granted: [],
+            denied: [],
+            flags: {
+              clipboardRead: false,
+              clipboardWrite: false,
+              systemKeyCombos: false,
+            },
+          };
+        }
+        const updated =
+          resolution.updatedInput && typeof resolution.updatedInput === "object"
+            ? (resolution.updatedInput as { _cuGrants?: {
+                granted?: unknown[];
+                denied?: unknown[];
+                flags?: {
+                  clipboardRead?: boolean;
+                  clipboardWrite?: boolean;
+                  systemKeyCombos?: boolean;
+                };
+              } })
+            : undefined;
+        const grants = updated?._cuGrants;
+        return {
+          granted: (grants?.granted as never[]) ?? [],
+          denied: (grants?.denied as never[]) ?? [],
+          flags: {
+            clipboardRead: grants?.flags?.clipboardRead === true,
+            clipboardWrite: grants?.flags?.clipboardWrite === true,
+            systemKeyCombos: grants?.flags?.systemKeyCombos === true,
+          },
+        };
+      },
+    };
   }
 
   /**

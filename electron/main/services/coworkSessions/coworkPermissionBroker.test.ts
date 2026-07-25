@@ -42,7 +42,7 @@ it("resolves an allow-once decision and emits resolution exactly once", async ()
 it("persists always-allow suggestions but not directory-request rules", async () => {
   const persistAlwaysAllow = vi.fn();
   const broker = new CoworkPermissionBroker({
-    createRequestId: requestIds("request-1", "request-2"),
+    createRequestId: requestIds("request-1", "request-2", "request-3"),
     emit: () => undefined,
     persistAlwaysAllow,
   });
@@ -63,11 +63,21 @@ it("persists always-allow suggestions but not directory-request rules", async ()
   });
   broker.respondToToolPermission("request-2", "always");
 
+  // Official mit/G6i: computer:request_access always-allow suppressed.
+  const computer = broker.requestPermission({
+    input: { featureDisabled: true },
+    sessionId: "session-1",
+    suggestions,
+    toolName: "computer:request_access",
+  });
+  broker.respondToToolPermission("request-3", "always");
+
   await expect(read).resolves.toMatchObject({
     updatedPermissions: suggestions,
   });
   await expect(directory).resolves.not.toHaveProperty("updatedPermissions");
-  expect(persistAlwaysAllow).toHaveBeenCalledTimes(2);
+  await expect(computer).resolves.not.toHaveProperty("updatedPermissions");
+  expect(persistAlwaysAllow).toHaveBeenCalledTimes(3);
 });
 
 it("supersedes an identical browser permission for the same owner", async () => {

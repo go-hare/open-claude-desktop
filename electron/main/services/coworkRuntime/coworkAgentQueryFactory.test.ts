@@ -436,3 +436,27 @@ it("aze CIC canUseTool residual short-circuits Claude_in_Chrome tools", async ()
   ).resolves.toMatchObject({ behavior: "allow" });
   expect(canUseTool).toHaveBeenCalled();
 });
+
+it("auto-allows mcp__computer-use tools so CFi/Uge can own the permission UI", async () => {
+  const canUseTool = vi.fn(async () => ({ behavior: "deny" as const }));
+  const options = buildCoworkSdkOptions(
+    input({
+      canUseTool,
+      hostLoopMode: true,
+      mcpServers: { "computer-use": { type: "sdk" } },
+    }),
+    { executable: "/opt/claude" },
+  );
+  expect(options.allowedTools).toContain("mcp__computer-use");
+  await expect(
+    options.canUseTool?.(
+      "mcp__computer-use__request_access",
+      { reason: "need desktop" },
+      { signal: new AbortController().signal, toolUseID: "cu-1" },
+    ),
+  ).resolves.toMatchObject({
+    behavior: "allow",
+    updatedInput: { reason: "need desktop" },
+  });
+  expect(canUseTool).not.toHaveBeenCalled();
+});
