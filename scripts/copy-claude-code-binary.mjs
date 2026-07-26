@@ -5,7 +5,7 @@
  *   @go-hare/claude-code-darwin-arm64|darwin-x64|linux-*|win32-*
  *
  * Env:
- *   CLAUDE_CODE_NPM_VERSION   default 2.7.14 (effort xhigh + ultracode)
+ *   CLAUDE_CODE_NPM_VERSION   default 2.7.16 (effort xhigh + ultracode + effortLevels)
  *   CLAUDE_CODE_BINARY_SOURCE / CLAUDE_CODE_EXECUTABLE  optional override for host binary only
  *   CLAUDE_CODE_SKIP_PLATFORMS=1  only copy host (+ win top-level if available)
  */
@@ -22,7 +22,7 @@ import { pipeline } from "node:stream/promises";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetRoot = path.join(projectRoot, "resources", "claude-code-bin");
-const VERSION = process.env.CLAUDE_CODE_NPM_VERSION || "2.7.14";
+const VERSION = process.env.CLAUDE_CODE_NPM_VERSION || "2.7.16";
 const SKIP_PLATFORMS = process.env.CLAUDE_CODE_SKIP_PLATFORMS === "1";
 
 /** Platform package key → binary file name inside the npm package. */
@@ -126,9 +126,96 @@ async function downloadPlatformBinary(entry, version, platformsRoot, tmpRoot) {
     const vendorDest = path.join(destDir, "vendor");
     await fs.rm(vendorDest, { recursive: true, force: true });
     await fs.cp(vendorSrc, vendorDest, { recursive: true });
+    // npm package ships vendor/ripgrep/<arch-platform>/rg without +x in some tarballs.
+    await ensureVendorExecutables(vendorDest);
   }
 
   return destBinary;
+}
+
+/** Walk vendor tree: +x on rg/rg.exe so posix_spawn works after npm tarball extract. */
+async function ensureVendorExecutables(vendorRoot) {
+  if (!fsSync.existsSync(vendorRoot)) return;
+  const stack = [vendorRoot];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    for (const name of await fs.readdir(dir)) {
+      const full = path.join(dir, name);
+      const st = await fs.stat(full);
+      if (st.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (!st.isFile()) continue;
+      const base = name.toLowerCase();
+      if (base === "rg" || base === "rg.exe") {
+        try {
+          await fs.chmod(full, 0o755);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+}
+
+/** Replace dest even if a running process still has the old inode open. */
+async function replaceFile(src, dest) {
+  await fs.rm(dest, { force: true });
+  await fs.copyFile(src, dest);
+}
+
+/**
+ * Host-loop spawn resolves resources/claude-code-bin/claude (top-level).
+ * CLI getBuiltinRipgrepCandidates looks at execDir/vendor/ripgrep/<platform>/rg
+ * (claude-code-1 ripgrep.ts). Top-level must mirror platforms/<host>/vendor or
+ * Glob/Grep fail with ENOENT on /$bunfs/root/vendor/... or the missing path.
+ */
+async function installTopLevelVendor(targetRoot, platformsRoot, hostKey) {
+  const hostVendor = path.join(platformsRoot, hostKey, "vendor");
+  if (!fsSync.existsSync(hostVendor)) {
+    console.warn(`[copy-claude-code-binary] no vendor for host ${hostKey}; Glob/Grep may fail`);
+    return false;
+  }
+  const topVendor = path.join(targetRoot, "vendor");
+  await fs.rm(topVendor, { recursive: true, force: true });
+  await fs.cp(hostVendor, topVendor, { recursive: true });
+  await ensureVendorExecutables(topVendor);
+  return true;
+}
+
+function clearDarwinQuarantineAndAdhocSign(filePath) {
+  if (process.platform !== "darwin") return;
+  try {
+    execFileSync("xattr", ["-cr", filePath], { stdio: "ignore" });
+  } catch {
+    /* ignore */
+  }
+  try {
+    execFileSync("codesign", ["--force", "-s", "-", filePath], { stdio: "ignore" });
+  } catch {
+    /* ignore */
+  }
+}
+
+async function signDarwinVendorTree(vendorRoot) {
+  if (process.platform !== "darwin" || !fsSync.existsSync(vendorRoot)) return;
+  const stack = [vendorRoot];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    for (const name of await fs.readdir(dir)) {
+      const full = path.join(dir, name);
+      const st = await fs.stat(full);
+      if (st.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (!st.isFile()) continue;
+      if (name === "rg" || (!name.includes(".") && st.size > 1024)) {
+        clearDarwinQuarantineAndAdhocSign(full);
+      }
+    }
+  }
 }
 
 /**
@@ -203,7 +290,9 @@ async function main() {
   }
 
   const topClaude = path.join(targetRoot, hostBinaryName);
-  await fs.copyFile(hostSource, topClaude);
+  // Unlink first: a running host-loop child can keep the previous inode open and
+  // make copyFile look like a no-op on some Darwin setups.
+  await replaceFile(hostSource, topClaude);
   if (process.platform !== "win32") await fs.chmod(topClaude, 0o755);
 
   // Always keep win32-x64 top-level claude.exe for Windows packaging residual when present.
@@ -211,26 +300,32 @@ async function main() {
     binaries["win32-x64"] && path.join(targetRoot, binaries["win32-x64"].path);
   const topExe = path.join(targetRoot, "claude.exe");
   if (winSrc && fsSync.existsSync(winSrc) && hostBinaryName !== "claude.exe") {
-    await fs.copyFile(winSrc, topExe);
+    await replaceFile(winSrc, topExe);
   } else if (hostBinaryName === "claude.exe") {
     // already written as top
   }
 
-  // Clear mac quarantine + adhoc re-sign so Gatekeeper does not SIGKILL the host binary.
+  // Sibling vendor for top-level host binary (host-loop Glob/Grep).
+  const topVendorInstalled = await installTopLevelVendor(targetRoot, platformsRoot, hostKey);
+
+  // Clear mac quarantine + adhoc re-sign so Gatekeeper does not SIGKILL the host binary / rg.
   if (process.platform === "darwin") {
-    try {
-      execFileSync("xattr", ["-cr", topClaude], { stdio: "ignore" });
-    } catch {
-      /* ignore */
+    clearDarwinQuarantineAndAdhocSign(topClaude);
+    if (topVendorInstalled) {
+      await signDarwinVendorTree(path.join(targetRoot, "vendor"));
     }
-    try {
-      execFileSync("codesign", ["--force", "-s", "-", topClaude], { stdio: "ignore" });
-    } catch {
-      /* ignore */
-    }
+    // Also sign platform-tree rg used when spawn points at platforms/<host>/claude.
+    await signDarwinVendorTree(path.join(platformsRoot, hostKey, "vendor"));
   }
 
   const hostVersion = versionOf(topClaude);
+  const topVendorRg = path.join(
+    targetRoot,
+    "vendor",
+    "ripgrep",
+    process.platform === "win32" ? `${process.arch}-win32` : `${process.arch}-${process.platform}`,
+    process.platform === "win32" ? "rg.exe" : "rg",
+  );
   const manifest = {
     source: `@go-hare/claude-code@${VERSION}`,
     package: "@go-hare/claude-code",
@@ -249,6 +344,18 @@ async function main() {
         version: hostVersion,
       },
     },
+    vendor: topVendorInstalled
+      ? {
+          path: "vendor",
+          ripgrep: fsSync.existsSync(topVendorRg)
+            ? {
+                path: path.relative(targetRoot, topVendorRg).replaceAll("\\", "/"),
+                size: fsSync.statSync(topVendorRg).size,
+                mode: (fsSync.statSync(topVendorRg).mode & 0o777).toString(8),
+              }
+            : null,
+        }
+      : null,
     binaries,
   };
   if (fsSync.existsSync(topExe) && hostBinaryName !== "claude.exe") {
@@ -270,6 +377,7 @@ async function main() {
         source: manifest.source,
         platforms: Object.keys(binaries),
         topLevel: Object.keys(manifest.topLevel),
+        vendor: manifest.vendor,
       },
       null,
       2,

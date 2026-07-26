@@ -578,3 +578,42 @@ export function isCoworkEnterpriseRequireFullVmSandbox(
     ] === true
   );
 }
+
+/**
+ * Read an enterprise boolean from residual bag (raw QB keys).
+ * Returns undefined when key absent / unparseable — never invents true/false.
+ */
+export function getCoworkEnterpriseBoolean(
+  key: (typeof COWORK_ENTERPRISE_QB_KEYS)[number] | string,
+  deps: CoworkEnterpriseConfigDeps = {},
+): boolean | undefined {
+  const snap = loadCoworkEnterpriseConfig(deps);
+  // Prefer materialised config for require key; otherwise raw residual bag.
+  const fromConfig = snap.config[key];
+  if (fromConfig !== undefined) {
+    return parseCoworkEnterpriseBoolean(fromConfig);
+  }
+  return parseCoworkEnterpriseBoolean(snap.raw[key]);
+}
+
+/**
+ * Official yvi residual input:
+ *   vi().isClaudeCodeForDesktopEnabled === false → unsupported
+ * Absent key is not false (never invent disable).
+ */
+export function isClaudeCodeForDesktopEnterpriseDisabled(
+  deps: CoworkEnterpriseConfigDeps = {},
+): boolean {
+  return getCoworkEnterpriseBoolean("isClaudeCodeForDesktopEnabled", deps) === false;
+}
+
+/**
+ * Official pHA residual input:
+ *   vi().secureVmFeaturesEnabled === false → enterprise disable
+ * Absent key is not false.
+ */
+export function isSecureVmFeaturesEnterpriseDisabled(
+  deps: CoworkEnterpriseConfigDeps = {},
+): boolean {
+  return getCoworkEnterpriseBoolean("secureVmFeaturesEnabled", deps) === false;
+}

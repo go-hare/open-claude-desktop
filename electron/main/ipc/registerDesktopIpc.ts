@@ -105,9 +105,46 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
   const desktopNotificationService = new CoworkDesktopNotificationService({
     backend: createElectronCoworkDesktopNotificationBackend(),
   });
+  /**
+   * Spaces live in FeatureStateStore file; featureHandlers owns a separate in-memory Map.
+   * Read a fresh store from disk each time (same pattern as scheduledTasksHandlers space folders).
+   */
+  const readSpaceRecord = (spaceId: string): Record<string, unknown> | null => {
+    const spaces = new FeatureStateStore().loadMap<Record<string, unknown>>("spaces");
+    return spaces.get(spaceId) ?? null;
+  };
   const localAgentModeSessions = new CoworkSessionManager({
     accountContext: coworkAccount,
     desktopNotificationService,
+    // Residual RSe spaces for DJe project_instructions on start + space rename notify.
+    getSpaceName: (spaceId) => {
+      const space = readSpaceRecord(spaceId);
+      return space && typeof space.name === "string" ? space.name : null;
+    },
+    getSpace: (spaceId) => {
+      const space = readSpaceRecord(spaceId);
+      if (!space) return null;
+      const name = typeof space.name === "string" ? space.name : "";
+      if (!name) return null;
+      const linksRaw = Array.isArray(space.links) ? space.links : [];
+      const links = linksRaw
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") return null;
+          const link = entry as { title?: unknown; url?: unknown };
+          if (typeof link.url !== "string" || !link.url) return null;
+          return {
+            title: typeof link.title === "string" ? link.title : null,
+            url: link.url,
+          };
+        })
+        .filter((entry): entry is { title: string | null; url: string } => Boolean(entry));
+      return {
+        name,
+        description: typeof space.description === "string" ? space.description : null,
+        instructions: typeof space.instructions === "string" ? space.instructions : null,
+        links,
+      };
+    },
     // Official YM() / gi("chicagoEnabled"): computer-use fully on only after enable.
     // Also drives QHA stub path (featureDisabled enable prompt) when false.
     isComputerUseEnabled: () =>

@@ -49,6 +49,81 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/** Official qsr — Spaces.readFileContents size cap (50 MiB). */
+const SPACES_READ_FILE_MAX_BYTES = 50 * 1024 * 1024;
+
+/**
+ * Official EAA — hide dotfiles / Office lock / tmp junk from Spaces.listFolderContents.
+ */
+function isHiddenSpaceListingName(name: string): boolean {
+  return (
+    name.startsWith(".") ||
+    name.startsWith("~$") ||
+    (name.startsWith("~") && name.endsWith(".tmp"))
+  );
+}
+
+function spaceFolderPathsFromRecord(space: Record<string, unknown> | undefined): string[] {
+  const folders = space && Array.isArray(space.folders) ? space.folders : [];
+  return folders
+    .map((entry) => {
+      if (typeof entry === "string") return entry;
+      if (entry && typeof entry === "object" && typeof (entry as { path?: unknown }).path === "string") {
+        return (entry as { path: string }).path;
+      }
+      return null;
+    })
+    .filter((folderPath): folderPath is string => Boolean(folderPath && folderPath.length > 0));
+}
+
+/**
+ * Official emA(spaceId): space folder paths ∪ getAutoMemoryDir(spaceId).
+ * Used as the allow-list root set for list/read/open.
+ */
+function spaceAllowedRootsForPathChecks(
+  spaces: Map<string, Record<string, unknown>>,
+  spaceId: string,
+  autoMemoryDir: string | null,
+): string[] {
+  const roots = spaceFolderPathsFromRecord(spaces.get(spaceId));
+  if (autoMemoryDir) roots.push(autoMemoryDir);
+  return roots;
+}
+
+function isPathInsideAllowedRoots(targetPath: string, allowedRoots: string[]): boolean {
+  const resolvedTarget = path.resolve(targetPath);
+  for (const root of allowedRoots) {
+    const resolvedRoot = path.resolve(root);
+    if (resolvedTarget === resolvedRoot) return true;
+    const relative = path.relative(resolvedRoot, resolvedTarget);
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) return true;
+  }
+  return false;
+}
+
+/**
+ * Official whA-lite for Spaces list/read/open:
+ * absolute path, inside space folders or auto-memory dir.
+ */
+async function resolveSpaceAccessiblePath(
+  spaces: Map<string, Record<string, unknown>>,
+  spaceId: string,
+  rawPath: string,
+  autoMemoryDir: string | null,
+): Promise<string | null> {
+  if (!path.isAbsolute(rawPath)) return null;
+  if (!spaces.has(spaceId)) return null;
+  const allowed = spaceAllowedRootsForPathChecks(spaces, spaceId, autoMemoryDir);
+  if (allowed.length === 0) return null;
+  if (!isPathInsideAllowedRoots(rawPath, allowed)) return null;
+  try {
+    // Prefer realpath when the path exists; fall back to resolved string for empty memory dirs.
+    return await fs.realpath(rawPath);
+  } catch {
+    return path.resolve(rawPath);
+  }
+}
+
 function asObject(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
@@ -195,6 +270,21 @@ async function listApplications(): Promise<Array<{ name: string; path: string }>
   return apps.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** Residual space folders are objects with `.path` (ce283 `r.map(e=>e.path)`). */
+function normalizeSpaceFolderEntry(value: unknown): unknown {
+  if (typeof value === "string" && value.length > 0) return { path: value };
+  const record = asObject(value);
+  const folderPath = asString(record.path) ?? asString(record.folderPath) ?? asString(record.folder);
+  if (folderPath) return { ...record, path: folderPath };
+  return value;
+}
+
+function spaceListItemKey(value: unknown): string {
+  const normalized = normalizeSpaceFolderEntry(value);
+  const record = asObject(normalized);
+  return asString(record.path) ?? asString(record.uuid) ?? asString(record.id) ?? JSON.stringify(normalized);
+}
+
 async function updateSpaceList(
   spaces: Map<string, Record<string, unknown>>,
   persist: () => void,
@@ -205,8 +295,11 @@ async function updateSpaceList(
 ): Promise<Record<string, unknown>> {
   const existing = spaces.get(spaceId) ?? { id: spaceId, createdAt: new Date().toISOString() };
   const list = Array.isArray(existing[key]) ? [...existing[key] as unknown[]] : [];
-  const valueKey = JSON.stringify(value);
-  const next = add ? [...list.filter((item) => JSON.stringify(item) !== valueKey), value] : list.filter((item) => JSON.stringify(item) !== valueKey);
+  const entry = key === "folders" ? normalizeSpaceFolderEntry(value) : value;
+  const valueKey = spaceListItemKey(entry);
+  const next = add
+    ? [...list.filter((item) => spaceListItemKey(item) !== valueKey), entry]
+    : list.filter((item) => spaceListItemKey(item) !== valueKey);
   const updated = { ...existing, [key]: next, updatedAt: new Date().toISOString() };
   spaces.set(spaceId, updated);
   persist();
@@ -227,6 +320,23 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   const localPlugins = featureState.loadMap<Record<string, unknown>>("localPlugins");
   const vmStateMap = featureState.loadMap<Record<string, unknown>>("vmState");
   const persistSpaces = () => featureState.saveMap("spaces", spaces);
+  /**
+   * Official Spaces.getAutoMemoryDir(spaceId) / ZrA residual:
+   * known space + account/org identity → userData/local-agent-mode-sessions/.../spaces/<id>/memory
+   */
+  const resolveSpaceAutoMemoryDir = (spaceId: string): string | null => {
+    if (!spaceId || !spaces.has(spaceId)) return null;
+    const identity = context.coworkAccount.getIdentity();
+    if (!identity?.accountUuid || !identity?.organizationUuid) return null;
+    return resolveCoworkAutoMemoryDir(
+      coworkAccountStorageDir(
+        app.getPath("userData"),
+        identity.accountUuid,
+        identity.organizationUuid,
+      ),
+      { spaceId },
+    );
+  };
   const persistArtifacts = () => featureState.saveMap("artifacts", artifacts);
   const persistMemories = () => featureState.saveMap("memories", memories);
   const persistOrbitDeploys = () => featureState.saveMap("orbitDeploys", orbitDeploys);
@@ -901,7 +1011,19 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       getAllSpaces: async () => Array.from(spaces.values()),
       getSpace: async (_event, spaceId) => spaces.get(String(spaceId)) ?? null,
       createSpace: async (_event, input) => {
-        const space = { id: id("space"), createdAt: new Date().toISOString(), folders: [], links: [], projects: [], ...asObject(input) };
+        const payload = asObject(input);
+        const now = new Date().toISOString();
+        const space = {
+          id: id("space"),
+          createdAt: now,
+          updatedAt: now,
+          folders: [],
+          links: [],
+          projects: [],
+          ...payload,
+          // Ensure name is never dropped when payload omits it.
+          name: asString(payload.name) ?? "Untitled project",
+        };
         spaces.set(String(space.id), space);
         persistSpaces();
         return space;
@@ -925,9 +1047,30 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       addProjectToSpace: async (_event, spaceId, project) => updateSpaceList(spaces, persistSpaces, String(spaceId), "projects", project, true),
       removeProjectFromSpace: async (_event, spaceId, project) => updateSpaceList(spaces, persistSpaces, String(spaceId), "projects", project, false),
       classifySessions: async () => classifyLocalSessions(),
-      copyFilesToSpaceFolder: async (_event, files, destinationFolder) => {
-        const destination = asString(destinationFolder);
-        if (!destination || !Array.isArray(files)) return [];
+      /**
+       * Official residual gT.copyFilesToSpaceFolder(spaceId, filePaths)
+       * (index-BELzQL5P bkt). Legacy product used (files, destinationFolder).
+       */
+      copyFilesToSpaceFolder: async (_event, spaceIdOrFiles, filesOrDestination) => {
+        let destination: string | null = null;
+        let files: unknown[] = [];
+        const spaceId = asString(spaceIdOrFiles);
+        if (spaceId && Array.isArray(filesOrDestination)) {
+          const space = spaces.get(spaceId);
+          const folderList = Array.isArray(space?.folders) ? (space?.folders as unknown[]) : [];
+          const first = folderList[0];
+          destination =
+            asString(first) ??
+            asString(asObject(first).path) ??
+            asString(asObject(first).folderPath) ??
+            null;
+          files = filesOrDestination;
+        } else if (Array.isArray(spaceIdOrFiles)) {
+          // Legacy (files, destinationFolder)
+          files = spaceIdOrFiles;
+          destination = asString(filesOrDestination);
+        }
+        if (!destination || files.length === 0) return [];
         await fs.mkdir(destination, { recursive: true });
         const copied: string[] = [];
         for (const file of files) {
@@ -939,40 +1082,113 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         }
         return copied;
       },
-      createSpaceFolder: async (_event, spaceId, folderName) => {
-        const dir = path.join(app.getPath("userData"), "cowork-spaces", String(spaceId), asString(folderName) ?? "folder");
+      /**
+       * Official gT.createSpaceFolder(location, name) residual (index-BELzQL5P bkt):
+       * creates `<location>/<name>` on disk and returns the folder path string.
+       * Does NOT create a space record — createSpace runs after this.
+       * Legacy product signature was (spaceId, folderName) under userData — wrong arg order.
+       */
+      createSpaceFolder: async (_event, location, folderName) => {
+        const parent = asString(location);
+        const name = asString(folderName);
+        if (!parent || !name) return null;
+        const dir = path.join(parent, name);
         await fs.mkdir(dir, { recursive: true });
-        await updateSpaceList(spaces, persistSpaces, String(spaceId), "folders", dir, true);
-        return { spaceId, folderName, path: dir };
+        return dir;
       },
-      listFolderContents: async (_event, folderPath) => {
-        try { return await fs.readdir(String(folderPath)); } catch { return []; }
+      /**
+       * Official gT.listFolderContents(spaceId, folderPath) residual
+       * (electron-shell Spaces API + ce283 Ya/Va):
+       *   args: (spaceId, folderPath)
+       *   returns: { name, path, isDirectory }[]
+       *   roots: space.folders ∪ getAutoMemoryDir(spaceId)
+       *   hides EAA names (dotfiles / ~$ / ~*.tmp)
+       */
+      listFolderContents: async (_event, spaceIdArg, folderPathArg) => {
+        // Official residual: always (spaceId, folderPath) — never unscoped readdir.
+        const spaceId = asString(spaceIdArg);
+        const folderPath = asString(folderPathArg);
+        if (!spaceId || !folderPath || !spaces.has(spaceId)) return [];
+        const autoMemoryDir = resolveSpaceAutoMemoryDir(spaceId);
+        const accessible = await resolveSpaceAccessiblePath(
+          spaces,
+          spaceId,
+          folderPath,
+          autoMemoryDir,
+        );
+        if (!accessible) return [];
+        try {
+          const entries = await fs.readdir(accessible, { withFileTypes: true });
+          return entries
+            .filter((entry) => !isHiddenSpaceListingName(entry.name))
+            .map((entry) => ({
+              name: entry.name,
+              // Official maps path with the request folderPath join, not realpath.
+              path: path.join(folderPath, entry.name),
+              isDirectory: entry.isDirectory(),
+            }));
+        } catch {
+          return [];
+        }
       },
       /**
        * Official CoworkSpaces.getAutoMemoryDir(spaceId):
        *   spaces.has(spaceId) ? ZrA(accountId, orgId, spaceId) : null
        * (was inventing userData/cowork-memory — corrected to product path).
        */
-      getAutoMemoryDir: async (_event, spaceId) => {
-        const id = asString(spaceId);
-        if (!id || !spaces.has(id)) return null;
-        const identity = context.coworkAccount.getIdentity();
-        if (!identity?.accountUuid || !identity?.organizationUuid) return null;
-        return resolveCoworkAutoMemoryDir(
-          coworkAccountStorageDir(
-            app.getPath("userData"),
-            identity.accountUuid,
-            identity.organizationUuid,
-          ),
-          { spaceId: id },
+      getAutoMemoryDir: async (_event, spaceId) => resolveSpaceAutoMemoryDir(asString(spaceId) ?? ""),
+      /**
+       * Official gT.openFile(spaceId, filePath) — shell.openPath after allow-list check.
+       */
+      openFile: async (_event, spaceIdArg, filePathArg) => {
+        const spaceId = asString(spaceIdArg);
+        const filePath = asString(filePathArg);
+        if (!spaceId || !filePath || !spaces.has(spaceId)) return false;
+        const autoMemoryDir = resolveSpaceAutoMemoryDir(spaceId);
+        const accessible = await resolveSpaceAccessiblePath(
+          spaces,
+          spaceId,
+          filePath,
+          autoMemoryDir,
         );
+        if (!accessible) return false;
+        try {
+          return (await shell.openPath(accessible)).length === 0;
+        } catch {
+          return false;
+        }
       },
-      openFile: async (_event, filePath) => {
-        const target = asString(filePath);
-        if (!target) return false;
-        return (await shell.openPath(target)).length === 0;
+      /**
+       * Official gT.readFileContents(spaceId, filePath):
+       *   allow-listed path, size ≤ 50MiB, utf-8 text bag or null.
+       */
+      readFileContents: async (_event, spaceIdArg, filePathArg) => {
+        const spaceId = asString(spaceIdArg);
+        const filePath = asString(filePathArg);
+        if (!spaceId || !filePath || !spaces.has(spaceId)) return null;
+        const autoMemoryDir = resolveSpaceAutoMemoryDir(spaceId);
+        const accessible = await resolveSpaceAccessiblePath(
+          spaces,
+          spaceId,
+          filePath,
+          autoMemoryDir,
+        );
+        if (!accessible) return null;
+        try {
+          const stat = await fs.stat(accessible);
+          if (!stat.isFile()) return null;
+          if (stat.size > SPACES_READ_FILE_MAX_BYTES) return null;
+          const content = await fs.readFile(accessible, "utf8");
+          return {
+            content,
+            mimeType: "text/plain",
+            fileName: path.basename(filePath),
+            encoding: "utf-8",
+          };
+        } catch {
+          return null;
+        }
       },
-      readFileContents: async (_event, filePath) => fs.readFile(String(filePath), "utf8").catch(() => null),
       setAutoDescription: async (_event, spaceId, description) => {
         const existing = spaces.get(String(spaceId)) ?? { id: String(spaceId) };
         const updated = { ...existing, autoDescription: description };

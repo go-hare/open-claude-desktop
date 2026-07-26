@@ -277,6 +277,16 @@ export type CoworkSessionManagerOptions = {
    */
   getSpaceName?: (spaceId: string) => string | null | undefined;
   /**
+   * Residual RSe.getState().spaces.find(id) for DJe project_instructions on start
+   * (index-BELzQL5P: if e.spaceId → DJe(space) → t1e into systemPrompt).
+   */
+  getSpace?: (spaceId: string) => {
+    description?: string | null;
+    instructions?: string | null;
+    links?: Array<{ title?: string | null; url: string }> | null;
+    name: string;
+  } | null | undefined;
+  /**
    * Official kI() model config for setModel (r2/aK/KwA/bRA/Kk).
    * Optional inject — when unset, helpers degrade like empty config.
    */

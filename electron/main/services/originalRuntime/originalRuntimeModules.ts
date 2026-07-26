@@ -3,6 +3,15 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 
+export type NodePtyTerminal = {
+  pid: number;
+  write: (data: string) => void;
+  kill: (signal?: string) => void;
+  resize?: (cols: number, rows: number) => void;
+  onData: (listener: (data: string) => void) => void;
+  onExit: (listener: (event: { exitCode: number; signal?: number | string }) => void) => void;
+};
+
 export type NodePtyModule = {
   spawn: (file: string, args: string[], options: {
     name?: string;
@@ -10,13 +19,7 @@ export type NodePtyModule = {
     rows?: number;
     cwd?: string;
     env?: NodeJS.ProcessEnv;
-  }) => {
-    write: (data: string) => void;
-    kill: (signal?: string) => void;
-    resize?: (cols: number, rows: number) => void;
-    onData: (listener: (data: string) => void) => void;
-    onExit: (listener: (event: { exitCode: number; signal?: number | string }) => void) => void;
-  };
+  }) => NodePtyTerminal;
 };
 
 let configured = false;

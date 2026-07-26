@@ -29,8 +29,10 @@ import {
   type CoworkAddFolderResult,
 } from "./coworkSessionWorkspace";
 import {
+  appendCoworkSystemPromptParts,
   applyCoworkSessionSpaceIdUpdate,
   applyCoworkSessionTitleUpdate,
+  buildCoworkProjectSystemPromptAppend,
   coworkFoldersNoLongerAvailableMessage,
   invalidateCoworkBuiltPromptAndTools,
   notifyCoworkHostLoopFolderAccess,
@@ -147,6 +149,7 @@ export class CoworkSessionManager {
   private readonly now: () => number;
   private readonly permissions: CoworkPermissionBroker;
   private readonly getSpaceName?: (spaceId: string) => string | null | undefined;
+  private readonly getSpace?: CoworkSessionManagerOptions["getSpace"];
   private readonly getModelConfig?: () => CoworkModelConfig | null | undefined;
   private readonly enable1mContextAppend: () => boolean;
   private readonly lockMidSessionModel: () => boolean;
@@ -286,6 +289,8 @@ export class CoworkSessionManager {
       options.preferSessionNotifications ?? (() => true);
     // Official ws.peek().getSpace(id)?.name inject for space change notify.
     this.getSpaceName = options.getSpaceName;
+    // Residual RSe spaces.find for DJe systemPrompt append on start.
+    this.getSpace = options.getSpace;
     // Official kI() / ft("3885610113") / ft("658929541") injects for setModel.
     this.getModelConfig = options.getModelConfig;
     this.enable1mContextAppend = options.enable1mContextAppend ?? (() => true);
@@ -390,7 +395,11 @@ export class CoworkSessionManager {
       throw new Error("start: invalid sessionId");
     }
     const existing = this.repository.get(sessionId);
-    const startInfo = this.withResolvedHostLoopMode(info, existing);
+    // Residual index-BELzQL5P start: if e.spaceId → DJe(space) → t1e into systemPrompt.
+    const startInfo = this.withResolvedHostLoopMode(
+      this.withSpaceSystemPrompt(info),
+      existing,
+    );
     if (existing?.lifecycleState === "initializing") {
       this.runtime.queuePendingStart(existing, startInfo);
       return sessionId;
@@ -466,6 +475,22 @@ export class CoworkSessionManager {
       }
     }
     this.repository.save(session);
+  }
+
+  /**
+   * Residual start systemPrompt: if spaceId → DJe(space) → t1e(base, DJe).
+   * Does not invent OAuth/UI; only appends stored project instructions/links.
+   */
+  private withSpaceSystemPrompt(info: CoworkStartSessionInput): CoworkStartSessionInput {
+    const spaceId = info.spaceId;
+    if (!spaceId || !this.getSpace) return info;
+    const space = this.getSpace(spaceId);
+    const append = buildCoworkProjectSystemPromptAppend(space ?? null);
+    if (!append) return info;
+    return {
+      ...info,
+      systemPrompt: appendCoworkSystemPromptParts(info.systemPrompt, append),
+    };
   }
 
   private withResolvedHostLoopMode(

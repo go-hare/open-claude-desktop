@@ -87,7 +87,11 @@ function parseStartInput(value: unknown): CoworkStartSessionInput {
     model: optionalString(input.model),
     otelConfig: parseOtelConfig(input.otelConfig),
     permissionMode: optionalString(input.permissionMode) as CoworkPermissionMode,
+    // Residual UZe/Ks: space detail sessions filter on spaceId; keep explicit so
+    // empty strings do not stick via the spread.
+    scheduledTaskId: optionalString(input.scheduledTaskId),
     sessionId: optionalString(input.sessionId),
+    spaceId: optionalString(input.spaceId),
     systemPrompt: optionalString(input.systemPrompt),
     title: optionalString(input.title),
     userSelectedFiles: stringArray(input.userSelectedFiles),

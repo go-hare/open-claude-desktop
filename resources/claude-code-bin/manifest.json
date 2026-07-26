@@ -1,25 +1,25 @@
 {
-  "source": "@go-hare/claude-code@2.7.14",
+  "source": "@go-hare/claude-code@2.7.16",
   "package": "@go-hare/claude-code",
-  "version": "2.7.14",
+  "version": "2.7.16",
   "binary": "claude",
   "platform": "darwin",
   "arch": "arm64",
   "size": 95287168,
-  "sha256": "36243ceb4d64564df84499401d67f3d0bebb023d22665b771881e325692c0060",
-  "versionLabel": "2.7.14 (Claude Code)",
+  "sha256": "841d9285a9f34844ddef35c3d07e647e8feaa313955ecc06d1701a0b6a5e4470",
+  "versionLabel": "2.7.16 (Claude Code)",
   "topLevel": {
     "claude": {
       "from": "platforms/darwin-arm64/claude",
       "size": 95287168,
-      "sha256": "36243ceb4d64564df84499401d67f3d0bebb023d22665b771881e325692c0060",
-      "version": "2.7.14 (Claude Code)"
+      "sha256": "841d9285a9f34844ddef35c3d07e647e8feaa313955ecc06d1701a0b6a5e4470",
+      "version": "2.7.16 (Claude Code)"
     },
     "claude.exe": {
       "from": "platforms/win32-x64/claude.exe",
-      "size": 130758656,
-      "sha256": "1b39f625e951bf6163dac445fdd8fb3a6b530d1f0c8d868391fbab8bb2a559c4",
-      "version": "2.7.14 (Claude Code)"
+      "size": 130763776,
+      "sha256": "938a0649f4a0f20d706b74d1323bc07cf7f89097b25e6e751da14791f150af53",
+      "version": "2.7.16 (Claude Code)"
     }
   },
   "binaries": {
@@ -27,57 +27,23 @@
       "binary": "claude",
       "path": "platforms/darwin-arm64/claude",
       "size": 95826146,
-      "sha256": "4a5f10d6ef00c9bd350a1b2b0971a2debe1edefd33857507d4cf58af5460ad25",
-      "version": "2.7.14 (Claude Code)"
-    },
-    "darwin-x64": {
-      "binary": "claude",
-      "path": "platforms/darwin-x64/claude",
-      "size": 101302352,
-      "sha256": "a258537d0cbc517e7d0d3797b20b0fbec4efa7d6f658468a2d6740d0f154e9b1",
-      "version": "2.7.14 (Claude Code)"
-    },
-    "linux-x64": {
-      "binary": "claude",
-      "path": "platforms/linux-x64/claude",
-      "size": 126859392,
-      "sha256": "d7c432e2a10bdc8e87b7af9101303f4154087451eaafa6832a7822aecfd9ddaf",
-      "version": "2.7.14 (Claude Code)"
-    },
-    "linux-arm64": {
-      "binary": "claude",
-      "path": "platforms/linux-arm64/claude",
-      "size": 125937808,
-      "sha256": "169b3c024ab7a0f575d34c026acd98b3f4802e2ebaa787913ae8b50c31b20347",
-      "version": "2.7.14 (Claude Code)"
-    },
-    "linux-x64-musl": {
-      "binary": "claude",
-      "path": "platforms/linux-x64-musl/claude",
-      "size": 126859392,
-      "sha256": "2607cca24af08a0dc5a76f5fda2c1596ed86d1614909c733745d0122e0fbf699",
-      "version": "2.7.14 (Claude Code)"
-    },
-    "linux-arm64-musl": {
-      "binary": "claude",
-      "path": "platforms/linux-arm64-musl/claude",
-      "size": 125937808,
-      "sha256": "a6cd4313c957a009f6c65f4bd8dc8c4ea83bafde96f94731b239fcf43ebc99ea",
-      "version": "2.7.14 (Claude Code)"
+      "sha256": "790c1dcbcd86aa143887b5b83fb820251ff28d32644916c48a8dcfaa244c4d2d",
+      "version": "2.7.16 (Claude Code)"
     },
     "win32-x64": {
       "binary": "claude.exe",
       "path": "platforms/win32-x64/claude.exe",
-      "size": 130758656,
-      "sha256": "1b39f625e951bf6163dac445fdd8fb3a6b530d1f0c8d868391fbab8bb2a559c4",
-      "version": "2.7.14 (Claude Code)"
-    },
-    "win32-arm64": {
-      "binary": "claude.exe",
-      "path": "platforms/win32-arm64/claude.exe",
-      "size": 126862336,
-      "sha256": "7dc4576d61c74d5c0f96847b2ce866f4f0482b4b67949680de71fdc3cd7154dd",
-      "version": "2.7.14 (Claude Code)"
+      "size": 130763776,
+      "sha256": "938a0649f4a0f20d706b74d1323bc07cf7f89097b25e6e751da14791f150af53",
+      "version": "2.7.16 (Claude Code)"
+    }
+  },
+  "vendor": {
+    "path": "vendor",
+    "ripgrep": {
+      "path": "vendor/ripgrep/arm64-darwin/rg",
+      "size": 4520320,
+      "mode": "755"
     }
   }
 }

@@ -62,6 +62,8 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
     try {
       return context.settings.getSupportedFeatures();
     } catch {
+      // Last-resort residual: never invent supported for native/DoA keys.
+      // Prefer live SettingsStore map; this branch is only when store throws.
       return {
         localSessions: { status: "supported" },
         scheduledTasks: { status: "supported" },
@@ -72,8 +74,27 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
         customProtocols: { status: "supported" },
         nativeQuickEntry: { status: "unavailable" },
         quickEntryDictation: { status: "unavailable" },
-        customQuickEntryDictationShortcut: { status: "unavailable" },
+        customQuickEntryDictationShortcut: { status: "supported" },
+        plushRaccoon: { status: "unavailable" },
+        quietPenguin: { status: "unavailable" },
+        chillingSlothFeat: { status: "unavailable" },
+        chillingSlothEnterprise: { status: "supported" },
+        chillingSlothLocal: { status: "supported" },
+        chillingSlothPool: { status: "unavailable" },
+        yukonSilver: { status: "unavailable" },
+        yukonSilverGems: { status: "unavailable" },
+        yukonSilverGemsCache: { status: "unavailable" },
         wakeScheduler: { status: "unavailable" },
+        desktopTopBar: { status: "supported" },
+        ccdPlugins: { status: "supported" },
+        computerUse: { status: "unavailable" },
+        coworkKappa: { status: "unavailable" },
+        coworkArtifacts: { status: "unavailable" },
+        markTaskComplete: { status: "unavailable" },
+        framebufferPreview: { status: "unavailable" },
+        iosSimulator: { status: "unavailable" },
+        androidEmulator: { status: "unavailable" },
+        grandPrix: { status: "unavailable" },
       };
     }
   }

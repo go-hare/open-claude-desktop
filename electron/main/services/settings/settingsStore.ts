@@ -16,7 +16,15 @@ import {
   writeOfficialGlobalShortcutSegment,
   writeOfficialPreferencesSegment,
 } from "./officialConfigJson";
-import { resolveNativeQuickEntryFeature } from "./nativeQuickEntryFeature";
+import {
+  buildSupportedFeaturesDepsFromRuntime,
+  resolveSupportedFeatures,
+} from "./supportedFeatures";
+import {
+  resolveIsDxtEnabled,
+  resolveIsLocalDevMcpEnabled,
+} from "./localDevMcpPolicy";
+import { getCoworkEnterpriseBoolean } from "../coworkHostLoop/coworkEnterpriseConfig";
 import {
   getAppliedCustom3pConfigLibraryBag,
   getAppliedCustom3pConfigLibraryId,
@@ -164,13 +172,54 @@ export class SettingsStore {
     }
   }
 
+  /**
+   * Official AppConfig.getAppConfig residual returns Xo() bag with nested
+   * `features` (not flat feature keys). Renderer Developer settings reads
+   * `getAppConfig().features.isDxtEnabled`.
+   */
   getAppConfig(): Record<string, unknown> {
+    let appVersion = "";
+    try {
+      appVersion = app.getVersion();
+    } catch {
+      appVersion = "";
+    }
     return {
       is3p: true,
       desktopShell: "claude-deepseek-desktop",
-      appVersion: app.getVersion(),
-      ...this.state.appFeatures,
+      appVersion,
+      // Official Xo residual: feature flags live under `features`, not flat.
+      features: { ...this.state.appFeatures },
     };
+  }
+
+  /**
+   * Official InA residual:
+   *   vi().isLocalDevMcpEnabled === false ? false
+   *     : (Xo().features)?.isLocalDevMcpEnabled !== false
+   * Never `Boolean(undefined)` — absent means enabled.
+   */
+  isLocalDevMcpEnabled(): boolean {
+    return resolveIsLocalDevMcpEnabled({
+      enterpriseIsLocalDevMcpEnabled: getCoworkEnterpriseBoolean(
+        "isLocalDevMcpEnabled",
+      ),
+      featureIsLocalDevMcpEnabled: this.state.appFeatures.isLocalDevMcpEnabled,
+    });
+  }
+
+  /**
+   * Official isDxt residual:
+   *   vi().isDesktopExtensionEnabled === false ? false
+   *     : (Xo().features)?.isDxtEnabled !== false
+   */
+  isDxtEnabled(): boolean {
+    return resolveIsDxtEnabled({
+      enterpriseIsDesktopExtensionEnabled: getCoworkEnterpriseBoolean(
+        "isDesktopExtensionEnabled",
+      ),
+      featureIsDxtEnabled: this.state.appFeatures.isDxtEnabled,
+    });
   }
 
   setAppFeature(key: string, value: unknown): boolean {
@@ -184,38 +233,25 @@ export class SettingsStore {
    * each key is `{ status: "supported" | "unavailable" | "unsupported", ... }`.
    * YK(features, key) → e[key] || { status: "unavailable" }.
    *
-   * Product shell capabilities that this process actually provides are supported.
-   * nativeQuickEntry follows official Dvi (darwin + macOS 13+) — not invented.
-   * Runtime overlay still requires real @ant/claude-swift load (Y9i / i2A).
-   * quickEntryDictation / customQuickEntryDictationShortcut / wakeScheduler stay
-   * unavailable until those native APIs are honestly wired.
+   * Sync `pw()` map is resolved via `resolveSupportedFeatures` (Dvi/mvi/pHA/…).
+   * Product shell surface keys (localSessions, …) are honest process capabilities.
+   * DoA async upgrades (louderPenguin / kappa / artifacts) stay unavailable until
+   * those residual bridges are wired — never invent supported.
    */
   getSupportedFeatures(): Record<string, { status: string; reason?: string; unsupportedCode?: string }> {
-    const supported = { status: "supported" as const };
-    const unavailable = { status: "unavailable" as const };
-    const nativeQuickEntry = resolveNativeQuickEntryFeature();
-    return {
-      // Honest product shell surface (desktop residual, not official X3t keys alone).
-      localSessions: supported,
-      scheduledTasks: supported,
-      findInPage: supported,
-      fileSystem: supported,
-      desktopNotifications: supported,
-      secondaryWindows: supported,
-      customProtocols: supported,
-      // Official pw().nativeQuickEntry (Dvi).
-      nativeQuickEntry: {
-        status: nativeQuickEntry.status,
-        ...(nativeQuickEntry.reason ? { reason: nativeQuickEntry.reason } : {}),
-        ...(nativeQuickEntry.unsupportedCode
-          ? { unsupportedCode: nativeQuickEntry.unsupportedCode }
-          : {}),
-      },
-      // Dictation / wake remain unavailable until real residual wiring.
-      quickEntryDictation: unavailable,
-      customQuickEntryDictationShortcut: unavailable,
-      wakeScheduler: unavailable,
-    };
+    let isPackaged = false;
+    try {
+      isPackaged = app.isPackaged === true;
+    } catch {
+      isPackaged = false;
+    }
+    const prefs = this.getPreferences();
+    return resolveSupportedFeatures(
+      buildSupportedFeaturesDepsFromRuntime({
+        preferences: prefs,
+        isPackaged,
+      }),
+    );
   }
 
   /**

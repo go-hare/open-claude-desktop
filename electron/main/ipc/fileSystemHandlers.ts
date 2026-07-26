@@ -126,7 +126,8 @@ function resolveSystemPath(name: string): string | null {
     logs: "logs",
     crashDumps: "crashDumps",
   };
-  const key = aliases[name];
+  // Residual zI.Documents / getSystemPath("Documents") — accept PascalCase too.
+  const key = aliases[name] ?? aliases[name.toLowerCase()];
   if (!key) return null;
   try {
     return app.getPath(key);
@@ -146,7 +147,8 @@ async function writeDownload(fileName: string, data: unknown, options: Record<st
 
 export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceHandlers {
   const pickDirectory = async (multiSelections: boolean, options: unknown, defaultPath?: unknown) => {
-    const optionObj = asObject(options);
+    // Residual bT.browseFolder(titleString, multi?) — first arg may be a plain title string.
+    const optionObj = typeof options === "string" ? { title: options } : asObject(options);
     const result = await dialog.showOpenDialog(context.windows.mainWindow, {
       title: typeof optionObj.title === "string" ? optionObj.title : undefined,
       defaultPath: asPath(defaultPath) ?? asPath(optionObj.defaultPath) ?? undefined,
@@ -158,7 +160,8 @@ export function createFileSystemHandlers(context: IpcHandlerContext): InterfaceH
 
   return {
     browseFiles: async (_event, options) => {
-      const optionObj = asObject(options);
+      // Residual bT.browseFiles("Select files to add") — title string or options object.
+      const optionObj = typeof options === "string" ? { title: options } : asObject(options);
       const result = await dialog.showOpenDialog(context.windows.mainWindow, {
         title: typeof optionObj.title === "string" ? optionObj.title : undefined,
         defaultPath: asPath(optionObj.defaultPath) ?? undefined,

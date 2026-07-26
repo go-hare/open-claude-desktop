@@ -2,6 +2,14 @@ import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 
+/**
+ * Residual surface:
+ * - CCDScheduledTasks → Code / `/code/scheduled` (ST bridge)
+ * - CoworkScheduledTasks → Cowork / `/scheduled-task` (jT bridge)
+ * Same on-disk file, filtered by `channel` so the two UIs stay separate.
+ */
+export type ScheduledTaskChannel = "code" | "cowork";
+
 export type ScheduledTask = {
   id: string;
   name?: string;
@@ -20,11 +28,34 @@ export type ScheduledTask = {
   sourceBranch?: string;
   useWorktree?: boolean;
   userSelectedFolders?: string[];
+  /** Residual space_page Qa: task linked to cowork space (empty string unlinks). */
+  spaceId?: string;
+  /**
+   * Which product surface owns this task.
+   * Missing on legacy rows → inferred: spaceId present ⇒ cowork, else code.
+   */
+  channel?: ScheduledTaskChannel;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
   approvedPermissions?: Array<{ toolName: string }>;
 };
+
+export function resolveScheduledTaskChannel(task: Pick<ScheduledTask, "channel" | "spaceId">): ScheduledTaskChannel {
+  if (task.channel === "cowork" || task.channel === "code") return task.channel;
+  // Legacy rows: project-linked tasks belong to cowork residual; bare rows default to code for run path.
+  if (task.spaceId && task.spaceId.length > 0) return "cowork";
+  return "code";
+}
+
+/** List membership: tagged rows stay on their channel; untagged legacy rows appear on both until edited. */
+export function scheduledTaskVisibleOnChannel(
+  task: Pick<ScheduledTask, "channel" | "spaceId">,
+  channel: ScheduledTaskChannel,
+): boolean {
+  if (task.channel === "cowork" || task.channel === "code") return task.channel === channel;
+  return true;
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -95,18 +126,30 @@ export class ScheduledTaskStore {
     }, null, 2));
   }
 
-  getAllScheduledTasks(): ScheduledTask[] {
-    return Array.from(this.tasks.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  getAllScheduledTasks(channel?: ScheduledTaskChannel): ScheduledTask[] {
+    const all = Array.from(this.tasks.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    if (!channel) return all;
+    return all.filter((task) => scheduledTaskVisibleOnChannel(task, channel));
   }
 
-  getScheduledTask(id: string): ScheduledTask | null {
-    return this.tasks.get(id) ?? null;
+  getScheduledTask(id: string, channel?: ScheduledTaskChannel): ScheduledTask | null {
+    const task = this.tasks.get(id) ?? null;
+    if (!task) return null;
+    if (channel && !scheduledTaskVisibleOnChannel(task, channel)) return null;
+    return task;
   }
 
   createScheduledTask(input: Partial<ScheduledTask> & { name?: string; title?: string }): ScheduledTask {
     const timestamp = nowIso();
     const title = input.title ?? input.name ?? "Scheduled task";
     const cronExpression = input.cronExpression;
+    const spaceId = input.spaceId && input.spaceId.length > 0 ? input.spaceId : undefined;
+    const channel: ScheduledTaskChannel =
+      input.channel === "cowork" || input.channel === "code"
+        ? input.channel
+        : spaceId
+          ? "cowork"
+          : "code";
     const task: ScheduledTask = {
       id: input.id ?? (title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || `task_${Date.now()}`),
       name: input.name ?? title,
@@ -123,6 +166,8 @@ export class ScheduledTaskStore {
       sourceBranch: input.sourceBranch,
       useWorktree: input.useWorktree,
       userSelectedFolders: input.userSelectedFolders,
+      spaceId,
+      channel,
       enabled: input.enabled ?? true,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -137,10 +182,23 @@ export class ScheduledTaskStore {
     const task = this.tasks.get(id);
     if (!task) return null;
     const cronExpression = input.cronExpression ?? task.cronExpression;
-    const updated = {
+    // Residual Qa unlink passes spaceId: "" — store as undefined (no space).
+    const spaceId =
+      input.spaceId === undefined
+        ? task.spaceId
+        : input.spaceId && input.spaceId.length > 0
+          ? input.spaceId
+          : undefined;
+    const channel: ScheduledTaskChannel =
+      input.channel === "cowork" || input.channel === "code"
+        ? input.channel
+        : resolveScheduledTaskChannel({ channel: task.channel, spaceId });
+    const updated: ScheduledTask = {
       ...task,
       ...input,
       id,
+      spaceId,
+      channel,
       schedule: input.schedule ?? cronHumanReadable(cronExpression) ?? cronExpression ?? task.schedule,
       cronExpression,
       cronHumanReadable: cronHumanReadable(cronExpression),

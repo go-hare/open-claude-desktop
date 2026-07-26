@@ -67,6 +67,21 @@ describe("SettingsStore AppPreferences residual", () => {
     expect(store.getPreferences().totallyUnknownPref).toBeUndefined();
   });
 
+  it("isLocalDevMcpEnabled defaults true (InA); feature false disables", () => {
+    const store = new SettingsStore(mkStoreFile());
+    // Absent enterprise + features → enabled (never Boolean(undefined)).
+    expect(store.isLocalDevMcpEnabled()).toBe(true);
+    expect(store.isDxtEnabled()).toBe(true);
+
+    expect(store.setAppFeature("isLocalDevMcpEnabled", false)).toBe(true);
+    expect(store.isLocalDevMcpEnabled()).toBe(false);
+    expect(store.setAppFeature("isLocalDevMcpEnabled", true)).toBe(true);
+    expect(store.isLocalDevMcpEnabled()).toBe(true);
+
+    expect(store.setAppFeature("isDxtEnabled", false)).toBe(true);
+    expect(store.isDxtEnabled()).toBe(false);
+  });
+
   it("deletePreference clears residual deploymentMode (jsA undefined / clear)", () => {
     const file = mkStoreFile();
     const store = new SettingsStore(file);

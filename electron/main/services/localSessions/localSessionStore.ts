@@ -243,11 +243,101 @@ function timestampValue(value: unknown): string | undefined {
           : undefined;
 }
 
-/** Prefer the event with richer assistant content when collapsing by Anthropic message.id. */
+/**
+ * Outer CLI NDJSON uuid (per-event). Official eke/zke identity for live rows —
+ * multi-emit assistants share Anthropic message.id but have DIFFERENT outer uuids.
+ * Host transcript must keep both; eke f() merges consecutive assistant items.
+ */
+function outerEventUuid(value: unknown): string | undefined {
+  const raw = asRecord(value);
+  const nestedEnvelope = asRecord(raw.raw);
+  const envelope = typeof nestedEnvelope.type === "string" || nestedEnvelope.message ? nestedEnvelope : raw;
+  if (typeof envelope.uuid === "string" && envelope.uuid.length > 0) return envelope.uuid;
+  if (typeof envelope.id === "string" && envelope.id.length > 0 && envelope.type !== "assistant") {
+    // Prefer uuid; bare id only when not risking Anthropic message.id collision.
+    return envelope.id;
+  }
+  if (typeof raw.uuid === "string" && raw.uuid.length > 0) return raw.uuid;
+  if (typeof raw.id === "string" && raw.id.length > 0) return raw.id;
+  return undefined;
+}
+
+/**
+ * Same-outer-uuid replace only (not Anthropic message.id collapse).
+ * Official never winner-take-all multi-emit by thinking/text length.
+ */
 function preferRicherTranscriptEvent(prev: unknown, next: unknown): unknown {
   const prevScore = transcriptEventRichness(prev);
   const nextScore = transcriptEventRichness(next);
   return nextScore >= prevScore ? next : prev;
+}
+
+function contentBlocksOf(raw: Record<string, unknown>): unknown[] {
+  const nested = asRecord(raw.message);
+  const content = nested.content ?? raw.content;
+  if (Array.isArray(content)) return content.slice();
+  if (typeof content === "string" && content.length > 0) return [{ type: "text", text: content }];
+  if (typeof raw.text === "string" && raw.text.length > 0) return [{ type: "text", text: raw.text }];
+  return [];
+}
+
+function contentBlockKey(block: unknown): string {
+  const record = asRecord(block);
+  const type = typeof record.type === "string" ? record.type : "";
+  if (type === "tool_use" && typeof record.id === "string") return `tool_use:${record.id}`;
+  if (type === "thinking") return `thinking:${typeof record.thinking === "string" ? record.thinking : ""}`;
+  if (type === "text") return `text:${typeof record.text === "string" ? record.text : ""}`;
+  try {
+    return `${type}:${JSON.stringify(record)}`;
+  } catch {
+    return type || "block";
+  }
+}
+
+/**
+ * Durable session.messages only: one chat-history row per Anthropic message.id
+ * may still union content (search/title). Transcript itself stays multi-emit.
+ */
+function mergeAssistantTranscriptEvents(
+  prevRaw: Record<string, unknown>,
+  nextRaw: Record<string, unknown>,
+): Record<string, unknown> {
+  const prevNested = asRecord(prevRaw.message);
+  const nextNested = asRecord(nextRaw.message);
+  const mergedBlocks: unknown[] = [];
+  const seen = new Set<string>();
+  for (const block of [...contentBlocksOf(prevRaw), ...contentBlocksOf(nextRaw)]) {
+    const key = contentBlockKey(block);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    mergedBlocks.push(block);
+  }
+  const prevText = typeof prevRaw.text === "string" ? prevRaw.text : "";
+  const nextText = typeof nextRaw.text === "string" ? nextRaw.text : "";
+  const textFromBlocks = mergedBlocks
+    .map((block) => {
+      const record = asRecord(block);
+      return record.type === "text" && typeof record.text === "string" ? record.text : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+  const text =
+    textFromBlocks
+    || (nextText.length >= prevText.length ? nextText : prevText);
+  return {
+    ...prevRaw,
+    ...nextRaw,
+    uuid: typeof prevRaw.uuid === "string" ? prevRaw.uuid : nextRaw.uuid,
+    timestamp: typeof prevRaw.timestamp === "string" ? prevRaw.timestamp : nextRaw.timestamp,
+    text,
+    message: {
+      ...prevNested,
+      ...nextNested,
+      id: typeof nextNested.id === "string" ? nextNested.id : prevNested.id,
+      role: "assistant",
+      content: mergedBlocks,
+    },
+  };
 }
 
 function transcriptEventRichness(value: unknown): number {
@@ -255,7 +345,6 @@ function transcriptEventRichness(value: unknown): number {
   const nested = asRecord(raw.message);
   const content = nested.content ?? raw.content;
   if (Array.isArray(content)) {
-    // Prefer full content-block arrays (tools + text) over plain text.
     let score = content.length * 1000;
     for (const block of content) {
       const record = asRecord(block);
@@ -375,33 +464,54 @@ export class LocalSessionStore {
     if (durableEvents.length === 0) {
       return durable.map((message) => transcriptMessage(session.id, message));
     }
-    // Collapse multi-emit assistants by Anthropic message.id (official eke expects one row).
-    // Prefer the richest envelope (longer text / array content) when identities collide.
-    const collapsed: unknown[] = [];
-    const indexByIdentity = new Map<string, number>();
+    // Official eke (index-BELzQL5P): KEEP multi-emit assistant rows that share Anthropic
+    // message.id but differ on outer uuid (thinking emit + text emit). eke ake + f() merges
+    // consecutive assistant items into one bubble. Host must NOT collapse by message.id.
+    // Only de-dupe exact outer-uuid replays (same NDJSON event written twice).
+    const out: unknown[] = [];
+    const indexByOuterUuid = new Map<string, number>();
+    const anthropicIdsPresent = new Set<string>();
     const putEvent = (event: unknown) => {
-      const identity = messageIdentity(event);
-      if (!identity) {
-        collapsed.push(event);
+      const anthropicId = (() => {
+        const raw = asRecord(event);
+        const nested = asRecord(raw.message);
+        if (raw.type === "assistant" || nested.role === "assistant") {
+          return typeof nested.id === "string" && nested.id.length > 0
+            ? nested.id
+            : (typeof raw.message_id === "string" ? raw.message_id : undefined);
+        }
+        return undefined;
+      })();
+      if (anthropicId) anthropicIdsPresent.add(anthropicId);
+      const outer = outerEventUuid(event);
+      if (!outer) {
+        out.push(event);
         return;
       }
-      const existingIndex = indexByIdentity.get(identity);
+      const existingIndex = indexByOuterUuid.get(outer);
       if (existingIndex === undefined) {
-        indexByIdentity.set(identity, collapsed.length);
-        collapsed.push(event);
+        indexByOuterUuid.set(outer, out.length);
+        out.push(event);
         return;
       }
-      const prev = collapsed[existingIndex];
-      collapsed[existingIndex] = preferRicherTranscriptEvent(prev, event);
+      // Same outer uuid only — richer replace (not multi-emit mid collapse).
+      out[existingIndex] = preferRicherTranscriptEvent(out[existingIndex], event);
     };
     for (const event of durableEvents) putEvent(event);
     // Back-fill durable-only rows (optimistic user / appendMessage-only) missing from event log.
+    // Assistants: if any multi-emit for this Anthropic id already exists, skip durable
+    // (durable is mid-collapsed chat history, not a substitute for multi-emit transcript).
     for (const message of durable) {
-      const identity = messageIdentity(message) ?? message.id;
-      if (identity && indexByIdentity.has(identity)) continue;
-      putEvent(transcriptMessage(session.id, message));
+      const event = transcriptMessage(session.id, message);
+      if (message.role === "assistant") {
+        const mid = messageIdentity(message) ?? message.id;
+        if (mid && anthropicIdsPresent.has(mid)) continue;
+      }
+      const outer = outerEventUuid(event) ?? outerEventUuid(message) ?? message.id;
+      if (outer && indexByOuterUuid.has(outer)) continue;
+      putEvent(event);
     }
-    return collapsed;
+    return out;
   }
 
   getSessionsForScheduledTask(scheduledTaskId: string): LocalSession[] {
@@ -505,30 +615,45 @@ export class LocalSessionStore {
     const timestamp = nowIso();
     const message = createMessage(role, text, timestamp, raw);
     // Official path keeps one durable assistant row per Anthropic message.id.
-    // Prefer content-block richness (tools + text) over plain text.length so a longer
-    // text-only envelope cannot wipe a tool_use / thinking-bearing row.
+    // CLI multi-emit (thinking then text, same message.id) must MERGE content
+    // blocks — never winner-take-all by length (thinking often longer than text).
     const identity = messageIdentity(message) ?? message.id;
     const existingIndex = session.messages.findIndex((item) => (messageIdentity(item) ?? item.id) === identity);
     if (existingIndex >= 0) {
       const existing = session.messages[existingIndex]!;
-      const preferIncoming = transcriptEventRichness(message) >= transcriptEventRichness(existing);
-      session.messages[existingIndex] = preferIncoming
-        ? { ...message, createdAt: existing.createdAt }
-        : {
-            ...existing,
-            // Keep richer raw envelope when incoming is poorer structure.
-            raw: existing.raw ?? message.raw,
-            text: (existing.text?.length ?? 0) >= (message.text?.length ?? 0) ? existing.text : message.text,
-          };
+      if (existing.role === "assistant" && message.role === "assistant") {
+        const existingRaw = asRecord(existing.raw ?? transcriptMessage(session.id, existing));
+        const incomingRaw = asRecord(message.raw ?? transcriptMessage(session.id, message));
+        const mergedRaw = mergeAssistantTranscriptEvents(existingRaw, incomingRaw);
+        const mergedText =
+          (typeof mergedRaw.text === "string" && mergedRaw.text.length > 0)
+            ? mergedRaw.text
+            : ((existing.text?.length ?? 0) >= (message.text?.length ?? 0) ? existing.text : message.text);
+        session.messages[existingIndex] = {
+          ...existing,
+          text: mergedText,
+          raw: mergedRaw,
+        };
+      } else {
+        const preferIncoming = transcriptEventRichness(message) >= transcriptEventRichness(existing);
+        session.messages[existingIndex] = preferIncoming
+          ? { ...message, createdAt: existing.createdAt }
+          : {
+              ...existing,
+              raw: existing.raw ?? message.raw,
+              text: (existing.text?.length ?? 0) >= (message.text?.length ?? 0) ? existing.text : message.text,
+            };
+      }
     } else {
       session.messages.push(message);
     }
     if (includeTranscript) {
       session.transcript ??= [];
       const event = raw ?? transcriptMessage(session.id, message);
-      const eventIdentity = messageIdentity(event);
+      // Outer uuid only — never Anthropic message.id (would collapse multi-emit).
+      const eventIdentity = outerEventUuid(event);
       if (eventIdentity) {
-        const transcriptIndex = session.transcript.findIndex((item) => messageIdentity(item) === eventIdentity);
+        const transcriptIndex = session.transcript.findIndex((item) => outerEventUuid(item) === eventIdentity);
         if (transcriptIndex >= 0) {
           session.transcript[transcriptIndex] = preferRicherTranscriptEvent(session.transcript[transcriptIndex], event);
         } else {

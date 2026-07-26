@@ -519,6 +519,45 @@ it("resume drops missing folders and queues official deleted-from-disk notify", 
   expect(session?.userSelectedFolders).toEqual([keep]);
 });
 
+it("start with spaceId appends residual DJe project_instructions into query systemPrompt", async () => {
+  // Residual index-BELzQL5P: if e.spaceId → DJe(space) → t1e into systemPrompt before hT.start.
+  // Official getSession does NOT expose systemPrompt; verify via query factory input.
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    resolveHostLoopMode: () => true,
+    getSpace: (id) =>
+      id === "space_pet"
+        ? {
+            name: "CDP-UI-225026",
+            description: null,
+            instructions: "宠物",
+            links: [],
+          }
+        : null,
+  });
+  const sessionId = await manager.start({
+    message: "inspect pet",
+    messageUuid: "message-pet-1",
+    spaceId: "space_pet",
+    systemPrompt: "Base cowork",
+  });
+  await vi.waitFor(() => expect(harness.factoryInputs).toHaveLength(1));
+  const systemPrompt = harness.factoryInputs[0]!.systemPrompt ?? "";
+  expect(systemPrompt).toContain("Base cowork");
+  expect(systemPrompt).toContain("<project_instructions>");
+  expect(systemPrompt).toContain("CDP-UI-225026");
+  expect(systemPrompt).toContain("宠物");
+  expect(systemPrompt).toContain(
+    "Follow these instructions when working in this project.",
+  );
+  // Official getSession omits systemPrompt — renderer session still carries spaceId only.
+  expect(manager.getSession(sessionId)?.spaceId).toBe("space_pet");
+  expect(
+    (manager.getSession(sessionId) as { systemPrompt?: string } | null)
+      ?.systemPrompt,
+  ).toBeUndefined();
+});
+
 it("updateSession spaceId queues official Space enter/leave notify", async () => {
   const harness = createManagerHarness();
   const manager = createTestManager(harness, {

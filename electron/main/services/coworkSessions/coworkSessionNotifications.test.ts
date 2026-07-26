@@ -6,6 +6,8 @@ import {
   appendCoworkWidgetContextHint,
   applyCoworkSessionSpaceIdUpdate,
   applyCoworkSessionTitleUpdate,
+  appendCoworkSystemPromptParts,
+  buildCoworkProjectSystemPromptAppend,
   buildCoworkSpaceContextReminder,
   clearCoworkSessionEphemeralsOnLeavingRunning,
   consumeCoworkPendingSystemReminder,
@@ -511,6 +513,37 @@ it("builds official space context system-reminder (buildSpaceContextReminder)", 
   ).toBe(
     '<system-reminder>This session has been organized into the "Work x" project. Project description: desc y Project instructions: do z Project links: Docs a (https://ex.ample/b), https://only.url</system-reminder>',
   );
+});
+
+it("builds residual DJe project_instructions systemPrompt append", () => {
+  expect(buildCoworkProjectSystemPromptAppend(null)).toBeUndefined();
+  expect(buildCoworkProjectSystemPromptAppend({ name: "Work" })).toBeUndefined();
+  expect(
+    buildCoworkProjectSystemPromptAppend({
+      name: 'Pet "x"',
+      instructions: "宠物",
+    }),
+  ).toBe(
+    `<project_instructions>
+The user has configured the following instructions for this project ("Pet &quot;x&quot;"):
+
+宠物
+
+Follow these instructions when working in this project.
+</project_instructions>`,
+  );
+  expect(
+    appendCoworkSystemPromptParts("base", buildCoworkProjectSystemPromptAppend({
+      name: "Work",
+      instructions: "do it",
+    })),
+  ).toContain("base");
+  expect(
+    appendCoworkSystemPromptParts("base", buildCoworkProjectSystemPromptAppend({
+      name: "Work",
+      instructions: "do it",
+    })),
+  ).toContain("<project_instructions>");
 });
 
 it("formats official worktree deleted/recycled pendingSystemReminder (U+2014)", () => {

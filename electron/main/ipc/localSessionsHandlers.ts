@@ -1,6 +1,7 @@
 import { app, dialog, shell } from "electron";
 import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import https from "node:https";
 import path from "node:path";
@@ -16,6 +17,7 @@ import {
   setLocalSkillEnabled,
 } from "../services/localSessions/localAgentAssets";
 import type { LocalSessionStore } from "../services/localSessions/localSessionStore";
+import { parseEffortFlagSettings } from "../services/localSessions/claudeCliRunner";
 import { getSupportedCommands } from "../services/localSessions/supportedCommands";
 import { getTranscriptFeedback, submitTranscriptFeedback } from "../services/localSessions/transcriptFeedbackStore";
 import { getLocalSessionEnvironment, saveLocalSessionEnvironment } from "../services/localSessions/localSessionEnvironmentStore";
@@ -34,7 +36,7 @@ const TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
 // Code LocalSessions only. Cowork LocalAgentModeSessions is registered solely via
 // coworkSessionsHandlers + CoworkSessionManager (see registerDesktopIpc).
 const LOCAL_SESSIONS_METHODS = [
-  "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getDetectedProjects","getDiffFileContent","getEffort","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getMergeBase","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrReviewComments","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
+  "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkPty","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getDetectedProjects","getDiffFileContent","getEffort","getEffortCatalogDefaults","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getMergeBase","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrReviewComments","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
 ] as const;
 
 function asString(value: unknown): string | null {
@@ -471,6 +473,33 @@ function cwdFromSession(store: LocalSessionStore, sessionIdOrCwd: unknown): stri
   return store.getAll(true).find((item) => item.cwd)?.cwd ?? process.cwd();
 }
 
+/**
+ * Host-loop shell / CLI spawn cwd must exist on the host filesystem.
+ * Session.cwd may be a dual-exec guest path like `/sessions/<id>/…` (not present on macOS host);
+ * node-pty then exits immediately → UI "Shell exited." (Views Terminal).
+ * Align with claudeCliRunner.resolveCwd: only keep existing dirs; else process.cwd().
+ */
+function shellPtyCwdFromSession(store: LocalSessionStore, sessionId: string): string {
+  const separator = sessionId.indexOf("::");
+  const baseId = separator === -1 ? sessionId : sessionId.slice(0, separator);
+  const session = store.getSession(baseId);
+  const candidates = [
+    session?.cwd,
+    ...(Array.isArray(session?.folders) ? session.folders : []),
+    ...(Array.isArray(session?.userSelectedFolders) ? session.userSelectedFolders : []),
+  ];
+  for (const candidate of candidates) {
+    const raw = asString(candidate);
+    if (!raw) continue;
+    try {
+      if (fsSync.existsSync(raw) && fsSync.statSync(raw).isDirectory()) return raw;
+    } catch {
+      // try next candidate
+    }
+  }
+  return process.cwd();
+}
+
 /** Official c119 vN / writeSessionFile use content hash for Edit enablement + conflict. */
 function contentHash(contents: string) {
   return crypto.createHash("sha256").update(contents, "utf8").digest("hex");
@@ -841,7 +870,7 @@ function createSessionHandlers(
   context: IpcHandlerContext,
   allMethods: readonly string[],
 ): InterfaceHandlers {
-  const ptys = new Map<string, { terminal: { write: (data: string) => void; kill: (signal?: string) => void; resize?: (cols: number, rows: number) => void }; buffer: string }>();
+  const ptys = new Map<string, { terminal: { pid: number; write: (data: string) => void; kill: (signal?: string) => void; resize?: (cols: number, rows: number) => void }; buffer: string }>();
   const handlers: InterfaceHandlers = {};
   const events = originalEventSurface(context);
 
@@ -980,7 +1009,9 @@ function createSessionHandlers(
       return { ok: true, buffered: existing.buffer };
     }
 
-    const cwd = cwdFromSession(store, shellPtyBaseSessionId(sessionId)) ?? process.cwd();
+    // Must be an existing host directory. Guest dual-exec paths (/sessions/…) are not
+    // host-loop PTY cwd — node-pty exits with code 1 → "Shell exited."
+    const cwd = shellPtyCwdFromSession(store, sessionId);
     const shell = defaultShell();
     const nodePty = loadOriginalNodePty();
     if (!nodePty) {
@@ -1000,10 +1031,24 @@ function createSessionHandlers(
         dispatchBridgeSessionEvent({ type: "shell_pty_close", sessionId, code: exitCode, signal });
         ptys.delete(sessionId);
       });
-      return { ok: true };
+      return { ok: true, buffered: "", cwd };
     } catch (error) {
       console.warn("[local-sessions] node-pty spawn failed", error);
       return { ok: false, error: error instanceof Error ? error.message : "Failed to start shell" };
+    }
+  };
+
+  const checkPtyAlive = (sessionId: string): { alive: boolean; pid?: number } => {
+    const entry = ptys.get(sessionId);
+    if (!entry) return { alive: false };
+    try {
+      // Signal 0 checks process existence without killing it
+      process.kill(entry.terminal.pid, 0);
+      return { alive: true, pid: entry.terminal.pid };
+    } catch {
+      // Process no longer exists — clean up stale entry
+      ptys.delete(sessionId);
+      return { alive: false };
     }
   };
 
@@ -1125,6 +1170,7 @@ function createSessionHandlers(
     getTrustedFolders: async () => store.getTrustedFolders(),
     isFolderTrusted: async (_event, folder) => Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)),
     checkTrust: async (_event, folder) => ({ trusted: Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)), sources: [] }),
+    checkPty: async (_event, sessionId) => checkPtyAlive(asString(sessionId) ?? ""),
     checkRemoteTrust: async () => ({ trusted: false, remote: true, sources: [] }),
     saveTrust: async (_event, folder) => {
       const target = asString(folder);
@@ -1154,12 +1200,78 @@ function createSessionHandlers(
     },
     getCodeStats: async (_event, cwdOrSession) => (cwdOrSession ? getWorkspaceCodeStats(cwdFromSession(store, cwdOrSession)) : getSessionUsageCodeStats(store)),
     getDefaultEffort: async () => "medium",
-    getEffort: async (_event, id) => (asString(id) ? store.getSession(asString(id)!)?.effort ?? "medium" : "medium"),
+    /**
+     * Official get_settings → applied for the NEW-session draft (no session id yet):
+     * bare CLI probe reports the per-model catalog ladder (effortLevels /
+     * ultracodeOfferable) so the composer effort slider matches the selected model.
+     */
+    getEffortCatalogDefaults: async (_event, model) => {
+      try {
+        const applied = await sessionRunner.probeCatalogEffortDefaults(asString(model) ?? undefined);
+        if (applied) return applied;
+      } catch {
+        // ignore — fall through
+      }
+      return { effort: null, effortLevels: null, ultracodeOfferable: null };
+    },
+    getEffort: async (_event, id) => {
+      const sessionId = asString(id);
+      if (!sessionId) return { effort: "medium", effortLevels: null, ultracodeOfferable: null };
+      // Official get_settings → applied is the runtime truth (effort + effortLevels +
+      // ultracodeOfferable for the slider ladder). Host store is the fallback when the
+      // CLI cannot report (e.g. no active turn and probe times out).
+      try {
+        const applied = await sessionRunner.getAppliedEffort(sessionId);
+        if (applied?.effort) {
+          const current = store.getSession(sessionId);
+          if (current && current.effort !== applied.effort) {
+            const session = store.update(sessionId, { effort: applied.effort });
+            if (session) dispatchSessionEvent("session_updated", sessionId, session);
+          }
+          return {
+            effort: applied.effort,
+            effortLevels: applied.effortLevels,
+            ultracodeOfferable: applied.ultracodeOfferable,
+          };
+        }
+      } catch {
+        // ignore — fall through to host store
+      }
+      return {
+        effort: store.getSession(sessionId)?.effort ?? "medium",
+        effortLevels: null,
+        ultracodeOfferable: null,
+      };
+    },
     setEffort: async (_event, id, effort) => {
       const sessionId = asString(id);
-      const session = sessionId ? store.update(sessionId, { effort: String(effort ?? "medium") }) : null;
+      if (!sessionId) return null;
+      const current = store.getSession(sessionId);
+      const parsed = parseEffortFlagSettings({ effortLevel: effort ?? null }, current?.effort);
+      if (!parsed) return toBridgeSession(current);
+      const session = parsed.clear
+        ? store.update(sessionId, { effort: undefined })
+        : store.update(sessionId, { effort: String(parsed.effort) });
+      if (!session) return null;
+      // Active turn: official apply_flag_settings → CLI flag-layer merge (N9 launch pin
+      // released by CLI itself). Best-effort — store update above is authoritative for
+      // UI + next spawn. Map to official control payload semantics:
+      //   ultracode  → { ultracode: true }
+      //   ladder     → { ultracode: false, effortLevel: <level> } (always pair so CLI
+      //                  toggling off ultracode from the same call also clears the flag)
+      //   clear      → { effortLevel: null }
+      const livePayload: Record<string, unknown> = parsed.clear
+        ? { effortLevel: null }
+        : parsed.effort === "ultracode"
+          ? { ultracode: true }
+          : { ultracode: false, effortLevel: parsed.effort };
+      try {
+        await sessionRunner.applyFlagSettings(sessionId, livePayload);
+      } catch {
+        // ignore — host store still updated
+      }
       // Official config changes fan out on session_updated so composer triggers re-sync without reload.
-      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      if (session) dispatchSessionEvent("session_updated", sessionId, session);
       return toBridgeSession(session);
     },
     getDefaultPermissionMode: async () => "default",

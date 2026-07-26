@@ -311,7 +311,7 @@ export function coworkQueuedMountNextResumeMessage(
 }
 
 /**
- * Official ws.getSpace shape used by buildSpaceContextReminder (name required;
+ * Official ws.getSpace shape used by buildSpaceContextReminder / DJe (name required;
  * description / instructions / links optional).
  */
 export type CoworkSpaceContext = {
@@ -321,12 +321,87 @@ export type CoworkSpaceContext = {
   name: string;
 };
 
+/** Residual OJe — escape for attribute/text inside project_* blocks. */
+function escapeCoworkProjectPromptText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Residual RJe — escape URL text inside project_links. */
+function escapeCoworkProjectPromptUrl(value: string): string {
+  return value.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Residual t1e(base, append): join system prompt parts with blank line when both set.
+ */
+export function appendCoworkSystemPromptParts(
+  base: string | null | undefined,
+  append: string | null | undefined,
+): string | undefined {
+  const left = base?.trim() ? base : "";
+  const right = append?.trim() ? append : "";
+  if (!left) return right || undefined;
+  if (!right) return left || undefined;
+  return `${left}\n\n${right}`;
+}
+
+/**
+ * Residual DJe(space) — project_instructions + project_links for LocalAgentModeSessions
+ * start systemPrompt when e.spaceId is set (index-BELzQL5P).
+ * Empty when space has neither instructions nor links.
+ */
+export function buildCoworkProjectSystemPromptAppend(
+  space: CoworkSpaceContext | null | undefined,
+): string | undefined {
+  if (!space) return undefined;
+  const parts: string[] = [];
+  if (space.instructions?.trim()) {
+    parts.push(
+      `<project_instructions>\nThe user has configured the following instructions for this project ("${escapeCoworkProjectPromptText(space.name)}"):\n\n${escapeCoworkProjectPromptText(space.instructions)}\n\nFollow these instructions when working in this project.\n</project_instructions>`,
+    );
+  }
+  const links = space.links ?? [];
+  if (links.length > 0) {
+    const rendered: string[] = [];
+    let used = 0;
+    let omitted = 0;
+    for (const link of links) {
+      if (!link?.url) continue;
+      const url = escapeCoworkProjectPromptUrl(link.url);
+      const item = link.title
+        ? `<link url="${url}" title="${escapeCoworkProjectPromptText(link.title)}" />`
+        : `<link url="${url}" />`;
+      if (used + item.length > 2000) {
+        omitted = links.length - rendered.length;
+        break;
+      }
+      rendered.push(item);
+      used += item.length + 1;
+    }
+    if (rendered.length > 0) {
+      const omitNote =
+        omitted > 0
+          ? `\n(${omitted} additional link${omitted === 1 ? "" : "s"} omitted — the user can reference them directly if needed.)`
+          : "";
+      parts.push(
+        `<project_links>\nThe user has attached the following links to this project as reference context.\nIf any of these are relevant to the task, use the connector that matches each link's source to read them.\n\n${rendered.join("\n")}${omitNote}\n</project_links>`,
+      );
+    }
+  }
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
 /**
  * Official buildSpaceContextReminder(spaceId) pure body (after ws.peek().getSpace):
  *   if !space return undefined
  *   parts: organized-into project; optional description/instructions/links
  *   wrap `<system-reminder>${parts.join(" ")}</system-reminder>`
  * Product injects space object — no invented Spaces store.
+ * Used on space *change* notify; start path uses DJe/buildCoworkProjectSystemPromptAppend.
  */
 export function buildCoworkSpaceContextReminder(
   space: CoworkSpaceContext | null | undefined,

@@ -15,23 +15,29 @@ export type LaunchServerRecord = {
 };
 export type LaunchLogLine = { line: string; stream: "stdout" | "stderr"; timestamp: string };
 
-type RunningServer = LaunchServerRecord & { child?: ChildProcessWithoutNullStreams; logs: LaunchLogLine[]; command?: string; args?: string[] };
+/**
+ * Official fm / parseLaunchJson residual (app.asar):
+ * configurations[] entry → buildCommand:
+ *   runtimeExecutable + runtimeArgs + optional program/args
+ * Port from configuration.port when present.
+ */
+export type LaunchJsonConfiguration = {
+  name: string;
+  port?: number;
+  command: string;
+  args: string[];
+  cwd?: string;
+};
+
+type RunningServer = LaunchServerRecord & {
+  child?: ChildProcessWithoutNullStreams;
+  logs: LaunchLogLine[];
+  command?: string;
+  args?: string[];
+};
 
 function id(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
-}
-
-async function readPackageJson(cwd: string): Promise<Record<string, unknown> | null> {
-  try {
-    return JSON.parse(await fs.readFile(path.join(cwd, "package.json"), "utf8")) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-function scriptsFromPackageJson(pkg: Record<string, unknown> | null): Record<string, string> {
-  const scripts = pkg?.scripts;
-  return typeof scripts === "object" && scripts !== null ? scripts as Record<string, string> : {};
 }
 
 function inferPort(command: string, fallback: number): number {
@@ -54,12 +60,6 @@ function appendLog(server: RunningServer, stream: "stdout" | "stderr", chunk: Bu
     server.logs.push({ line, stream, timestamp });
   }
   if (server.logs.length > 1000) server.logs.splice(0, server.logs.length - 1000);
-}
-
-function npmCommand(scriptName: string): { command: string; args: string[] } {
-  return process.platform === "win32"
-    ? { command: "npm.cmd", args: ["run", scriptName] }
-    : { command: "/usr/bin/env", args: ["npm", "run", scriptName] };
 }
 
 async function waitForPort(port: number, timeoutMs: number): Promise<boolean> {
@@ -85,22 +85,114 @@ function probePort(port: number): Promise<boolean> {
   });
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+/**
+ * Official buildCommand residual:
+ * runtimeExecutable + runtimeArgs (+ program/args) → { command, args }
+ */
+export function parseLaunchConfiguration(
+  raw: Record<string, unknown>,
+  workingDirectory: string,
+  index: number,
+): LaunchJsonConfiguration | null {
+  const name = typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : `server-${index + 1}`;
+  const runtimeExecutable = typeof raw.runtimeExecutable === "string" ? raw.runtimeExecutable : undefined;
+  const runtimeArgs = asStringArray(raw.runtimeArgs);
+  const program = typeof raw.program === "string" ? raw.program : undefined;
+  const programArgs = asStringArray(raw.args);
+
+  let command: string | undefined;
+  let args: string[] = [];
+  if (runtimeExecutable) {
+    command = runtimeExecutable;
+    args = [...runtimeArgs];
+    if (program) args.push(program);
+    args.push(...programArgs);
+  } else if (program) {
+    command = program;
+    args = [...programArgs];
+  } else {
+    return null;
+  }
+
+  let entryCwd = workingDirectory;
+  if (typeof raw.cwd === "string" && raw.cwd.trim()) {
+    entryCwd = path.isAbsolute(raw.cwd) ? raw.cwd : path.join(workingDirectory, raw.cwd);
+  }
+
+  const portRaw = raw.port;
+  const port =
+    typeof portRaw === "number" && Number.isFinite(portRaw)
+      ? portRaw
+      : typeof portRaw === "string" && /^\d+$/.test(portRaw)
+        ? Number(portRaw)
+        : inferPort([command, ...args].join(" "), 3000 + index);
+
+  return { name, port, command, args, cwd: entryCwd };
+}
+
+/** Official fromClaudeConfig / parseLaunchJson residual. */
+export async function readLaunchJsonConfigurations(
+  cwd: string,
+): Promise<LaunchJsonConfiguration[]> {
+  const filePath = path.join(cwd, ".claude", "launch.json");
+  let rawText: string;
+  try {
+    rawText = await fs.readFile(filePath, "utf8");
+  } catch {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const configurations = (parsed as { configurations?: unknown }).configurations;
+  if (!Array.isArray(configurations)) return [];
+  const out: LaunchJsonConfiguration[] = [];
+  configurations.forEach((entry, index) => {
+    if (!entry || typeof entry !== "object") return;
+    // Official skips non-runnable types (e.g. framebuffer) via parseConfiguration null.
+    const type = (entry as { type?: unknown }).type;
+    if (typeof type === "string" && type !== "node" && type !== "chrome" && type !== "server") {
+      // Still allow plain entries without type (official runtimeExecutable configs).
+      if (type === "framebuffer" || type === "vnc") return;
+    }
+    const cfg = parseLaunchConfiguration(entry as Record<string, unknown>, cwd, index);
+    if (cfg) out.push(cfg);
+  });
+  return out;
+}
+
 export class LocalLaunchManager {
   private readonly servers = new Map<string, RunningServer>();
 
+  /**
+   * Official Launch.getConfiguredServices residual:
+   *   new fm(cwd).getConfig() → servers from .claude/launch.json only.
+   * Empty / missing file → [] (renderer shows no-config + Set up). Never invent package.json scripts.
+   */
   async getConfiguredServices(cwd: string): Promise<Array<{ name: string; port?: number }>> {
-    const scripts = scriptsFromPackageJson(await readPackageJson(cwd));
-    return Object.entries(scripts)
-      .filter(([name]) => ["dev", "start", "preview", "serve"].includes(name) || name.startsWith("dev:"))
-      .map(([name, command], index) => ({ name, port: inferPort(String(command), 3000 + index) }));
+    const configs = await readLaunchJsonConfigurations(cwd);
+    return configs.map((cfg) => ({ name: cfg.name, port: cfg.port }));
   }
 
   getActiveServers(): LaunchServerRecord[] {
-    return Array.from(this.servers.values()).map(({ child: _child, logs: _logs, command: _command, args: _args, ...server }) => server);
+    return Array.from(this.servers.values()).map(
+      ({ child: _child, logs: _logs, command: _command, args: _args, ...server }) => server,
+    );
   }
 
   getServer(serverId?: string): LaunchServerRecord | null {
-    const server = serverId ? this.servers.get(serverId) : Array.from(this.servers.values()).find((item) => item.status !== "stopped");
+    const server = serverId
+      ? this.servers.get(serverId)
+      : Array.from(this.servers.values()).find((item) => item.status !== "stopped");
     if (!server) return null;
     const { child: _child, logs: _logs, command: _command, args: _args, ...record } = server;
     return record;
@@ -112,29 +204,63 @@ export class LocalLaunchManager {
   }
 
   async startFromConfig(cwd: string, name?: string): Promise<{ serverId?: string; error?: string }> {
-    const services = await this.getConfiguredServices(cwd);
-    const selected = services.find((service) => service.name === name) ?? services[0];
-    if (!selected) return { error: "No runnable package.json script found" };
-    return this.startPackageScript(cwd, selected.name, selected.port ?? 3000);
+    const configs = await readLaunchJsonConfigurations(cwd);
+    const selected = configs.find((cfg) => cfg.name === name) ?? configs[0];
+    if (!selected) {
+      // Official startFromConfig with no config → {} (deny); product returns empty-ish error for start-failed path honesty.
+      return {};
+    }
+    return this.startCommand(
+      selected.cwd ?? cwd,
+      selected.name,
+      selected.command,
+      selected.args,
+      selected.port ?? 3000,
+    );
   }
 
-  async startPackageScript(cwd: string, scriptName: string, port: number): Promise<{ serverId?: string; error?: string }> {
+  async startCommand(
+    cwd: string,
+    name: string,
+    command: string,
+    args: string[],
+    port: number,
+  ): Promise<{ serverId?: string; error?: string }> {
     try {
       const serverId = id("server");
-      const command = npmCommand(scriptName);
-      const record: RunningServer = { serverId, name: scriptName, port, status: "starting", startedAt: new Date().toISOString(), cwd, logs: [], command: command.command, args: command.args };
-      const child = spawn(record.command!, record.args!, { cwd, env: { ...process.env, PORT: String(port) } });
+      const record: RunningServer = {
+        serverId,
+        name,
+        port,
+        status: "starting",
+        startedAt: new Date().toISOString(),
+        cwd,
+        logs: [],
+        command,
+        args,
+      };
+      const child = spawn(command, args, {
+        cwd,
+        env: { ...process.env, PORT: String(port) },
+        shell: false,
+      });
       record.child = child;
       child.stdout.on("data", (chunk: Buffer) => appendLog(record, "stdout", chunk));
       child.stderr.on("data", (chunk: Buffer) => appendLog(record, "stderr", chunk));
       child.on("exit", (code) => {
         record.status = code === 0 ? "stopped" : "error";
-        record.logs.push({ line: `process exited with code ${code ?? "null"}`, stream: "stderr", timestamp: new Date().toISOString() });
+        record.logs.push({
+          line: `process exited with code ${code ?? "null"}`,
+          stream: "stderr",
+          timestamp: new Date().toISOString(),
+        });
       });
       this.servers.set(serverId, record);
-      waitForPort(port, 5000).then((ok) => {
-        if (this.servers.get(serverId) === record && ok) record.status = "running";
-      }).catch(() => undefined);
+      waitForPort(port, 5000)
+        .then((ok) => {
+          if (this.servers.get(serverId) === record && ok) record.status = "running";
+        })
+        .catch(() => undefined);
       return { serverId };
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
@@ -151,9 +277,9 @@ export class LocalLaunchManager {
 
   async restartServer(serverId: string): Promise<{ serverId?: string; error?: string }> {
     const server = this.servers.get(serverId);
-    if (!server) return { error: "server not found" };
+    if (!server?.command) return { error: "server not found" };
     await this.stopServer(serverId);
-    return this.startPackageScript(server.cwd, server.name, server.port);
+    return this.startCommand(server.cwd, server.name, server.command, server.args ?? [], server.port);
   }
 
   getLogs(serverId: string): LaunchLogLine[] {

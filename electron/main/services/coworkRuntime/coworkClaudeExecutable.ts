@@ -5,19 +5,41 @@ function binaryName(): string {
   return process.platform === "win32" ? "claude.exe" : "claude";
 }
 
-export function coworkClaudeExecutableCandidates(): string[] {
+/** Same key layout as scripts/copy-claude-code-binary.mjs platforms/<key>/. */
+function hostPlatformKey(): string {
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  if (process.platform === "darwin") return `darwin-${arch}`;
+  if (process.platform === "win32") return `win32-${arch}`;
+  if (process.platform === "linux") return `linux-${arch}`;
+  return `${process.platform}-${arch}`;
+}
+
+/**
+ * Prefer platforms/<host>/claude when present: npm package ships binary + vendor
+ * together. Top-level claude is a convenience copy; without sibling vendor,
+ * Glob/Grep hit ENOENT on /$bunfs/root/vendor/ripgrep/... (CLI ripgrep.ts).
+ */
+function claudeBinCandidatesUnder(root: string): string[] {
   const name = binaryName();
-  const candidates = [
-    process.env.CLAUDE_CODE_EXECUTABLE,
-    process.env.CLAUDE_DESKTOP_RESOURCES_ROOT
-      ? path.join(process.env.CLAUDE_DESKTOP_RESOURCES_ROOT, "claude-code-bin", name)
-      : undefined,
-    process.resourcesPath
-      ? path.join(process.resourcesPath, "claude-code-bin", name)
-      : undefined,
-    path.resolve(process.cwd(), "resources", "claude-code-bin", name),
+  return [
+    path.join(root, "platforms", hostPlatformKey(), name),
+    path.join(root, name),
   ];
-  return [...new Set(candidates.filter((item): item is string => Boolean(item)))];
+}
+
+export function coworkClaudeExecutableCandidates(): string[] {
+  const roots = [
+    process.env.CLAUDE_DESKTOP_RESOURCES_ROOT
+      ? path.join(process.env.CLAUDE_DESKTOP_RESOURCES_ROOT, "claude-code-bin")
+      : undefined,
+    process.resourcesPath ? path.join(process.resourcesPath, "claude-code-bin") : undefined,
+    path.resolve(process.cwd(), "resources", "claude-code-bin"),
+  ].filter((item): item is string => Boolean(item));
+
+  const candidates: string[] = [];
+  if (process.env.CLAUDE_CODE_EXECUTABLE) candidates.push(process.env.CLAUDE_CODE_EXECUTABLE);
+  for (const root of roots) candidates.push(...claudeBinCandidatesUnder(root));
+  return [...new Set(candidates)];
 }
 
 export function resolveCoworkClaudeExecutable(): string {
@@ -42,4 +64,3 @@ export function resolveCoworkDisclaimerExecutable(): string | undefined {
     (candidate): candidate is string => Boolean(candidate && fs.existsSync(candidate)),
   );
 }
-

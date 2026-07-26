@@ -1,2 +1,10 @@
 resources/claude-code-bin/claude filter=lfs diff=lfs merge=lfs -text
 resources/claude-code-bin/claude.exe filter=lfs diff=lfs merge=lfs -text
+resources/claude-code-bin/platforms/**/claude filter=lfs diff=lfs merge=lfs -text
+resources/claude-code-bin/platforms/**/claude.exe filter=lfs diff=lfs merge=lfs -text
+resources/claude-code-bin/platforms/**/rg filter=lfs diff=lfs merge=lfs -text
+resources/claude-code-bin/platforms/**/rg.exe filter=lfs diff=lfs merge=lfs -text
+resources/claude-code-bin/vendor/**/rg filter=lfs diff=lfs merge=lfs -text
+resources/claude-code-bin/vendor/**/rg.exe filter=lfs diff=lfs merge=lfs -text
+resources/claude-code-bin/platforms/**/clipboard-image/** filter=lfs diff=lfs merge=lfs -text
+resources/claude-code-bin/vendor/**/clipboard-image/** filter=lfs diff=lfs merge=lfs -text

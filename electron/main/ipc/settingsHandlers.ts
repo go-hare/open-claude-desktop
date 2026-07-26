@@ -627,7 +627,9 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       getGlobalShortcut: async () => settings.getGlobalShortcut(),
     },
     MCP: {
-      isLocalDevMcpEnabled: async () => Boolean(settings.getAppConfig().isLocalDevMcpEnabled),
+      // Official InA residual — absent enterprise/features key defaults enabled.
+      // Do not Boolean(undefined) (that forced the "IT admin disabled" banner).
+      isLocalDevMcpEnabled: async () => settings.isLocalDevMcpEnabled(),
       setMcpServerConfigs: async (_event, config) => settings.setMcpServersConfig(asObject(config)),
       getMcpServersConfig: async () => settings.getMcpServersConfig(),
       getMcpServersConfigWithStatus: async () => {

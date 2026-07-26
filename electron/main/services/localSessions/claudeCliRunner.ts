@@ -33,7 +33,13 @@ type PendingControlResponse = {
 
 type ToolPermissionDecision = "always" | "deny" | "once";
 const CONTROL_REQUEST_TIMEOUT_MS = 15_000;
+/** CLI residual `MODEL_CONTEXT_WINDOW_DEFAULT` (claude-code-bin context.ts). */
+const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000;
+/** Official / CLI model tags like `claude-sonnet-4-5[1m]` or `[200k]`. */
 const contextWindowPattern = /\[(\d+(?:\.\d+)?)\s*([km])\]/i;
+const FREE_SPACE_CATEGORY = "Free space";
+const AUTOCOMPACT_CATEGORY = "Autocompact buffer";
+const COMPACT_BUFFER_CATEGORY = "Compact buffer";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -100,14 +106,37 @@ function claudeBinaryName(): string {
   return process.platform === "win32" ? "claude.exe" : "claude";
 }
 
-export function bundledClaudeExecutableCandidates(): string[] {
+/** Same key layout as scripts/copy-claude-code-binary.mjs platforms/<key>/. */
+function hostPlatformKey(): string {
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  if (process.platform === "darwin") return `darwin-${arch}`;
+  if (process.platform === "win32") return `win32-${arch}`;
+  if (process.platform === "linux") return `linux-${arch}`;
+  return `${process.platform}-${arch}`;
+}
+
+/**
+ * Prefer platforms/<host>/claude (binary + vendor co-located). Top-level copy
+ * is secondary — without sibling vendor Glob/Grep ENOENT on bunfs vendor path.
+ */
+function claudeBinCandidatesUnder(root: string): string[] {
   const binaryName = claudeBinaryName();
-  const candidates = [
-    process.env.CLAUDE_DESKTOP_RESOURCES_ROOT ? path.join(process.env.CLAUDE_DESKTOP_RESOURCES_ROOT, "claude-code-bin", binaryName) : undefined,
-    process.resourcesPath ? path.join(process.resourcesPath, "claude-code-bin", binaryName) : undefined,
-    path.resolve(process.cwd(), "resources", "claude-code-bin", binaryName),
+  return [
+    path.join(root, "platforms", hostPlatformKey(), binaryName),
+    path.join(root, binaryName),
   ];
-  return [...new Set(candidates.filter((candidate): candidate is string => Boolean(candidate)))];
+}
+
+export function bundledClaudeExecutableCandidates(): string[] {
+  const roots = [
+    process.env.CLAUDE_DESKTOP_RESOURCES_ROOT
+      ? path.join(process.env.CLAUDE_DESKTOP_RESOURCES_ROOT, "claude-code-bin")
+      : undefined,
+    process.resourcesPath ? path.join(process.resourcesPath, "claude-code-bin") : undefined,
+    path.resolve(process.cwd(), "resources", "claude-code-bin"),
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  const candidates = roots.flatMap((root) => claudeBinCandidatesUnder(root));
+  return [...new Set(candidates)];
 }
 
 export function bundledClaudeExecutable(): string | undefined {
@@ -174,9 +203,44 @@ function normalizePermissionMode(value: string | undefined): string | undefined 
   return mapped && ["acceptEdits", "bypassPermissions", "default", "dontAsk", "plan", "auto"].includes(mapped) ? mapped : undefined;
 }
 
+/**
+ * Official CLI 2.7.14 --effort: low|medium|high|xhigh|max|ultracode.
+ * Do not collapse xhigh→max or drop ultracode (host fidelity for Effort slider).
+ */
 function normalizeEffort(value: string | undefined): string | undefined {
-  const mapped = value === "xhigh" ? "max" : value;
-  return mapped && ["low", "medium", "high", "max"].includes(mapped) ? mapped : undefined;
+  return value && ["low", "medium", "high", "xhigh", "max", "ultracode"].includes(value) ? value : undefined;
+}
+
+/** Ladder levels only — "ultracode" is a session flag + top-effort alias, not a 6th level. */
+const EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * Official apply_flag_settings mapping:
+ *   - effortLevel "ultracode"  → ultracode:true, wire = catalog top (host: max, shell xhigh)
+ *   - ultracode:true (+level?) → same top-effort wire
+ *   - ultracode:false + level  → that level, flag cleared
+ *   - effortLevel null         → clear session effort (host default takes over)
+ * Host store keeps a single `effort` column; ultracode == wire "ultracode".
+ */
+export function parseEffortFlagSettings(
+  settings: Record<string, unknown>,
+  currentEffort: string | undefined,
+): { effort?: string; clear?: boolean } | null {
+  const hasKey = (key: string) => Object.prototype.hasOwnProperty.call(settings, key);
+  const ultracodeValue = booleanValue(asRecord(settings).ultracode as boolean | undefined);
+  const rawLevel = settings.effortLevel;
+  const rawStr = typeof rawLevel === "string" ? rawLevel.trim().toLowerCase() : "";
+  if (rawLevel === null && !hasKey("ultracode")) return { clear: true };
+  if (rawStr === "ultracode" || ultracodeValue === true) return { effort: "ultracode" };
+  if (rawStr && (EFFORT_LADDER as readonly string[]).includes(rawStr)) return { effort: rawStr };
+  if (ultracodeValue === false) {
+    if (currentEffort === "ultracode") return { effort: rawStr && (EFFORT_LADDER as readonly string[]).includes(rawStr) ? rawStr : "medium" };
+    if (rawStr) return { effort: rawStr };
+    return null;
+  }
+  if (rawLevel === null) return { clear: true };
+  if (rawStr) return null; // unknown level → ignore (CLI would soft-warn)
+  return null;
 }
 
 /**
@@ -339,6 +403,22 @@ function controlResponsePayload(event: Record<string, unknown> | null, requestId
   return stringValue(response.subtype) === "success" ? response.response ?? null : null;
 }
 
+/** Official get_settings.applied → normalized effort bag (effort / effortLevels / ultracodeOfferable). */
+function parseAppliedEffortBag(response: unknown): {
+  effort: string | null;
+  effortLevels: string[] | null;
+  ultracodeOfferable: boolean | null;
+} {
+  const applied = asRecord(asRecord(response).applied);
+  const effortRaw = stringValue(applied.effort);
+  const effort = normalizeEffort(effortRaw) ? effortRaw! : null;
+  const effortLevels = Array.isArray(applied.effortLevels)
+    ? (applied.effortLevels as unknown[]).filter((v): v is string => typeof v === "string" && normalizeEffort(v) !== undefined)
+    : null;
+  const ultracodeOfferable = typeof applied.ultracodeOfferable === "boolean" ? applied.ultracodeOfferable : null;
+  return { effort, effortLevels: effortLevels && effortLevels.length > 0 ? effortLevels : null, ultracodeOfferable };
+}
+
 function usageFromEvent(event: unknown) {
   const raw = asRecord(event);
   const message = asRecord(raw.message);
@@ -360,6 +440,119 @@ function contextWindowTokensFromText(value: unknown): number | null {
   const amount = Number.parseFloat(match[1]);
   const multiplier = match[2]?.toLowerCase() === "m" ? 1_000_000 : 1_000;
   return Number.isFinite(amount) ? Math.round(amount * multiplier) : null;
+}
+
+/**
+ * CLI residual getContextWindowForModel: `[1m]`/`[Nk]` tags first, else default 200k.
+ * 3p models like `deepseek-v4-pro` have no tag — still need a max so Ku can paint Free space.
+ */
+function resolveContextWindowTokens(...values: unknown[]): number | null {
+  for (const value of values) {
+    const tagged = contextWindowTokensFromText(value);
+    if (tagged && tagged > 0) return tagged;
+  }
+  for (const value of values) {
+    if (stringValue(value)) return MODEL_CONTEXT_WINDOW_DEFAULT;
+  }
+  return null;
+}
+
+function positiveNumber(value: unknown): number | null {
+  const n = typeof value === "number" && Number.isFinite(value) ? value : null;
+  return n !== null && n > 0 ? n : null;
+}
+
+function categoryName(row: unknown): string {
+  return stringValue(asRecord(row).name) ?? "";
+}
+
+function categoryTokens(row: unknown): number {
+  return numberValue(asRecord(row).tokens);
+}
+
+function isDeferredContextCategory(name: string): boolean {
+  return /\(deferred\)$/i.test(name);
+}
+
+function isReservedContextCategory(name: string): boolean {
+  return name === AUTOCOMPACT_CATEGORY || name === COMPACT_BUFFER_CATEGORY;
+}
+
+/**
+ * CLI analyzeContextUsage residual: freeTokens = max(0, contextWindow - actualUsage - reservedTokens)
+ * and always push `{ name: "Free space", tokens: freeTokens }`. Host stored fallback and partial
+ * live payloads must match so Ku segment widths use used+free (not used-only 100%).
+ */
+function ensureFreeSpaceCategory(
+  categories: Array<Record<string, unknown>>,
+  rawMaxTokens: number,
+  fallbackUsedTokens = 0,
+): Array<Record<string, unknown>> {
+  const withoutFree = categories.filter((row) => categoryName(row) !== FREE_SPACE_CATEGORY);
+  let actualUsage = 0;
+  let reservedTokens = 0;
+  for (const row of withoutFree) {
+    const name = categoryName(row);
+    const tokens = categoryTokens(row);
+    if (isDeferredContextCategory(name)) continue;
+    if (isReservedContextCategory(name)) {
+      reservedTokens += tokens;
+      continue;
+    }
+    actualUsage += tokens;
+  }
+  if (actualUsage <= 0 && fallbackUsedTokens > 0) actualUsage = fallbackUsedTokens;
+  const freeTokens = Math.max(0, rawMaxTokens - actualUsage - reservedTokens);
+  return [...withoutFree, { name: FREE_SPACE_CATEGORY, tokens: freeTokens }];
+}
+
+function enrichContextUsage(value: unknown, modelHints: unknown[] = []): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = { ...asRecord(value) };
+  const totalTokens =
+    positiveNumber(raw.totalTokens)
+    ?? positiveNumber(raw.total_tokens)
+    ?? 0;
+  let rawMaxTokens =
+    positiveNumber(raw.rawMaxTokens)
+    ?? positiveNumber(raw.raw_max_tokens)
+    ?? positiveNumber(raw.maxTokens)
+    ?? positiveNumber(raw.max_tokens)
+    ?? resolveContextWindowTokens(raw.model, ...modelHints);
+
+  const sourceCategories = Array.isArray(raw.categories) ? raw.categories : [];
+  let categories = sourceCategories.map((row) => {
+    const record = asRecord(row);
+    return {
+      ...record,
+      name: categoryName(row) || "Input",
+      tokens: categoryTokens(row),
+    };
+  }).filter((row) => row.tokens > 0 || row.name === FREE_SPACE_CATEGORY);
+
+  if (!rawMaxTokens) {
+    // Still return usage so UI can show used count; Free space needs a max.
+    return {
+      ...raw,
+      categories: categories.filter((row) => row.name !== FREE_SPACE_CATEGORY && row.tokens > 0),
+      percentage: positiveNumber(raw.percentage) ?? undefined,
+      rawMaxTokens: null,
+      totalTokens,
+    };
+  }
+
+  categories = ensureFreeSpaceCategory(categories, rawMaxTokens, totalTokens);
+  const percentage =
+    positiveNumber(raw.percentage)
+    ?? Math.round(Math.max(0, Math.min(1, totalTokens / rawMaxTokens)) * 100);
+
+  return {
+    ...raw,
+    categories,
+    percentage,
+    rawMaxTokens,
+    totalTokens,
+  };
 }
 
 function latestInitEvent(session: LocalSession) {
@@ -388,15 +581,14 @@ function contextUsageFromStoredSession(session: LocalSession): Record<string, un
   if (!latestUsage) return null;
 
   const init = latestInitEvent(session);
-  const rawMaxTokens = contextWindowTokensFromText(init?.model) ?? contextWindowTokensFromText(session.model);
-  const percentage = rawMaxTokens ? Math.round(Math.max(0, Math.min(1, latestUsage.totalTokens / rawMaxTokens)) * 100) : undefined;
+  const rawMaxTokens = resolveContextWindowTokens(init?.model, session.model);
   const categories = [
     { name: "Input", tokens: latestUsage.inputTokens },
     { name: "Prompt cache read", tokens: latestUsage.cacheReadInputTokens },
     { name: "Prompt cache write", tokens: latestUsage.cacheCreationInputTokens },
   ].filter((row) => row.tokens > 0);
 
-  return {
+  return enrichContextUsage({
     agents: [],
     cacheCreationInputTokens: latestUsage.cacheCreationInputTokens,
     cacheReadInputTokens: latestUsage.cacheReadInputTokens,
@@ -404,12 +596,12 @@ function contextUsageFromStoredSession(session: LocalSession): Record<string, un
     inputTokens: latestUsage.inputTokens,
     mcpTools: [],
     memoryFiles: [],
+    model: stringValue(init?.model) ?? session.model,
     outputTokens: latestUsage.outputTokens,
-    percentage,
     rawMaxTokens,
     toolCallCount: 0,
     totalTokens: latestUsage.totalTokens,
-  };
+  }, [init?.model, session.model]);
 }
 
 export class ClaudeCliRunner {
@@ -420,14 +612,126 @@ export class ClaudeCliRunner {
   async getContextUsage(sessionId: string): Promise<unknown | null> {
     const activeTurn = this.active.get(sessionId);
     const session = this.store.getSession(sessionId);
+    const modelHints = session ? [latestInitEvent(session)?.model, session.model] : [];
     const storedUsage = session ? contextUsageFromStoredSession(session) : null;
     if (activeTurn) {
+      // Prefer live CLI collectContextData (full categories + Free space residual).
       const liveUsage = await this.sendControlRequest(activeTurn, { subtype: "get_context_usage" });
-      return liveUsage ?? storedUsage;
+      return enrichContextUsage(liveUsage, modelHints) ?? storedUsage;
     }
 
     if (!session?.cliSessionId) return storedUsage;
-    return storedUsage ?? await this.runControlRequestProbe(session, { subtype: "get_context_usage" });
+    // Do not short-circuit on coarse stored usage — previously storedUsage without Free
+    // space / rawMax blocked the probe, so the Ku bar filled 100% used-only.
+    const liveUsage = await this.runControlRequestProbe(session, { subtype: "get_context_usage" });
+    return enrichContextUsage(liveUsage, modelHints) ?? storedUsage;
+  }
+
+  /**
+   * Official get_settings → applied effort — the runtime truth for the Effort
+   * slider / Ultracode footer chip. Active turn via sendControlRequest; cold
+   * sessions resume via runControlRequestProbe (same pattern as getContextUsage).
+   * Returns the full applied bag (effort / effortLevels / ultracodeOfferable) or
+   * null when the CLI cannot report — host store is the fallback at the handler.
+   */
+  async getAppliedEffort(sessionId: string): Promise<{
+    effort: string | null;
+    effortLevels: string[] | null;
+    ultracodeOfferable: boolean | null;
+  } | null> {
+    const activeTurn = this.active.get(sessionId);
+    const session = this.store.getSession(sessionId);
+    let response: unknown | null = null;
+    if (activeTurn) {
+      response = await this.sendControlRequest(activeTurn, { subtype: "get_settings" });
+    } else if (session?.cliSessionId) {
+      response = await this.runControlRequestProbe(session, { subtype: "get_settings" });
+    }
+    if (response == null) return null;
+    return parseAppliedEffortBag(response);
+  }
+
+  /**
+   * New-session draft (no cliSessionId yet): spawn a bare probe so the CLI reports
+   * the per-model catalog ladder (applied.effortLevels / ultracodeOfferable) for the
+   * composer effort slider. Uses the same env + model resolution as a real spawn,
+   * without --resume (nothing to resume). Short-circuits to null when the CLI
+   * cannot report — the composer then falls back to the hardcoded 5-stop ladder.
+   */
+  async probeCatalogEffortDefaults(model?: string): Promise<{
+    effort: string | null;
+    effortLevels: string[] | null;
+    ultracodeOfferable: boolean | null;
+  } | null> {
+    const executable = defaultClaudeExecutable();
+    const enterprise = resolveAppliedEnterpriseForSpawn();
+    const normalizedModel = normalizeModel(model, enterprise);
+    const args = [
+      "--print",
+      "--output-format", "stream-json",
+      "--verbose",
+      "--input-format", "stream-json",
+    ];
+    if (normalizedModel) args.push("--model", normalizedModel);
+    const requestId = randomUUID();
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let result: unknown | null = null;
+      let child: ChildProcessWithoutNullStreams | null = null;
+      const finish = (value: unknown | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        try { child?.kill("SIGTERM"); } catch { /* already exited */ }
+        finish(result);
+      }, CONTROL_REQUEST_TIMEOUT_MS);
+
+      try {
+        child = spawnClaude(executable, args, process.cwd());
+      } catch {
+        finish(null);
+        return;
+      }
+
+      const stdout = readline.createInterface({ input: child.stdout });
+      let requested = false;
+      // Bare CLI with --input-format stream-json never emits `system init` until it
+      // receives at least one user message — so kick a trivial user turn on a short
+      // timer (matches official control-channel activation), then wait for init
+      // before issuing get_settings.
+      const kickTimer = setTimeout(() => {
+        try {
+          writeJsonLine(child!, { type: "user", message: { role: "user", content: [{ type: "text", text: "." }] } });
+        } catch { /* stdin closed */ }
+      }, 800);
+      const finishWithKick = (value: unknown | null) => {
+        clearTimeout(kickTimer);
+        finish(value);
+      };
+      stdout.on("line", (line) => {
+        const event = parseJsonLine(line);
+        const response = controlResponsePayload(event, requestId);
+        if (response !== undefined) {
+          result = response;
+          try { child?.kill("SIGTERM"); } catch { /* already exited */ }
+          finishWithKick(result);
+          return;
+        }
+        if (!requested && stringValue(event.type) === "system" && stringValue(event.subtype) === "init") {
+          requested = true;
+          writeJsonLine(child!, { type: "control_request", request_id: requestId, request: { subtype: "get_settings" } });
+        }
+      });
+      child.on("error", () => finishWithKick(result));
+      child.on("close", () => {
+        stdout.close();
+        finishWithKick(result);
+      });
+    }).then((response) => (response == null ? null : parseAppliedEffortBag(response)));
   }
 
   runTurn(sessionId: string, prompt: string, request: Record<string, unknown> = {}): boolean {
@@ -637,6 +941,23 @@ export class ClaudeCliRunner {
     const response = await this.sendControlRequest(turn, {
       subtype: "set_permission_mode",
       mode: permissionMode,
+    });
+    return response !== null;
+  }
+
+  /**
+   * Official apply_flag_settings control for effort/ultracode — same wire shape as
+   * set_permission_mode. Host store is authoritative for UI + next spawn; live turn
+   * gets the flag layer merge so the running CLI picks up the new wire effort
+   * (and workflow orchestration for ultracode) without a respawn.
+   */
+  async applyFlagSettings(sessionId: string, settings: Record<string, unknown>): Promise<boolean> {
+    const turn = this.active.get(sessionId);
+    if (!turn) return false;
+    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) return false;
+    const response = await this.sendControlRequest(turn, {
+      subtype: "apply_flag_settings",
+      settings,
     });
     return response !== null;
   }
