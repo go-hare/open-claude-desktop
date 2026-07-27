@@ -17,6 +17,7 @@ import {
   setLocalSkillEnabled,
 } from "../services/localSessions/localAgentAssets";
 import type { LocalSessionStore } from "../services/localSessions/localSessionStore";
+import { scanCodeSessionFiles, readCodeSessionMetadata } from "../services/localSessions/codeTranscriptJsonl";
 import { parseEffortFlagSettings } from "../services/localSessions/claudeCliRunner";
 import { getSupportedCommands } from "../services/localSessions/supportedCommands";
 import { getTranscriptFeedback, submitTranscriptFeedback } from "../services/localSessions/transcriptFeedbackStore";
@@ -78,13 +79,57 @@ function ok(value: unknown = true) {
   return value;
 }
 
+/**
+ * Official-aligned bridge shape: metadata only. messages/transcript NEVER cross the bridge —
+ * the web fetches content via getTranscript (live jsonl read). userData附加状态 (title
+ * override, pin, archive, model/effort/permissionMode, running) is included.
+ */
+const BRIDGE_SESSION_KEYS = [
+  "id",
+  "sessionId",
+  "title",
+  "kind",
+  "sessionKind",
+  "createdAt",
+  "updatedAt",
+  "lastActivityAt",
+  "cwd",
+  "folders",
+  "userSelectedFolders",
+  "userSelectedFiles",
+  "model",
+  "effort",
+  "permissionMode",
+  "sourceBranch",
+  "useWorktree",
+  "worktreeName",
+  "visibility",
+  "agent",
+  "origin",
+  "archived",
+  "stopped",
+  "isRunning",
+  "isPinned",
+  "pinned",
+  "cliSessionId",
+  "scheduledTaskId",
+  "slashCommands",
+  "runtime",
+  "pendingToolPermissions",
+  "mountedProjects",
+] as const;
+
 function toBridgeSession(session: unknown): unknown {
   const raw = asObject(session);
   const id = asString(raw.id) ?? asString(raw.sessionId);
   if (!id) return session;
   const updatedAt = asString(raw.updatedAt) ?? asString(raw.lastActivityAt) ?? new Date().toISOString();
+  const out: Record<string, unknown> = {};
+  for (const key of BRIDGE_SESSION_KEYS) {
+    if (raw[key] !== undefined) out[key] = raw[key];
+  }
   return {
-    ...raw,
+    ...out,
     id,
     sessionId: id,
     sessionKind: asString(raw.sessionKind) ?? (raw.kind === "code" ? "code" : "cowork"),
@@ -716,7 +761,7 @@ function streaksForDates(dates: Set<string>) {
   return { currentStreak, longestStreak };
 }
 
-function getSessionUsageCodeStats(store: LocalSessionStore) {
+async function getSessionUsageCodeStats(store: LocalSessionStore) {
   const sessions = store.getAll(true).filter((session) => session.kind === "code");
   const daily = new Map<string, { messageCount: number; sessionCount: number; toolCallCount: number }>();
   const dailyModelTokens = new Map<string, Record<string, number>>();
@@ -727,7 +772,7 @@ function getSessionUsageCodeStats(store: LocalSessionStore) {
     const sessionDate = dateKey(session.createdAt);
     const day = daily.get(sessionDate) ?? { messageCount: 0, sessionCount: 0, toolCallCount: 0 };
     day.sessionCount += 1;
-    const transcriptUsage = contextUsageFromTranscript(store.getTranscript(session.id));
+    const transcriptUsage = contextUsageFromTranscript(await store.getTranscript(session.id));
     day.toolCallCount += transcriptUsage.toolCallCount;
     daily.set(sessionDate, day);
 
@@ -740,23 +785,8 @@ function getSessionUsageCodeStats(store: LocalSessionStore) {
       dailyModelTokens.set(sessionDate, tokensByModel);
     }
 
-    for (const message of session.messages ?? []) {
-      const messageDate = dateKey(message.createdAt);
-      const entry = daily.get(messageDate) ?? { messageCount: 0, sessionCount: 0, toolCallCount: 0 };
-      entry.messageCount += 1;
-      daily.set(messageDate, entry);
-
-      const hour = new Date(message.createdAt).getHours();
-      if (!Number.isNaN(hour)) hourly.set(hour, (hourly.get(hour) ?? 0) + 1);
-
-      if (hasUsage(transcriptUsage)) continue;
-      const tokens = estimateTokens(message.text);
-      const tokensByModel = dailyModelTokens.get(messageDate) ?? {};
-      tokensByModel[model] = (tokensByModel[model] ?? 0) + tokens;
-      dailyModelTokens.set(messageDate, tokensByModel);
-      if (message.role === "assistant") modelUsage[model].outputTokens += tokens;
-      else modelUsage[model].inputTokens += tokens;
-    }
+    // Persisted session.messages is empty post-migration (content lives in the jsonl) —
+    // skip the per-message activity/token loop; usage comes from the transcript above.
   }
 
   const activeDates = new Set(Array.from(daily.entries()).filter(([, value]) => value.sessionCount > 0 || value.messageCount > 0).map(([date]) => date));
@@ -869,6 +899,7 @@ function createSessionHandlers(
   store: LocalSessionStore,
   context: IpcHandlerContext,
   allMethods: readonly string[],
+  storeKind: "code" | "cowork" = "cowork",
 ): InterfaceHandlers {
   const ptys = new Map<string, { terminal: { pid: number; write: (data: string) => void; kill: (signal?: string) => void; resize?: (cols: number, rows: number) => void }; buffer: string }>();
   const handlers: InterfaceHandlers = {};
@@ -883,6 +914,72 @@ function createSessionHandlers(
   };
 
   const sessionRunner = getLocalSessionRunner(context);
+
+  /**
+   * Official-aligned session list: the source of truth is `~/.claude/projects/*.jsonl`
+   * (scanned live — a CLI-run session shows up without any import), merged with the
+   * desktop-authored sessions and userData附加状态 (title override / pin / archive /
+   * model / permissionMode / running). No jsonl content is ever copied into userData.
+   */
+  const listMergedSessions = async (): Promise<unknown[]> => {
+    const stored = store.getAll(true);
+    const byCliId = new Map(stored.filter((s) => s.cliSessionId).map((s) => [s.cliSessionId!, s]));
+    const merged: unknown[] = [];
+    const seenStored = new Set<string>();
+    // Code sessions only scan jsonl; cowork keeps its own persisted list.
+    if (storeKind === "code") {
+      try {
+        const files = await scanCodeSessionFiles();
+        const metas = await Promise.all(files.map((file) => readCodeSessionMetadata(file.filePath, file.cliSessionId).catch(() => null)));
+        for (const meta of metas) {
+          if (!meta) continue;
+          const existing = byCliId.get(meta.cliSessionId);
+          if (existing) {
+            seenStored.add(existing.id);
+            merged.push(existing);
+            continue;
+          }
+          // jsonl-only session (never touched from the desktop) — materialize a metadata-only
+          // stub in the store so getSession/getTranscript resolve it (transcript is read live
+          // from the jsonl; nothing but metadata is persisted).
+          const stub = {
+            id: `cli_${meta.cliSessionId}`,
+            sessionId: `cli_${meta.cliSessionId}`,
+            title: meta.title,
+            kind: "code",
+            sessionKind: "code",
+            createdAt: meta.createdAt,
+            updatedAt: meta.updatedAt,
+            lastActivityAt: meta.updatedAt,
+            cwd: meta.cwd,
+            folders: meta.cwd ? [meta.cwd] : [],
+            userSelectedFolders: meta.cwd ? [meta.cwd] : [],
+            cliSessionId: meta.cliSessionId,
+            origin: "cli-jsonl",
+            isRunning: false,
+            messages: [],
+            transcript: [],
+          };
+          merged.push(stub);
+          const inStore = store.getSession(stub.id);
+          if (!inStore) {
+            store.adoptScannedSession(stub as never);
+          } else if (inStore.origin === "cli-jsonl" && !inStore.metadata?.userTitle && inStore.title !== stub.title) {
+            // Re-scan picked up a better title (custom-title appeared) and the desktop hasn't
+            // customized this row — refresh it. Desktop-authored edits (userTitle) win.
+            store.update(inStore.id, { title: stub.title });
+          }
+        }
+      } catch {
+        // ~/.claude unreadable — fall back to the persisted list only
+      }
+    }
+    for (const session of stored) {
+      if (seenStored.has(session.id) || session.archived) continue;
+      merged.push(session);
+    }
+    return merged;
+  };
 
   const sendCodeMessage: IpcHandler = async (_event, id, text, images, permissionMode, messageUuid, options) => {
     const sessionId = asString(id);
@@ -960,7 +1057,7 @@ function createSessionHandlers(
     if (!readiness.ready) return { success: false, readiness };
     const sourceId = readiness.sessionId;
     const source = sourceId ? store.getSession(sourceId) : null;
-    const transcript = sourceId ? store.getTranscript(sourceId) : [];
+    const transcript = sourceId ? await store.getTranscript(sourceId) : [];
     const summary = transcript.map(textFromTranscriptItem).filter(Boolean).slice(-12).join("\n").slice(0, 8000);
     const request = asObject(options);
     const prompt = asString(request.prompt) ?? [
@@ -1053,9 +1150,9 @@ function createSessionHandlers(
   };
 
   const realHandlers: InterfaceHandlers = {
-    getAll: async () => toBridgeSessions(store.getAll()),
+    getAll: async () => toBridgeSessions(await listMergedSessions()),
     getSession: async (_event, id) => (asString(id) ? toBridgeSession(store.getSession(asString(id)!)) : null),
-    getTranscript: async (_event, id) => (asString(id) ? store.getTranscript(asString(id)!) : []),
+    getTranscript: async (_event, id) => (asString(id) ? await store.getTranscript(asString(id)!) : []),
     start: async (_event, input) => {
       const request = asObject(input);
       const session = store.start(request as never);
@@ -1093,7 +1190,7 @@ function createSessionHandlers(
     },
     forkSession: async (_event, id, messageId) => {
       const sessionId = asString(id);
-      const session = sessionId ? store.fork(sessionId, asString(messageId) ?? undefined) : null;
+      const session = sessionId ? await store.fork(sessionId, asString(messageId) ?? undefined) : null;
       if (session) dispatchSessionEvent("start", session.id, session);
       return toBridgeSession(session);
     },
@@ -1375,17 +1472,18 @@ function createSessionHandlers(
     summarizeSession: async (_event, id) => {
       const sessionId = asString(id);
       if (!sessionId) return { summary: "", title: null };
-      const transcript = store.getTranscript(sessionId);
+      const transcript = await store.getTranscript(sessionId);
       const summary = transcript.map(textFromTranscriptItem).join("\n").slice(0, 1000);
       // Refresh placeholder titles after content exists (web may call this on turn settle).
-      const refreshed = store.refreshTitleFromMessages?.(sessionId) ?? store.getSession(sessionId);
+      // Reads the durable jsonl (custom-title wins) — the live buffer is cleared by then.
+      const refreshed = await store.refreshTitleFromTranscript(sessionId) ?? store.getSession(sessionId);
       if (refreshed) dispatchSessionEvent("session_updated", sessionId, refreshed);
       return { summary, title: refreshed?.title ?? null, session: toBridgeSession(refreshed) };
     },
     summarizeTranscript: async (_event, transcript) => Array.isArray(transcript) ? transcript.map(textFromTranscriptItem).join("\n").slice(0, 1000) : "",
     getPlanForSession: async (_event, id) => {
       const sessionId = asString(id) ?? asString(asObject(id).sessionId);
-      return sessionId ? planFromTranscript(store.getTranscript(sessionId)) : null;
+      return sessionId ? planFromTranscript(await store.getTranscript(sessionId)) : null;
     },
     popBackgroundTaskSuggestion: async () => {
       const session = store.getAll(true).find((item) => item.isRunning || item.runtime?.kind === "claude-cli" && item.stopped !== true);
@@ -1841,7 +1939,7 @@ function createSessionHandlers(
     rewind: async (_event, id, messageId) => {
       const sessionId = asString(id);
       if (sessionId) sessionRunner.stop(sessionId);
-      const session = sessionId ? store.rewind(sessionId, asString(messageId) ?? undefined) : null;
+      const session = sessionId ? await store.rewind(sessionId, asString(messageId) ?? undefined) : null;
       if (sessionId && session) {
         dispatchSessionEvent("rewound", sessionId, session);
         dispatchSessionEvent("session_updated", sessionId, session);
@@ -1881,7 +1979,7 @@ export function registerLocalSessionsHandlers(context: IpcHandlerContext): void 
   registerInterfaceHandlers(
     "claude.web",
     "LocalSessions",
-    createSessionHandlers(context.localSessions, context, LOCAL_SESSIONS_METHODS),
+    createSessionHandlers(context.localSessions, context, LOCAL_SESSIONS_METHODS, "code"),
     "claude.web.LocalSessions",
   );
   registerInterfaceHandlers("claude.web", "LocalSessionEnvironment", {

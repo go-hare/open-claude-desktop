@@ -1,6 +1,7 @@
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { readCodeSessionMetadata, readCodeTranscript, resolveCodeTranscriptPath } from "./codeTranscriptJsonl";
 
 export type LocalSessionKind = "epitaxy" | "code";
 
@@ -59,6 +60,12 @@ export type LocalSession = {
   systemPrompt?: string;
   systemPromptAppend?: string;
   tools?: unknown[];
+  /**
+   * Chat content is read live from `~/.claude/projects/<mangled-cwd>/<cliSessionId>.jsonl`
+   * (official `createCoworkRawTranscriptLoader`/`resolveTranscriptPath`). These fields are
+   * legacy compatibility for old code-sessions.json: load keeps them in memory until
+   * migrateStripContent runs; nothing new is written here.
+   */
   messages: LocalSessionMessage[];
   transcript?: unknown[];
   archived?: boolean;
@@ -133,12 +140,17 @@ function isPlaceholderSessionTitle(title?: string, kind?: string): boolean {
 }
 
 /** Prefer first user prompt line for list/header once a turn has content. */
-function titleFromSessionMessages(session: LocalSession): string | null {
-  const messages = Array.isArray(session.messages) ? session.messages : [];
-  const user = messages.find((message) => message.role === "user" && typeof message.text === "string" && message.text.trim());
-  if (!user?.text) return null;
-  const next = titleFromPrompt(user.text, session.kind === "code" ? "code" : "cowork");
-  return isPlaceholderSessionTitle(next, session.kind === "code" ? "code" : "cowork") ? null : next;
+function titleFromLiveEvents(liveEvents: unknown[], kind?: string): string | null {
+  for (const event of liveEvents) {
+    const raw = asRecord(event);
+    const isUser = raw.type === "user" || asRecord(raw.message).role === "user";
+    if (!isUser) continue;
+    const text = typeof raw.text === "string" ? raw.text : typeof asRecord(raw.message).content === "string" ? asRecord(raw.message).content as string : "";
+    if (!text.trim()) continue;
+    const next = titleFromPrompt(text, kind === "code" ? "code" : "cowork");
+    if (!isPlaceholderSessionTitle(next, kind === "code" ? "code" : "cowork")) return next;
+  }
+  return null;
 }
 
 function uniqueStrings(values: unknown): string[] {
@@ -233,16 +245,6 @@ function messageIdentity(value: unknown): string | undefined {
   return undefined;
 }
 
-function timestampValue(value: unknown): string | undefined {
-  const raw = asRecord(value);
-  const nested = asRecord(raw.message);
-  return typeof raw.createdAt === "string" ? raw.createdAt
-    : typeof raw.timestamp === "string" ? raw.timestamp
-      : typeof nested.createdAt === "string" ? nested.createdAt
-        : typeof nested.timestamp === "string" ? nested.timestamp
-          : undefined;
-}
-
 /**
  * Outer CLI NDJSON uuid (per-event). Official eke/zke identity for live rows —
  * multi-emit assistants share Anthropic message.id but have DIFFERENT outer uuids.
@@ -262,104 +264,6 @@ function outerEventUuid(value: unknown): string | undefined {
   return undefined;
 }
 
-/**
- * Same-outer-uuid replace only (not Anthropic message.id collapse).
- * Official never winner-take-all multi-emit by thinking/text length.
- */
-function preferRicherTranscriptEvent(prev: unknown, next: unknown): unknown {
-  const prevScore = transcriptEventRichness(prev);
-  const nextScore = transcriptEventRichness(next);
-  return nextScore >= prevScore ? next : prev;
-}
-
-function contentBlocksOf(raw: Record<string, unknown>): unknown[] {
-  const nested = asRecord(raw.message);
-  const content = nested.content ?? raw.content;
-  if (Array.isArray(content)) return content.slice();
-  if (typeof content === "string" && content.length > 0) return [{ type: "text", text: content }];
-  if (typeof raw.text === "string" && raw.text.length > 0) return [{ type: "text", text: raw.text }];
-  return [];
-}
-
-function contentBlockKey(block: unknown): string {
-  const record = asRecord(block);
-  const type = typeof record.type === "string" ? record.type : "";
-  if (type === "tool_use" && typeof record.id === "string") return `tool_use:${record.id}`;
-  if (type === "thinking") return `thinking:${typeof record.thinking === "string" ? record.thinking : ""}`;
-  if (type === "text") return `text:${typeof record.text === "string" ? record.text : ""}`;
-  try {
-    return `${type}:${JSON.stringify(record)}`;
-  } catch {
-    return type || "block";
-  }
-}
-
-/**
- * Durable session.messages only: one chat-history row per Anthropic message.id
- * may still union content (search/title). Transcript itself stays multi-emit.
- */
-function mergeAssistantTranscriptEvents(
-  prevRaw: Record<string, unknown>,
-  nextRaw: Record<string, unknown>,
-): Record<string, unknown> {
-  const prevNested = asRecord(prevRaw.message);
-  const nextNested = asRecord(nextRaw.message);
-  const mergedBlocks: unknown[] = [];
-  const seen = new Set<string>();
-  for (const block of [...contentBlocksOf(prevRaw), ...contentBlocksOf(nextRaw)]) {
-    const key = contentBlockKey(block);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    mergedBlocks.push(block);
-  }
-  const prevText = typeof prevRaw.text === "string" ? prevRaw.text : "";
-  const nextText = typeof nextRaw.text === "string" ? nextRaw.text : "";
-  const textFromBlocks = mergedBlocks
-    .map((block) => {
-      const record = asRecord(block);
-      return record.type === "text" && typeof record.text === "string" ? record.text : "";
-    })
-    .filter(Boolean)
-    .join("\n\n");
-  const text =
-    textFromBlocks
-    || (nextText.length >= prevText.length ? nextText : prevText);
-  return {
-    ...prevRaw,
-    ...nextRaw,
-    uuid: typeof prevRaw.uuid === "string" ? prevRaw.uuid : nextRaw.uuid,
-    timestamp: typeof prevRaw.timestamp === "string" ? prevRaw.timestamp : nextRaw.timestamp,
-    text,
-    message: {
-      ...prevNested,
-      ...nextNested,
-      id: typeof nextNested.id === "string" ? nextNested.id : prevNested.id,
-      role: "assistant",
-      content: mergedBlocks,
-    },
-  };
-}
-
-function transcriptEventRichness(value: unknown): number {
-  const raw = asRecord(value);
-  const nested = asRecord(raw.message);
-  const content = nested.content ?? raw.content;
-  if (Array.isArray(content)) {
-    let score = content.length * 1000;
-    for (const block of content) {
-      const record = asRecord(block);
-      const type = typeof record.type === "string" ? record.type : "";
-      if (type === "tool_use") score += 500;
-      if (type === "text" && typeof record.text === "string") score += record.text.length;
-      if (type === "thinking" && typeof record.thinking === "string") score += record.thinking.length;
-    }
-    return score;
-  }
-  if (typeof content === "string") return content.length;
-  if (typeof raw.text === "string") return raw.text.length;
-  return 0;
-}
-
 function sliceThroughMessageId<T>(items: T[] | undefined, messageId?: string): T[] {
   const source = items ?? [];
   if (!messageId) return [...source];
@@ -367,20 +271,12 @@ function sliceThroughMessageId<T>(items: T[] | undefined, messageId?: string): T
   return index < 0 ? [...source] : source.slice(0, index + 1);
 }
 
-function sliceMessagesForTranscriptCutoff(messages: LocalSessionMessage[] | undefined, transcript: unknown[], messageId?: string): LocalSessionMessage[] {
-  const source = messages ?? [];
-  if (!messageId) return [...source];
-  const directIndex = source.findIndex((message) => messageIdentity(message) === messageId || messageIdentity(message.raw) === messageId);
-  if (directIndex >= 0) return source.slice(0, directIndex + 1);
-  const transcriptIndex = transcript.findIndex((item) => messageIdentity(item) === messageId);
-  const cutoffTimestamp = transcriptIndex >= 0 ? timestampValue(transcript[transcriptIndex]) : undefined;
-  if (!cutoffTimestamp) return [...source];
-  return source.filter((message) => message.createdAt <= cutoffTimestamp);
-}
-
 export class LocalSessionStore {
   private pendingSaveTimer: NodeJS.Timeout | null = null;
   private sessions = new Map<string, LocalSession>();
+  /** In-memory incremental events for a running turn. Never persisted — the CLI flushes the
+   * same events to the jsonl at turn end, where clearLiveBuffer swaps the source back to disk. */
+  private liveBuffers = new Map<string, unknown[]>();
   private readonly filePath: string;
 
   constructor(private readonly defaultKind: LocalSessionKind, filePath = path.join(app.getPath("userData"), `${defaultKind}-sessions.json`)) {
@@ -406,6 +302,28 @@ export class LocalSessionStore {
     } catch {
       this.sessions = new Map();
     }
+    this.migrateStripContent();
+  }
+
+  /**
+   * One-time startup migration: chat content (messages/transcript) is no longer persisted
+   * — the CLI jsonl under ~/.claude/projects is the durable source. Strip the fields from
+   * the on-disk file (133MB → KB). Idempotent: marker set after the first strip.
+   */
+  private migrateStripContent(): void {
+    let stripped = 0;
+    for (const session of this.sessions.values()) {
+      const metadata = (session.metadata ?? {}) as Record<string, unknown>;
+      if (metadata.contentStrippedAt) continue;
+      const hadContent = (Array.isArray(session.messages) && session.messages.length > 0)
+        || (Array.isArray(session.transcript) && session.transcript.length > 0);
+      if (!hadContent) continue;
+      session.messages = [];
+      session.transcript = [];
+      session.metadata = { ...metadata, contentStrippedAt: nowIso() };
+      stripped += 1;
+    }
+    if (stripped > 0) this.saveNow();
   }
 
   private save(): void {
@@ -419,6 +337,17 @@ export class LocalSessionStore {
       this.pendingSaveTimer = null;
       this.save();
     }, 250);
+  }
+
+  /**
+   * Register a metadata-only stub for a session discovered by scanning ~/.claude/projects
+   * jsonl (origin "cli-jsonl"). Lets getSession/getTranscript resolve the row while its
+   * content stays on disk in the jsonl. Debounced save — the sidebar scan can adopt many.
+   */
+  adoptScannedSession(session: LocalSession): void {
+    if (this.sessions.has(session.id)) return;
+    this.sessions.set(session.id, session);
+    this.saveSoon();
   }
 
   private saveNow(): void {
@@ -449,69 +378,45 @@ export class LocalSessionStore {
     return this.sessions.get(id) ?? null;
   }
 
-  getTranscript(id: string): unknown[] {
+  /** Live (running-turn) incremental events — memory only, never saved to userData. */
+  appendLiveEvent(id: string, event: unknown): void {
+    const buffer = this.liveBuffers.get(id);
+    if (buffer) buffer.push(event);
+    else this.liveBuffers.set(id, [event]);
+  }
+
+  getLiveEvents(id: string): unknown[] {
+    return [...(this.liveBuffers.get(id) ?? [])];
+  }
+
+  clearLiveBuffer(id: string): void {
+    this.liveBuffers.delete(id);
+  }
+
+  /**
+   * Official-aligned: transcript always comes from the CLI jsonl on disk
+   * (`~/.claude/projects/...`). A running turn appends its in-memory live tail because the
+   * CLI only flushes to jsonl as events finalize. Sessions with no cliSessionId yet
+   * (drafts never sent to the CLI) return just the live tail.
+   */
+  async getTranscript(id: string): Promise<unknown[]> {
     const session = this.sessions.get(id);
     if (!session) return [];
-    // transcript is the raw CLI event log and includes stream_event noise. Chat UI must not
-    // treat a stream-only log as the full history — otherwise durable assistants that only
-    // live in session.messages disappear mid-stream ("new wipes old").
-    const eventLog = Array.isArray(session.transcript) ? session.transcript : [];
-    const durable = Array.isArray(session.messages) ? session.messages : [];
-    const durableEvents = eventLog.filter((event) => {
-      const type = asRecord(event).type;
-      return type !== "stream_event";
-    });
-    if (durableEvents.length === 0) {
-      return durable.map((message) => transcriptMessage(session.id, message));
+    let liveEvents = this.getLiveEvents(id);
+    if (session.cliSessionId) {
+      const fromDisk = await readCodeTranscript(session.cliSessionId, session.cwd);
+      if (fromDisk.length > 0) {
+        // The CLI echoes desktop-sent user rows into the jsonl with the same outer uuid —
+        // drop live-tail rows already on disk so the merged view has no duplicates.
+        const onDisk = new Set(fromDisk.map((event) => outerEventUuid(event)).filter(Boolean));
+        liveEvents = liveEvents.filter((event) => {
+          const outer = outerEventUuid(event);
+          return !outer || !onDisk.has(outer);
+        });
+        return [...fromDisk, ...liveEvents];
+      }
     }
-    // Official eke (index-BELzQL5P): KEEP multi-emit assistant rows that share Anthropic
-    // message.id but differ on outer uuid (thinking emit + text emit). eke ake + f() merges
-    // consecutive assistant items into one bubble. Host must NOT collapse by message.id.
-    // Only de-dupe exact outer-uuid replays (same NDJSON event written twice).
-    const out: unknown[] = [];
-    const indexByOuterUuid = new Map<string, number>();
-    const anthropicIdsPresent = new Set<string>();
-    const putEvent = (event: unknown) => {
-      const anthropicId = (() => {
-        const raw = asRecord(event);
-        const nested = asRecord(raw.message);
-        if (raw.type === "assistant" || nested.role === "assistant") {
-          return typeof nested.id === "string" && nested.id.length > 0
-            ? nested.id
-            : (typeof raw.message_id === "string" ? raw.message_id : undefined);
-        }
-        return undefined;
-      })();
-      if (anthropicId) anthropicIdsPresent.add(anthropicId);
-      const outer = outerEventUuid(event);
-      if (!outer) {
-        out.push(event);
-        return;
-      }
-      const existingIndex = indexByOuterUuid.get(outer);
-      if (existingIndex === undefined) {
-        indexByOuterUuid.set(outer, out.length);
-        out.push(event);
-        return;
-      }
-      // Same outer uuid only — richer replace (not multi-emit mid collapse).
-      out[existingIndex] = preferRicherTranscriptEvent(out[existingIndex], event);
-    };
-    for (const event of durableEvents) putEvent(event);
-    // Back-fill durable-only rows (optimistic user / appendMessage-only) missing from event log.
-    // Assistants: if any multi-emit for this Anthropic id already exists, skip durable
-    // (durable is mid-collapsed chat history, not a substitute for multi-emit transcript).
-    for (const message of durable) {
-      const event = transcriptMessage(session.id, message);
-      if (message.role === "assistant") {
-        const mid = messageIdentity(message) ?? message.id;
-        if (mid && anthropicIdsPresent.has(mid)) continue;
-      }
-      const outer = outerEventUuid(event) ?? outerEventUuid(message) ?? message.id;
-      if (outer && indexByOuterUuid.has(outer)) continue;
-      putEvent(event);
-    }
-    return out;
+    return liveEvents;
   }
 
   getSessionsForScheduledTask(scheduledTaskId: string): LocalSession[] {
@@ -566,10 +471,15 @@ export class LocalSessionStore {
       userSelectedFiles,
       mountedProjects: input.mountedProjects,
       isRunning: false,
-      messages: prompt || userSelectedFiles.length > 0 ? [createMessage("user", prompt, timestamp, messageRaw)] : [],
+      // Chat content is never persisted — first prompt lives only in the live tail until the
+      // CLI echoes it into the jsonl (official single-source-of-truth).
+      messages: [],
       transcript: [],
     };
-    if (session.messages[0]) session.transcript = [transcriptMessage(session.id, session.messages[0])];
+    if (prompt || userSelectedFiles.length > 0) {
+      const firstMessage = createMessage("user", prompt, timestamp, messageRaw);
+      this.liveBuffers.set(session.id, [transcriptMessage(session.id, firstMessage)]);
+    }
     this.sessions.set(session.id, session);
     this.save();
     return session;
@@ -577,8 +487,10 @@ export class LocalSessionStore {
 
   importSession(input: Partial<LocalSession>): LocalSession {
     const session = this.start({ prompt: input.messages?.[0]?.text, cwd: input.cwd, title: input.title, kind: input.kind ?? this.defaultKind });
-    const existing = input.messages;
-    if (existing) session.messages = existing;
+    // Imported rows stay in the live tail (memory) — no userData messages copy.
+    for (const message of input.messages ?? []) {
+      this.liveBuffers.set(session.id, [...(this.liveBuffers.get(session.id) ?? []), transcriptMessage(session.id, message)]);
+    }
     session.metadata = { ...(session.metadata ?? {}), imported: true };
     this.sessions.set(session.id, session);
     this.save();
@@ -600,9 +512,14 @@ export class LocalSessionStore {
     if (!session) return null;
     const timestamp = nowIso();
     const message = createMessage(role, text, timestamp, raw);
-    session.messages.push(message);
-    session.transcript ??= [];
-    session.transcript.push(transcriptMessage(session.id, message));
+    // Live tail only (memory) — the CLI jsonl is the durable transcript; userData must not
+    // accumulate a messages/transcript copy (133MB code-sessions.json root cause). Skip when
+    // the row is already in the tail (start() seeded it) or already on disk (CLI echoed it).
+    const event = transcriptMessage(session.id, message);
+    const outer = outerEventUuid(event);
+    if (!outer || !this.liveBuffers.get(id)?.some((item) => outerEventUuid(item) === outer)) {
+      this.appendLiveEvent(id, event);
+    }
     session.updatedAt = timestamp;
     session.lastActivityAt = timestamp;
     this.save();
@@ -614,53 +531,13 @@ export class LocalSessionStore {
     if (!session) return null;
     const timestamp = nowIso();
     const message = createMessage(role, text, timestamp, raw);
-    // Official path keeps one durable assistant row per Anthropic message.id.
-    // CLI multi-emit (thinking then text, same message.id) must MERGE content
-    // blocks — never winner-take-all by length (thinking often longer than text).
-    const identity = messageIdentity(message) ?? message.id;
-    const existingIndex = session.messages.findIndex((item) => (messageIdentity(item) ?? item.id) === identity);
-    if (existingIndex >= 0) {
-      const existing = session.messages[existingIndex]!;
-      if (existing.role === "assistant" && message.role === "assistant") {
-        const existingRaw = asRecord(existing.raw ?? transcriptMessage(session.id, existing));
-        const incomingRaw = asRecord(message.raw ?? transcriptMessage(session.id, message));
-        const mergedRaw = mergeAssistantTranscriptEvents(existingRaw, incomingRaw);
-        const mergedText =
-          (typeof mergedRaw.text === "string" && mergedRaw.text.length > 0)
-            ? mergedRaw.text
-            : ((existing.text?.length ?? 0) >= (message.text?.length ?? 0) ? existing.text : message.text);
-        session.messages[existingIndex] = {
-          ...existing,
-          text: mergedText,
-          raw: mergedRaw,
-        };
-      } else {
-        const preferIncoming = transcriptEventRichness(message) >= transcriptEventRichness(existing);
-        session.messages[existingIndex] = preferIncoming
-          ? { ...message, createdAt: existing.createdAt }
-          : {
-              ...existing,
-              raw: existing.raw ?? message.raw,
-              text: (existing.text?.length ?? 0) >= (message.text?.length ?? 0) ? existing.text : message.text,
-            };
-      }
-    } else {
-      session.messages.push(message);
-    }
     if (includeTranscript) {
-      session.transcript ??= [];
       const event = raw ?? transcriptMessage(session.id, message);
-      // Outer uuid only — never Anthropic message.id (would collapse multi-emit).
-      const eventIdentity = outerEventUuid(event);
-      if (eventIdentity) {
-        const transcriptIndex = session.transcript.findIndex((item) => outerEventUuid(item) === eventIdentity);
-        if (transcriptIndex >= 0) {
-          session.transcript[transcriptIndex] = preferRicherTranscriptEvent(session.transcript[transcriptIndex], event);
-        } else {
-          session.transcript.push(event);
-        }
-      } else {
-        session.transcript.push(event);
+      // Live tail only (memory) — durable transcript is the CLI jsonl, not userData.
+      // Dedupe on outer uuid: the CLI echoes user/system rows the desktop already appended.
+      const outer = outerEventUuid(event);
+      if (!outer || !this.liveBuffers.get(id)?.some((item) => outerEventUuid(item) === outer)) {
+        this.appendLiveEvent(id, event);
       }
     }
     session.updatedAt = timestamp;
@@ -673,11 +550,16 @@ export class LocalSessionStore {
     const session = this.sessions.get(id);
     if (!session) return null;
     const timestamp = nowIso();
-    session.transcript ??= [];
-    session.transcript.push(event);
+    // Running-turn live tail (memory only) — getTranscript layers it over the disk jsonl.
+    // Nothing is written to userData transcript (CLI jsonl is the durable source).
+    // Dedupe on outer uuid: sendMessage's row and the CLI's echo share the same uuid.
+    const outer = outerEventUuid(event);
+    if (!outer || !this.liveBuffers.get(id)?.some((item) => outerEventUuid(item) === outer)) {
+      this.appendLiveEvent(id, event);
+    }
     session.updatedAt = timestamp;
     session.lastActivityAt = timestamp;
-    asRecord(event).type === "stream_event" ? this.saveSoon() : this.saveNow();
+    this.save();
     return session;
   }
 
@@ -688,11 +570,15 @@ export class LocalSessionStore {
     session.isRunning = isRunning;
     session.stopped = !isRunning && session.stopped ? session.stopped : false;
     session.runtime = { ...(session.runtime ?? { kind: "local" }), ...runtime } as LocalSessionRuntime;
-    // When a turn finishes, promote placeholder titles from the first user prompt (list + header parity).
+    // Promote placeholder titles BEFORE clearing the live tail — the title comes from the
+    // first user prompt which lives in the buffer until the CLI flushes the jsonl.
     if (!isRunning && isPlaceholderSessionTitle(session.title, session.kind === "code" ? "code" : "cowork")) {
-      const derived = titleFromSessionMessages(session);
+      const derived = titleFromLiveEvents(this.getLiveEvents(id), session.kind);
       if (derived) session.title = derived;
     }
+    // Turn ended → the CLI has flushed these events into the jsonl; drop the in-memory tail
+    // so the next getTranscript reads from disk alone (single source of truth, like official).
+    if (!isRunning) this.clearLiveBuffer(id);
     session.updatedAt = timestamp;
     session.lastActivityAt = timestamp;
     this.save();
@@ -704,8 +590,26 @@ export class LocalSessionStore {
     const session = this.sessions.get(id);
     if (!session) return null;
     if (!isPlaceholderSessionTitle(session.title, session.kind === "code" ? "code" : "cowork")) return session;
-    const derived = titleFromSessionMessages(session);
+    const derived = titleFromLiveEvents(this.getLiveEvents(id), session.kind);
     if (!derived) return session;
+    return this.update(id, { title: derived });
+  }
+
+  /**
+   * Refresh a placeholder title from the durable jsonl (custom-title wins, else first user
+   * text). Called after a turn settles — the live buffer may already be cleared, so this
+   * reads the CLI jsonl directly instead of the buffer.
+   */
+  async refreshTitleFromTranscript(id: string): Promise<LocalSession | null> {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if (!isPlaceholderSessionTitle(session.title, session.kind === "code" ? "code" : "cowork")) return session;
+    if (!session.cliSessionId) return this.refreshTitleFromMessages(id);
+    const jsonlPath = await resolveCodeTranscriptPath(session.cliSessionId, session.cwd);
+    if (!jsonlPath) return this.refreshTitleFromMessages(id);
+    const meta = await readCodeSessionMetadata(jsonlPath, session.cliSessionId).catch(() => null);
+    const derived = meta && !isPlaceholderSessionTitle(meta.title, session.kind === "code" ? "code" : "cowork") ? meta.title : null;
+    if (!derived) return this.refreshTitleFromMessages(id);
     return this.update(id, { title: derived });
   }
 
@@ -783,6 +687,7 @@ export class LocalSessionStore {
     session.stopped = true;
     session.isRunning = false;
     session.pendingToolPermissions = [];
+    this.clearLiveBuffer(id);
     session.updatedAt = nowIso();
     session.lastActivityAt = session.updatedAt;
     this.sessions.set(id, session);
@@ -790,12 +695,11 @@ export class LocalSessionStore {
     return true;
   }
 
-  fork(id: string, messageId?: string): LocalSession | null {
+  async fork(id: string, messageId?: string): Promise<LocalSession | null> {
     const source = this.sessions.get(id);
     if (!source) return null;
     const timestamp = nowIso();
-    const transcript = sliceThroughMessageId(source.transcript, messageId);
-    const messages = sliceMessagesForTranscriptCutoff(source.messages, transcript, messageId);
+    const transcript = sliceThroughMessageId(await this.getTranscript(id), messageId);
     const forked: LocalSession = {
       ...source,
       id: `${source.kind}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
@@ -804,8 +708,9 @@ export class LocalSessionStore {
       createdAt: timestamp,
       updatedAt: timestamp,
       lastActivityAt: timestamp,
-      messages,
-      transcript,
+      // Sliced content stays in the live tail (memory) — not persisted to userData.
+      messages: [],
+      transcript: [],
       isRunning: false,
       stopped: false,
       runtime: { kind: "local", finishedAt: timestamp },
@@ -819,20 +724,21 @@ export class LocalSessionStore {
     };
     forked.sessionId = forked.id;
     this.sessions.set(forked.id, forked);
+    this.liveBuffers.set(forked.id, transcript);
     this.save();
     return forked;
   }
 
-  rewind(id: string, messageId?: string): LocalSession | null {
+  async rewind(id: string, messageId?: string): Promise<LocalSession | null> {
     const session = this.sessions.get(id);
     if (!session || !messageId) return null;
     const timestamp = nowIso();
-    const transcript = sliceThroughMessageId(session.transcript, messageId);
-    const messages = sliceMessagesForTranscriptCutoff(session.messages, transcript, messageId);
+    const transcript = sliceThroughMessageId(await this.getTranscript(id), messageId);
     const updated: LocalSession = {
       ...session,
-      messages,
-      transcript,
+      // Sliced content stays in the live tail (memory) — not persisted to userData.
+      messages: [],
+      transcript: [],
       updatedAt: timestamp,
       lastActivityAt: timestamp,
       isRunning: false,
@@ -844,6 +750,7 @@ export class LocalSessionStore {
       },
     };
     this.sessions.set(id, updated);
+    this.liveBuffers.set(id, transcript);
     this.save();
     return updated;
   }
@@ -859,6 +766,7 @@ export class LocalSessionStore {
     if (!session) return false;
     session.messages = [];
     session.transcript = [];
+    this.clearLiveBuffer(id);
     session.updatedAt = nowIso();
     this.save();
     return true;

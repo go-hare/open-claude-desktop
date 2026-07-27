@@ -555,8 +555,7 @@ function enrichContextUsage(value: unknown, modelHints: unknown[] = []): Record<
   };
 }
 
-function latestInitEvent(session: LocalSession) {
-  const transcript = session.transcript ?? [];
+function latestInitEvent(transcript: unknown[]) {
   for (let index = transcript.length - 1; index >= 0; index -= 1) {
     const event = asRecord(transcript[index]);
     if (event.type === "system" && event.subtype === "init") return event;
@@ -564,23 +563,20 @@ function latestInitEvent(session: LocalSession) {
   return null;
 }
 
-function contextUsageFromStoredSession(session: LocalSession): Record<string, unknown> | null {
-  const messages = session.messages ?? [];
+/**
+ * Stored-usage fallback for the Ku/context bar. Official-aligned: reads the CLI jsonl via
+ * store.getTranscript (disk) and layers the in-memory live tail for a running turn.
+ */
+async function contextUsageFromStoredSession(store: LocalSessionStore, session: LocalSession): Promise<Record<string, unknown> | null> {
+  const transcript = await store.getTranscript(session.id);
   let latestUsage: ReturnType<typeof usageFromEvent> = null;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    latestUsage = usageFromEvent(messages[index]?.raw);
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    latestUsage = usageFromEvent(transcript[index]);
     if (latestUsage) break;
-  }
-  if (!latestUsage) {
-    const transcript = session.transcript ?? [];
-    for (let index = transcript.length - 1; index >= 0; index -= 1) {
-      latestUsage = usageFromEvent(transcript[index]);
-      if (latestUsage) break;
-    }
   }
   if (!latestUsage) return null;
 
-  const init = latestInitEvent(session);
+  const init = latestInitEvent(transcript);
   const rawMaxTokens = resolveContextWindowTokens(init?.model, session.model);
   const categories = [
     { name: "Input", tokens: latestUsage.inputTokens },
@@ -612,8 +608,9 @@ export class ClaudeCliRunner {
   async getContextUsage(sessionId: string): Promise<unknown | null> {
     const activeTurn = this.active.get(sessionId);
     const session = this.store.getSession(sessionId);
-    const modelHints = session ? [latestInitEvent(session)?.model, session.model] : [];
-    const storedUsage = session ? contextUsageFromStoredSession(session) : null;
+    const transcript = session ? await this.store.getTranscript(session.id) : [];
+    const modelHints = [latestInitEvent(transcript)?.model, session?.model];
+    const storedUsage = session ? await contextUsageFromStoredSession(this.store, session) : null;
     if (activeTurn) {
       // Prefer live CLI collectContextData (full categories + Free space residual).
       const liveUsage = await this.sendControlRequest(activeTurn, { subtype: "get_context_usage" });
@@ -987,6 +984,8 @@ export class ClaudeCliRunner {
     // ExitPlanMode, Shift+Tab, slash /plan, etc.). Persist so composer pill re-syncs.
     this.syncLiveMetaFromCliEvent(sessionId, event);
 
+    // Memory-only live tail for the running turn — the CLI writes the same events to the
+    // jsonl, which is the durable source (official createCoworkRawTranscriptLoader path).
     this.store.appendTranscriptEvent(sessionId, event);
     // Official local agent path: stream_event + durable messages are pushed as
     // {type:"message", message:event}. session_updated is metadata-only (title /
@@ -997,10 +996,8 @@ export class ClaudeCliRunner {
     const turn = this.active.get(sessionId);
     const assistantText = assistantTextFromEvent(event);
     if (assistantText && (event.type !== "result" || !turn?.sawAssistantText)) {
-      // Keep a durable assistant row in session.messages (chat history). The raw CLI
-      // event is already in transcript via appendTranscriptEvent above; do not
-      // duplicate it into transcript again (includeTranscript=false).
-      this.store.appendMessage(sessionId, "assistant", assistantText, event, false);
+      // Durable assistant content lives in the CLI jsonl (already streamed above via the
+      // live buffer) — no userData copy. Track sawAssistantText for the result-event gate.
       if (turn) turn.sawAssistantText = true;
     }
     // Never close stdin while a can_use_tool control_request is outstanding — that
