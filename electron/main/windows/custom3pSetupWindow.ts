@@ -21,7 +21,14 @@ function jsonArg(name: string, value: unknown): string {
   return `${name}=${JSON.stringify(value ?? {})}`;
 }
 
-export async function openCustom3pSetupWindow(parent?: BrowserWindow): Promise<BrowserWindow> {
+/**
+ * Official Setup residual (Custom3pSetup) loads configLibrary bags.
+ * Product: when preferences.deploymentMode === "dotClaude", Custom3pSetup IPC
+ * projects ~/.claude/settings.json into the same list/read/write shape
+ * (see settingsHandlers + dotClaudeSetupBridge). This window just hosts the
+ * residual page — no mode-switch gate; login source is already the Setup source.
+ */
+export async function openCustom3pSetupWindow(parent?: BrowserWindow): Promise<BrowserWindow | null> {
   if (isAlive(setupWindow)) {
     setupWindow.show();
     setupWindow.focus();

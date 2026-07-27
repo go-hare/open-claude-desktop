@@ -69,6 +69,13 @@ export type DotClaudeCliConfig = {
   authToken?: string;
   /** env.ANTHROPIC_MODEL (informational — model stays CLI-managed). */
   model?: string;
+  /**
+   * Model ids declared in ~/.claude env (ANTHROPIC_MODEL + ANTHROPIC_DEFAULT_*_MODEL).
+   * Used for bootstrap model picker + --model resolution in dotClaude mode so the UI
+   * never offers configLibrary ids (e.g. deepseek-v4-pro) against a multi-provider
+   * ~/.claude gateway that only knows grok/kimi/etc.
+   */
+  models?: string[];
 };
 
 export type DeploymentModeResolution = {
@@ -237,6 +244,28 @@ export function mergeEnterpriseActivationBags(
  * + AUTH_TOKEN or API_KEY). Read-only: never mutates the file, never copies the
  * secret anywhere. Returns null when the file is absent/incomplete/invalid.
  */
+/**
+ * Collect unique model ids from a ~/.claude settings env bag.
+ * Order: ANTHROPIC_MODEL first, then DEFAULT_OPUS/SONNET/HAIKU (stable for picker).
+ */
+export function listDotClaudeModelIdsFromEnv(env: Record<string, unknown>): string[] {
+  const keys = [
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  ] as const;
+  const seen = new Set<string>();
+  const models: string[] = [];
+  for (const key of keys) {
+    const value = stringField(env[key]);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    models.push(value);
+  }
+  return models;
+}
+
 export function detectDotClaudeCliConfig(homeDir?: string): DotClaudeCliConfig | null {
   try {
     const home = homeDir ?? os.homedir();
@@ -247,8 +276,14 @@ export function detectDotClaudeCliConfig(homeDir?: string): DotClaudeCliConfig |
     const authToken = stringField(env.ANTHROPIC_AUTH_TOKEN) ?? stringField(env.ANTHROPIC_API_KEY);
     if (!baseUrl || !authToken) return null;
     const config: DotClaudeCliConfig = { settingsPath, baseUrl, authToken };
-    const model = stringField(env.ANTHROPIC_MODEL);
-    if (model) config.model = model;
+    const models = listDotClaudeModelIdsFromEnv(env);
+    if (models.length > 0) {
+      config.models = models;
+      config.model = models[0];
+    } else {
+      const model = stringField(env.ANTHROPIC_MODEL);
+      if (model) config.model = model;
+    }
     return config;
   } catch {
     return null;

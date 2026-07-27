@@ -340,4 +340,15 @@ describe("custom3pCliEnv residual", () => {
     expect(spawnEnv.ANTHROPIC_BASE_URL).toBeUndefined();
     expect(spawnEnv.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
+
+  it("resolveCliModelArg with dotClaude models drops bag deepseek against ~/.claude ids", () => {
+    // Simulated enterprise synthetic from ~/.claude models only (runner path).
+    const dotClaudeEnterprise = custom3pEnterpriseConfigFromUnknown({
+      inferenceProvider: "gateway",
+      inferenceModels: [{ name: "grok-4.5" }],
+    });
+    expect(resolveCliModelArg("deepseek-v4-pro", dotClaudeEnterprise)).toBeUndefined();
+    expect(resolveCliModelArg("grok-4.5", dotClaudeEnterprise)).toBe("grok-4.5");
+    expect(resolveCliModelArg("sonnet", dotClaudeEnterprise)).toBe("grok-4.5");
+  });
 });

@@ -15,6 +15,15 @@ import {
   writeCustom3pConfigLibrary,
 } from "../services/custom3p/custom3pConfigLibrary";
 import {
+  DOT_CLAUDE_SETUP_CONFIG_ID,
+  DOT_CLAUDE_SETUP_CONFIG_NAME,
+  isDotClaudeSetupConfigId,
+  listDotClaudeAsConfigLibrary,
+  readDotClaudeAsConfigLibrary,
+  revealDotClaudeSettingsPath,
+  writeDotClaudeAsConfigLibrary,
+} from "../services/custom3p/dotClaudeSetupBridge";
+import {
   getConfigHealth as getCustom3pConfigHealth,
   invalidateConfigHealthCache,
   recheckConfigHealth as recheckCustom3pConfigHealth,
@@ -144,6 +153,12 @@ function publishCustom3pBootstrapState(context: IpcHandlerContext): unknown {
   // click looked dead (IPC reject) until a second click.
   originalEventSurface(context).custom3pBootstrapStateUpdated(state);
   return state;
+}
+
+/** Login chose ~/.claude → Custom3pSetup must list/read/write that file, not configLibrary. */
+function isDotClaudeDeploymentMode(context: IpcHandlerContext): boolean {
+  // SettingsStore exposes getPreferences() only (no singular getPreference).
+  return context.settings.getPreferences()?.deploymentMode === "dotClaude";
 }
 
 /**
@@ -410,29 +425,19 @@ function extensionDirectoryUrl(context: IpcHandlerContext): string {
   return `app://localhost/api/organizations/local/dxt`;
 }
 
-async function exportCustom3pConfig(context: IpcHandlerContext, id: unknown, format: unknown) {
-  if (typeof id !== "string") return { ok: false, error: "invalid id" };
-  const userDataPath = ensureCustom3pConfigLibrary(context);
-  const listed = listCustom3pConfigLibrary(userDataPath);
-  const entry = listed.entries.find((row) => row.id === id);
-  const read = readCustom3pConfigLibrary(userDataPath, id);
-  if (!entry || !read.ok) return { ok: false, error: "config not found" };
+function buildCustom3pExportPayload(
+  config: unknown,
+  format: unknown,
+  meta: { id: string; name: string },
+): { exportFormat: "reg" | "mobileconfig"; defaultName: string; payload: string } {
   const exportFormat = format === "reg" ? "reg" : "mobileconfig";
-  const defaultName = `${entry.name.replace(/[^a-z0-9._-]+/gi, "-") || "claude-3p-config"}.${exportFormat}`;
-  const result = await dialog.showSaveDialog(context.windows.mainWindow, {
-    title: "Export Claude configuration",
-    defaultPath: defaultName,
-    filters: exportFormat === "reg"
-      ? [{ name: "Windows Registry", extensions: ["reg"] }]
-      : [{ name: "Configuration Profile", extensions: ["mobileconfig"] }],
-  });
-  if (result.canceled || !result.filePath) return { ok: false };
+  const defaultName = `${meta.name.replace(/[^a-z0-9._-]+/gi, "-") || "claude-3p-config"}.${exportFormat}`;
   const payload = exportFormat === "reg"
     ? [
         "Windows Registry Editor Version 5.00",
         "",
         "[HKEY_CURRENT_USER\\Software\\Anthropic\\Claude\\ThirdParty]",
-        `"Config"=${JSON.stringify(JSON.stringify(read.config))}`,
+        `"Config"=${JSON.stringify(JSON.stringify(config))}`,
         "",
       ].join("\r\n")
     : [
@@ -442,15 +447,47 @@ async function exportCustom3pConfig(context: IpcHandlerContext, id: unknown, for
         "<dict>",
         "  <key>PayloadType</key><string>com.anthropic.claude.third-party</string>",
         "  <key>PayloadVersion</key><integer>1</integer>",
-        `  <key>PayloadIdentifier</key><string>com.anthropic.claude.${entry.id}</string>`,
-        `  <key>PayloadDisplayName</key><string>${entry.name.replace(/[<>&]/g, "")}</string>`,
-        `  <key>ConfigJSON</key><string>${JSON.stringify(read.config).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</string>`,
+        `  <key>PayloadIdentifier</key><string>com.anthropic.claude.${meta.id}</string>`,
+        `  <key>PayloadDisplayName</key><string>${meta.name.replace(/[<>&]/g, "")}</string>`,
+        `  <key>ConfigJSON</key><string>${JSON.stringify(config).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</string>`,
         "</dict>",
         "</plist>",
         "",
       ].join("\n");
+  return { exportFormat, defaultName, payload };
+}
+
+/** Export an in-memory bag (dotClaude projection) without a configLibrary entry. */
+async function exportCustom3pConfigFromBag(
+  context: IpcHandlerContext,
+  config: unknown,
+  format: unknown,
+  meta: { id: string; name: string },
+) {
+  const { exportFormat, defaultName, payload } = buildCustom3pExportPayload(config, format, meta);
+  const result = await dialog.showSaveDialog(context.windows.mainWindow, {
+    title: "Export Claude configuration",
+    defaultPath: defaultName,
+    filters: exportFormat === "reg"
+      ? [{ name: "Windows Registry", extensions: ["reg"] }]
+      : [{ name: "Configuration Profile", extensions: ["mobileconfig"] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false };
   await fs.writeFile(result.filePath, payload);
   return { ok: true, path: result.filePath };
+}
+
+async function exportCustom3pConfig(context: IpcHandlerContext, id: unknown, format: unknown) {
+  if (typeof id !== "string") return { ok: false, error: "invalid id" };
+  const userDataPath = ensureCustom3pConfigLibrary(context);
+  const listed = listCustom3pConfigLibrary(userDataPath);
+  const entry = listed.entries.find((row) => row.id === id);
+  const read = readCustom3pConfigLibrary(userDataPath, id);
+  if (!entry || !read.ok) return { ok: false, error: "config not found" };
+  return exportCustom3pConfigFromBag(context, read.config, format, {
+    id: entry.id,
+    name: entry.name,
+  });
 }
 
 function normalizeProbeHost(host: string): string | null {
@@ -713,13 +750,29 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
     },
     Custom3pSetup: {
       // Official cgr/Igr/Egr/Cgr/ugr/dgr residual — userData/configLibrary
-      listConfigs: async () => custom3pConfigList(context),
+      // Product: dotClaude mode projects ~/.claude into the same IPC shape so
+      // "login chose X → Setup shows/edits X".
+      listConfigs: async () => (
+        isDotClaudeDeploymentMode(context)
+          ? listDotClaudeAsConfigLibrary()
+          : custom3pConfigList(context)
+      ),
       readConfig: async (_event, id) => {
         if (typeof id !== "string") return { ok: false, error: "invalid id" };
+        if (isDotClaudeDeploymentMode(context)) {
+          if (!isDotClaudeSetupConfigId(id)) return { ok: false, error: "config not found" };
+          return readDotClaudeAsConfigLibrary();
+        }
         return readCustom3pConfigLibrary(ensureCustom3pConfigLibrary(context), id);
       },
       writeConfig: async (_event, id, config) => {
         if (typeof id !== "string") return { ok: false, error: "invalid id" };
+        if (isDotClaudeDeploymentMode(context)) {
+          if (!isDotClaudeSetupConfigId(id)) return { ok: false, error: "config not found" };
+          const result = writeDotClaudeAsConfigLibrary(custom3pConfigInput(config));
+          publishCustom3pBootstrapState(context);
+          return result;
+        }
         const result = writeCustom3pConfigLibrary(
           ensureCustom3pConfigLibrary(context),
           id,
@@ -729,6 +782,10 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         return result;
       },
       createConfig: async (_event, input) => {
+        if (isDotClaudeDeploymentMode(context)) {
+          // Single live CLI file — no multi-config create under ~/.claude mode.
+          return { id: DOT_CLAUDE_SETUP_CONFIG_ID, name: DOT_CLAUDE_SETUP_CONFIG_NAME };
+        }
         const userDataPath = ensureCustom3pConfigLibrary(context);
         // Official Cgr: uuid + bag + meta; first create sets appliedId when none.
         const entry = createCustom3pConfigLibraryEntry(
@@ -740,6 +797,7 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         return entry;
       },
       duplicateConfig: async (_event, id, name) => {
+        if (isDotClaudeDeploymentMode(context)) return null;
         if (typeof id !== "string") return null;
         const entry = duplicateCustom3pConfigLibraryEntry(
           ensureCustom3pConfigLibrary(context),
@@ -750,6 +808,10 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         return entry;
       },
       renameConfig: async (_event, id, name) => {
+        if (isDotClaudeDeploymentMode(context)) {
+          if (!isDotClaudeSetupConfigId(id) || typeof name !== "string") return null;
+          return { id: DOT_CLAUDE_SETUP_CONFIG_ID, name: DOT_CLAUDE_SETUP_CONFIG_NAME };
+        }
         if (typeof id !== "string" || typeof name !== "string") return null;
         return renameCustom3pConfigLibraryEntry(
           ensureCustom3pConfigLibrary(context),
@@ -758,6 +820,10 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         );
       },
       deleteConfig: async (_event, id) => {
+        if (isDotClaudeDeploymentMode(context)) {
+          // Cannot delete the only ~/.claude projection.
+          return listDotClaudeAsConfigLibrary();
+        }
         const userDataPath = ensureCustom3pConfigLibrary(context);
         if (typeof id === "string") {
           try {
@@ -775,8 +841,23 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         }
         return listCustom3pConfigLibrary(userDataPath);
       },
-      exportConfig: async (_event, id, format) => exportCustom3pConfig(context, id, format),
+      exportConfig: async (_event, id, format) => {
+        if (isDotClaudeDeploymentMode(context) && isDotClaudeSetupConfigId(typeof id === "string" ? id : null)) {
+          const read = readDotClaudeAsConfigLibrary();
+          if (!read.ok) return { ok: false, error: read.error };
+          return exportCustom3pConfigFromBag(context, read.config, format, {
+            id: DOT_CLAUDE_SETUP_CONFIG_ID,
+            name: DOT_CLAUDE_SETUP_CONFIG_NAME,
+          });
+        }
+        return exportCustom3pConfig(context, id, format);
+      },
       setAppliedConfig: async (_event, id) => {
+        if (isDotClaudeDeploymentMode(context)) {
+          // Only one live projection — Apply is a no-op success (already applied).
+          publishCustom3pBootstrapState(context);
+          return isDotClaudeSetupConfigId(typeof id === "string" ? id : null);
+        }
         const ok =
           typeof id === "string"
             ? setAppliedCustom3pConfigLibraryId(ensureCustom3pConfigLibrary(context), id)
@@ -785,6 +866,11 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         return ok;
       },
       revealConfig: async (_event, id) => {
+        if (isDotClaudeDeploymentMode(context)) {
+          const target = revealDotClaudeSettingsPath();
+          if (target) shell.showItemInFolder(target);
+          return Boolean(target);
+        }
         const target = revealCustom3pConfigLibraryPath(
           ensureCustom3pConfigLibrary(context),
           typeof id === "string" ? id : null,

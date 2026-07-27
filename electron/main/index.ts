@@ -302,12 +302,27 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
         resolveDeploymentModeFromUserData(app.getPath("userData")).resolution,
       // Official eMA/u2 residual: bootstrap models come from applied enterprise bag
       // (userData/configLibrary inferenceModels), not hardcoded Sonnet/Opus.
+      // Product dotClaude: picker must mirror ~/.claude env models — bag deepseek ids
+      // against a multi-provider ~/.claude gateway produce "unknown provider for model".
       bootstrap: () => {
         const snapshot = resolveDeploymentModeFromUserData(app.getPath("userData"));
         const bag =
           snapshot.appliedConfig && typeof snapshot.appliedConfig === "object"
             ? (snapshot.appliedConfig as Record<string, unknown>)
             : {};
+        const isDotClaude =
+          snapshot.resolution.mode === "dotClaude"
+          || snapshot.resolution.persistedDeploymentMode === "dotClaude";
+        if (isDotClaude) {
+          const dotModels = snapshot.dotClaudeConfig?.models ?? (
+            snapshot.dotClaudeConfig?.model ? [snapshot.dotClaudeConfig.model] : []
+          );
+          return {
+            provider: "gateway",
+            inferenceModels: dotModels.map((name) => ({ name })),
+            models: dotModels.map((id) => ({ id, name: id })),
+          };
+        }
         return {
           provider: typeof bag.inferenceProvider === "string" ? bag.inferenceProvider : undefined,
           inferenceModels: Array.isArray(bag.inferenceModels) ? bag.inferenceModels : [],

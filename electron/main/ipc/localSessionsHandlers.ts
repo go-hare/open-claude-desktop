@@ -17,7 +17,6 @@ import {
   setLocalSkillEnabled,
 } from "../services/localSessions/localAgentAssets";
 import type { LocalSessionStore } from "../services/localSessions/localSessionStore";
-import { scanCodeSessionFiles, readCodeSessionMetadata } from "../services/localSessions/codeTranscriptJsonl";
 import { parseEffortFlagSettings } from "../services/localSessions/claudeCliRunner";
 import { getSupportedCommands } from "../services/localSessions/supportedCommands";
 import { getTranscriptFeedback, submitTranscriptFeedback } from "../services/localSessions/transcriptFeedbackStore";
@@ -28,6 +27,14 @@ import { getLocalSessionRunner } from "./localSessionRunner";
 import { originalEventSurface } from "./originalEventSurface";
 import { describeMcpServer, mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
 import { getOfficialGitDiff } from "../services/localSessions/officialGitDiff";
+import { resolveSshRemoteCwd } from "../services/localSessions/sshCliSpawn";
+import {
+  buildSshArgv,
+  defaultExecSsh,
+  normalizeSessionSshConfig,
+  shellQuote,
+  type SessionSshConfig,
+} from "../services/localSessions/sshTranscriptSync";
 import type { InterfaceHandlers, IpcHandler } from "./registerIpc";
 import { dispatchBridgeEvent, registerInterfaceHandlers } from "./registerIpc";
 
@@ -103,6 +110,12 @@ const BRIDGE_SESSION_KEYS = [
   "sourceBranch",
   "useWorktree",
   "worktreeName",
+  "worktreePath",
+  "originCwd",
+  "sshConfig",
+  "sshRemoteTranscriptPath",
+  "sshRemoteProjectDir",
+  "sshLocalTranscriptSize",
   "visibility",
   "agent",
   "origin",
@@ -404,19 +417,69 @@ async function saveSshSettings(settings: SshSettingsFile): Promise<void> {
   await fs.writeFile(filePath, JSON.stringify(settings, null, 2));
 }
 
+/**
+ * Official Hd residual + product ssh_configs.json shape.
+ * Prefer normalizeSessionSshConfig (sshHost/sshPort/remoteCwd aliases) and expose
+ * both host-form and official sshHost-form fields on the bridge object.
+ */
 function normalizeSshConfig(value: unknown): Record<string, unknown> | null {
-  if (typeof value === "string" && value.length > 0) return { host: value };
-  const raw = asObject(value);
-  const host = asString(raw.host) ?? asString(raw.name) ?? asString(raw.hostName);
-  if (!host) return null;
+  const normalized = normalizeSessionSshConfig(value);
+  if (!normalized) return null;
   return {
-    ...raw,
-    host,
-    hostName: asString(raw.hostName) ?? asString(raw.hostname) ?? host,
-    user: asString(raw.user),
-    port: raw.port,
-    identityFile: asString(raw.identityFile) ?? asString(raw.identityfile),
+    ...asObject(value),
+    host: normalized.host,
+    hostName: normalized.hostName ?? normalized.host,
+    user: normalized.user,
+    port: normalized.port,
+    identityFile: normalized.identityFile,
+    proxyJump: normalized.proxyJump,
+    remoteCwd: normalized.remoteCwd,
+    // Official residual aliases (Hd / session.sshConfig / J$A ssh_configs entry).
+    sshHost: normalized.sshHost ?? normalized.host,
+    sshPort: normalized.sshPort ?? normalized.port,
+    sshIdentityFile: normalized.sshIdentityFile ?? normalized.identityFile,
+    name: normalized.name,
+    id: normalized.id,
   };
+}
+
+function sessionSshConfigFromUnknown(value: unknown): SessionSshConfig | null {
+  return normalizeSessionSshConfig(value);
+}
+
+/** Extract sshConfig from start() input (top-level, nested workspace, or official sshHost). */
+function extractStartSshConfig(request: Record<string, unknown>): SessionSshConfig | null {
+  const direct =
+    sessionSshConfigFromUnknown(request.sshConfig)
+    ?? sessionSshConfigFromUnknown(request);
+  if (direct && (request.sshConfig || request.sshHost || request.host)) return direct;
+
+  const workspace = asObject(request.workspace);
+  const fromWorkspace =
+    sessionSshConfigFromUnknown(workspace.sshConfig)
+    ?? sessionSshConfigFromUnknown(workspace);
+  if (fromWorkspace && (workspace.sshConfig || workspace.sshHost || workspace.mode === "ssh" || workspace.mode === "remote")) {
+    // Prefer workspace.cwd as remoteCwd when not set on the config.
+    if (!fromWorkspace.remoteCwd) {
+      const cwd = asString(workspace.cwd) ?? asString(workspace.remoteCwd);
+      if (cwd) fromWorkspace.remoteCwd = cwd;
+    }
+    return fromWorkspace;
+  }
+
+  // Bare sshHost on request (official startSession shape).
+  if (asString(request.sshHost)) {
+    return sessionSshConfigFromUnknown({
+      sshHost: request.sshHost,
+      sshPort: request.sshPort,
+      sshIdentityFile: request.sshIdentityFile,
+      remoteCwd: request.remoteCwd ?? request.cwd,
+      host: request.sshHost,
+      port: request.sshPort,
+      identityFile: request.sshIdentityFile,
+    });
+  }
+  return null;
 }
 
 function parseSshConfig(text: string): Array<Record<string, unknown>> {
@@ -761,6 +824,11 @@ function streaksForDates(dates: Set<string>) {
   return { currentStreak, longestStreak };
 }
 
+/**
+ * Code stats from userData metadata only.
+ * Official residual does not bulk-load every jsonl on stats/list — that path OOMs when
+ * ~/.claude/projects is multi-GB. Token/tool detail stays on per-session getTranscript.
+ */
 async function getSessionUsageCodeStats(store: LocalSessionStore) {
   const sessions = store.getAll(true).filter((session) => session.kind === "code");
   const daily = new Map<string, { messageCount: number; sessionCount: number; toolCallCount: number }>();
@@ -772,24 +840,23 @@ async function getSessionUsageCodeStats(store: LocalSessionStore) {
     const sessionDate = dateKey(session.createdAt);
     const day = daily.get(sessionDate) ?? { messageCount: 0, sessionCount: 0, toolCallCount: 0 };
     day.sessionCount += 1;
-    const transcriptUsage = contextUsageFromTranscript(await store.getTranscript(session.id));
-    day.toolCallCount += transcriptUsage.toolCallCount;
     daily.set(sessionDate, day);
 
     const model = session.model || "opus-4";
     modelUsage[model] ??= emptyModelUsage();
-    if (hasUsage(transcriptUsage)) {
-      addUsage(modelUsage[model], transcriptUsage);
-      const tokensByModel = dailyModelTokens.get(sessionDate) ?? {};
-      tokensByModel[model] = (tokensByModel[model] ?? 0) + transcriptUsage.totalTokens;
-      dailyModelTokens.set(sessionDate, tokensByModel);
-    }
 
-    // Persisted session.messages is empty post-migration (content lives in the jsonl) —
-    // skip the per-message activity/token loop; usage comes from the transcript above.
+    const activityAt = Date.parse(session.lastActivityAt ?? session.updatedAt ?? session.createdAt);
+    if (Number.isFinite(activityAt)) {
+      const hour = new Date(activityAt).getUTCHours();
+      hourly.set(hour, (hourly.get(hour) ?? 0) + 1);
+    }
   }
 
-  const activeDates = new Set(Array.from(daily.entries()).filter(([, value]) => value.sessionCount > 0 || value.messageCount > 0).map(([date]) => date));
+  const activeDates = new Set(
+    Array.from(daily.entries())
+      .filter(([, value]) => value.sessionCount > 0 || value.messageCount > 0)
+      .map(([date]) => date),
+  );
   const peak = Array.from(hourly.entries()).sort((left, right) => right[1] - left[1])[0]?.[0] ?? null;
 
   return {
@@ -899,7 +966,6 @@ function createSessionHandlers(
   store: LocalSessionStore,
   context: IpcHandlerContext,
   allMethods: readonly string[],
-  storeKind: "code" | "cowork" = "cowork",
 ): InterfaceHandlers {
   const ptys = new Map<string, { terminal: { pid: number; write: (data: string) => void; kill: (signal?: string) => void; resize?: (cols: number, rows: number) => void }; buffer: string }>();
   const handlers: InterfaceHandlers = {};
@@ -916,70 +982,12 @@ function createSessionHandlers(
   const sessionRunner = getLocalSessionRunner(context);
 
   /**
-   * Official-aligned session list: the source of truth is `~/.claude/projects/*.jsonl`
-   * (scanned live — a CLI-run session shows up without any import), merged with the
-   * desktop-authored sessions and userData附加状态 (title override / pin / archive /
-   * model / permissionMode / running). No jsonl content is ever copied into userData.
+   * Official LocalSessionManager.getAllSessions residual:
+   * list comes from userData session store only (metadata). Never scan/read
+   * ~/.claude/projects/*.jsonl here — that is on-demand getTranscript only.
+   * CLI sessions enter the list via desktop start/import (importCliSession), not bulk scan.
    */
-  const listMergedSessions = async (): Promise<unknown[]> => {
-    const stored = store.getAll(true);
-    const byCliId = new Map(stored.filter((s) => s.cliSessionId).map((s) => [s.cliSessionId!, s]));
-    const merged: unknown[] = [];
-    const seenStored = new Set<string>();
-    // Code sessions only scan jsonl; cowork keeps its own persisted list.
-    if (storeKind === "code") {
-      try {
-        const files = await scanCodeSessionFiles();
-        const metas = await Promise.all(files.map((file) => readCodeSessionMetadata(file.filePath, file.cliSessionId).catch(() => null)));
-        for (const meta of metas) {
-          if (!meta) continue;
-          const existing = byCliId.get(meta.cliSessionId);
-          if (existing) {
-            seenStored.add(existing.id);
-            merged.push(existing);
-            continue;
-          }
-          // jsonl-only session (never touched from the desktop) — materialize a metadata-only
-          // stub in the store so getSession/getTranscript resolve it (transcript is read live
-          // from the jsonl; nothing but metadata is persisted).
-          const stub = {
-            id: `cli_${meta.cliSessionId}`,
-            sessionId: `cli_${meta.cliSessionId}`,
-            title: meta.title,
-            kind: "code",
-            sessionKind: "code",
-            createdAt: meta.createdAt,
-            updatedAt: meta.updatedAt,
-            lastActivityAt: meta.updatedAt,
-            cwd: meta.cwd,
-            folders: meta.cwd ? [meta.cwd] : [],
-            userSelectedFolders: meta.cwd ? [meta.cwd] : [],
-            cliSessionId: meta.cliSessionId,
-            origin: "cli-jsonl",
-            isRunning: false,
-            messages: [],
-            transcript: [],
-          };
-          merged.push(stub);
-          const inStore = store.getSession(stub.id);
-          if (!inStore) {
-            store.adoptScannedSession(stub as never);
-          } else if (inStore.origin === "cli-jsonl" && !inStore.metadata?.userTitle && inStore.title !== stub.title) {
-            // Re-scan picked up a better title (custom-title appeared) and the desktop hasn't
-            // customized this row — refresh it. Desktop-authored edits (userTitle) win.
-            store.update(inStore.id, { title: stub.title });
-          }
-        }
-      } catch {
-        // ~/.claude unreadable — fall back to the persisted list only
-      }
-    }
-    for (const session of stored) {
-      if (seenStored.has(session.id) || session.archived) continue;
-      merged.push(session);
-    }
-    return merged;
-  };
+  const listStoredSessions = (): unknown[] => store.getAll(true);
 
   const sendCodeMessage: IpcHandler = async (_event, id, text, images, permissionMode, messageUuid, options) => {
     const sessionId = asString(id);
@@ -1106,29 +1114,58 @@ function createSessionHandlers(
       return { ok: true, buffered: existing.buffer };
     }
 
-    // Must be an existing host directory. Guest dual-exec paths (/sessions/…) are not
-    // host-loop PTY cwd — node-pty exits with code 1 → "Shell exited."
-    const cwd = shellPtyCwdFromSession(store, sessionId);
-    const shell = defaultShell();
+    const baseId = shellPtyBaseSessionId(sessionId);
+    const session = store.getSession(baseId);
     const nodePty = loadOriginalNodePty();
     if (!nodePty) {
       return { ok: false, error: "node-pty runtime unavailable" };
     }
+
+    // Official residual: local shell PTY uses node-pty on host cwd.
+    // SSH sessions: host-pipe `ssh -tt` into remoteCwd (product subset — official full
+    // path keeps shell local unless remote harness; we honor session.sshConfig here so
+    // Terminal pane works for SSH Code sessions).
     try {
-      const terminal = nodePty.spawn(shell.file, shell.args, {
-        name: "xterm-256color",
-        cols: cols ?? 80,
-        rows: rows ?? 24,
-        cwd,
-        env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" },
-      });
+      let terminal: ReturnType<NonNullable<typeof nodePty>["spawn"]>;
+      let cwdLabel: string;
+      if (session?.sshConfig) {
+        const remoteCwd = resolveSshRemoteCwd(session);
+        const remoteLogin = `cd ${shellQuote(remoteCwd)} 2>/dev/null || cd ~; exec "$SHELL" -l`;
+        const remoteCommand = `sh -c ${shellQuote(remoteLogin)}`;
+        const argv = buildSshArgv(session.sshConfig, remoteCommand, {
+          batchMode: false,
+          forceTty: true,
+          connectTimeoutSeconds: 30,
+        });
+        cwdLabel = `ssh://${session.sshConfig.host}:${remoteCwd}`;
+        terminal = nodePty.spawn("ssh", argv, {
+          name: "xterm-256color",
+          cols: cols ?? 80,
+          rows: rows ?? 24,
+          cwd: process.cwd(),
+          env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" },
+        });
+      } else {
+        // Must be an existing host directory. Guest dual-exec paths (/sessions/…) are not
+        // host-loop PTY cwd — node-pty exits with code 1 → "Shell exited."
+        const cwd = shellPtyCwdFromSession(store, sessionId);
+        const shell = defaultShell();
+        cwdLabel = cwd;
+        terminal = nodePty.spawn(shell.file, shell.args, {
+          name: "xterm-256color",
+          cols: cols ?? 80,
+          rows: rows ?? 24,
+          cwd,
+          env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" },
+        });
+      }
       ptys.set(sessionId, { terminal, buffer: "" });
       terminal.onData((data) => appendPtyData(sessionId, data));
       terminal.onExit(({ exitCode, signal }) => {
         dispatchBridgeSessionEvent({ type: "shell_pty_close", sessionId, code: exitCode, signal });
         ptys.delete(sessionId);
       });
-      return { ok: true, buffered: "", cwd };
+      return { ok: true, buffered: "", cwd: cwdLabel };
     } catch (error) {
       console.warn("[local-sessions] node-pty spawn failed", error);
       return { ok: false, error: error instanceof Error ? error.message : "Failed to start shell" };
@@ -1150,15 +1187,43 @@ function createSessionHandlers(
   };
 
   const realHandlers: InterfaceHandlers = {
-    getAll: async () => toBridgeSessions(await listMergedSessions()),
+    getAll: async () => toBridgeSessions(listStoredSessions()),
     getSession: async (_event, id) => (asString(id) ? toBridgeSession(store.getSession(asString(id)!)) : null),
     getTranscript: async (_event, id) => (asString(id) ? await store.getTranscript(asString(id)!) : []),
     start: async (_event, input) => {
       const request = asObject(input);
-      const session = store.start(request as never);
+      const sshConfig = extractStartSshConfig(request);
+      // Official startSession: when sshConfig present, cwd is remote (remoteCwd).
+      const remoteCwd = sshConfig
+        ? (asString(request.cwd) ?? sshConfig.remoteCwd ?? asString(asObject(request.workspace).cwd) ?? undefined)
+        : undefined;
+      if (sshConfig && remoteCwd && !sshConfig.remoteCwd) sshConfig.remoteCwd = remoteCwd;
+
+      // Always normalize/clear sshConfig: spreading raw request would keep invalid
+      // empty-host objects and force claude-cli-ssh spawn (verifier FAIL).
+      const startInput: Record<string, unknown> = {
+        ...request,
+        sshConfig: sshConfig ?? undefined,
+      };
+      if (!sshConfig) {
+        delete startInput.sshConfig;
+      } else {
+        startInput.cwd = remoteCwd ?? sshConfig.remoteCwd ?? asString(request.cwd) ?? undefined;
+        startInput.originCwd =
+          asString(request.originCwd)
+          ?? remoteCwd
+          ?? sshConfig.remoteCwd
+          ?? asString(request.cwd)
+          ?? undefined;
+      }
+      const session = store.start(startInput as never);
       dispatchSessionEvent("start", session.id, session);
       const prompt = asString(request.prompt) ?? asString(request.message) ?? "";
       const userSelectedFiles = stringArray(request.userSelectedFiles);
+      // Official: worktree lease before first turn when useWorktree is set.
+      if (session.useWorktree || session.worktreeName) {
+        await store.ensureWorktreeResolved(session.id);
+      }
       if (prompt || userSelectedFiles.length > 0) sessionRunner.runTurn(session.id, prompt, request);
       const scheduledTaskId = asString(request.scheduledTaskId);
       if (scheduledTaskId) {
@@ -1268,7 +1333,35 @@ function createSessionHandlers(
     isFolderTrusted: async (_event, folder) => Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)),
     checkTrust: async (_event, folder) => ({ trusted: Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)), sources: [] }),
     checkPty: async (_event, sessionId) => checkPtyAlive(asString(sessionId) ?? ""),
-    checkRemoteTrust: async () => ({ trusted: false, remote: true, sources: [] }),
+    checkRemoteTrust: async (_event, sshConfigRaw, folder) => {
+      const sshConfig = sessionSshConfigFromUnknown(sshConfigRaw);
+      const remoteFolder = asString(folder) ?? sshConfig?.remoteCwd ?? "~";
+      if (!sshConfig) return { trusted: false, remote: true, sources: [] };
+      // Official: remote trust key is `ssh:${sshHost}:${folder}`. Without a full
+      // trust store, probe path existence over SSH and treat known_hosts/app
+      // trustedHosts as the trust source (BatchMode success ⇒ host keys accepted).
+      const settings = await loadSshSettings();
+      const trustedHosts = Array.isArray(settings.trustedHosts)
+        ? settings.trustedHosts.filter((host): host is string => typeof host === "string")
+        : [];
+      const host = sshConfig.host;
+      const known = await readKnownSshHosts();
+      const hostTrusted = trustedHosts.includes(host) || known.includes(host) || known.includes(sshConfig.hostName || host);
+      const probe = await defaultExecSsh(
+        sshConfig,
+        `sh -c ${shellQuote(`test -e ${shellQuote(remoteFolder)} || test -e ~`)}`,
+      );
+      if (probe.exitCode !== 0) {
+        return { trusted: false, remote: true, sources: [], error: probe.stderr || "ssh_probe_failed" };
+      }
+      return {
+        trusted: hostTrusted,
+        remote: true,
+        sources: hostTrusted ? ["ssh-host"] : [],
+        host,
+        folder: remoteFolder,
+      };
+    },
     saveTrust: async (_event, folder) => {
       const target = asString(folder);
       if (!target) return false;
@@ -1619,9 +1712,65 @@ function createSessionHandlers(
       const result = await dialog.showOpenDialog(context.windows.mainWindow, { defaultPath: cwd ?? undefined, properties: ["openFile"] });
       return result.canceled ? null : result.filePaths[0] ?? null;
     },
-    listSSHDirectory: async (_event, directory) => listDirectory(path.resolve(String(directory ?? app.getPath("home")))),
-    validateSSHPath: async (_event, filePath) => {
-      try { await fs.access(String(filePath)); return { valid: true }; } catch { return { valid: false }; }
+    listSSHDirectory: async (_event, sshConfigOrDir, maybeDir) => {
+      // Official: listSSHDirectory(sshConfig, remotePath). Legacy product called with a local path only.
+      const asConfig = sessionSshConfigFromUnknown(sshConfigOrDir);
+      if (asConfig) {
+        const remotePath =
+          asString(maybeDir)
+          ?? asString(asObject(sshConfigOrDir).remoteCwd)
+          ?? asConfig.remoteCwd
+          ?? "~";
+        const script = [
+          `dir=${shellQuote(remotePath)}`,
+          'cd "$dir" 2>/dev/null || cd ~ || exit 1',
+          'pwd',
+          // name|type|path — one entry per line
+          'for e in * .[!.]* ..?*; do',
+          '  [ -e "$e" ] || continue',
+          '  [ "$e" = "." ] || [ "$e" = ".." ] && continue',
+          '  if [ -d "$e" ]; then t=dir; else t=file; fi',
+          '  printf "%s|%s|%s\\n" "$e" "$t" "$(pwd)/$e"',
+          "done",
+        ].join("; ");
+        const result = await defaultExecSsh(asConfig, `sh -c ${shellQuote(script)}`);
+        if (result.exitCode !== 0) {
+          return { error: result.stderr || "list_failed", entries: [] };
+        }
+        const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+        // First line is pwd when script prints pwd first — skip non | lines as cwd header.
+        const entries: Array<{ name: string; path: string; isDirectory: boolean }> = [];
+        for (const line of lines) {
+          if (!line.includes("|")) continue;
+          const [name, type, fullPath] = line.split("|");
+          if (!name || !fullPath) continue;
+          entries.push({
+            name,
+            path: fullPath,
+            isDirectory: type === "dir" || type === "directory",
+          });
+        }
+        return { entries, error: null };
+      }
+      // Fallback: local list (legacy).
+      return listDirectory(path.resolve(String(sshConfigOrDir ?? app.getPath("home"))));
+    },
+    validateSSHPath: async (_event, sshConfigOrPath, maybePath) => {
+      const asConfig = sessionSshConfigFromUnknown(sshConfigOrPath);
+      if (asConfig) {
+        const remotePath = asString(maybePath) ?? asString(asObject(sshConfigOrPath).remoteCwd) ?? asConfig.remoteCwd ?? "~";
+        const result = await defaultExecSsh(
+          asConfig,
+          `sh -c ${shellQuote(`test -e ${shellQuote(remotePath)}`)}`,
+        );
+        return { valid: result.exitCode === 0, path: remotePath };
+      }
+      try {
+        await fs.access(String(sshConfigOrPath));
+        return { valid: true };
+      } catch {
+        return { valid: false };
+      }
     },
     checkGhAvailable: async () => ({ available: await commandExists("gh") }),
     installGh: async () => {
@@ -1837,12 +1986,42 @@ function createSessionHandlers(
     },
     respondToSSHPassword: async () => true,
     testSSHConnection: async (_event, host) => {
-      const target = asString(host) ?? asString(asObject(host).host);
+      const asConfig = sessionSshConfigFromUnknown(host);
+      if (asConfig) {
+        const result = await defaultExecSsh(asConfig, "true");
+        return {
+          ok: result.exitCode === 0,
+          code: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          host: asConfig.host,
+        };
+      }
+      const target = asString(host) ?? asString(asObject(host).host) ?? asString(asObject(host).sshHost);
       if (!target) return { ok: false, reason: "missing_ssh_host" };
-      return runProcess(process.cwd(), "ssh", ["-G", target], 10000);
+      const resolved = await runProcess(process.cwd(), "ssh", ["-G", target], 10000);
+      if (resolved.code !== 0) return { ok: false, ...resolved, host: target };
+      const probe = await runProcess(
+        process.cwd(),
+        "ssh",
+        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target, "true"],
+        10000,
+      );
+      return { ok: probe.code === 0, ...probe, host: target };
     },
     ensureSSHConnected: async (_event, host) => {
-      const target = asString(host) ?? asString(asObject(host).host);
+      const asConfig = sessionSshConfigFromUnknown(host);
+      if (asConfig) {
+        const result = await defaultExecSsh(asConfig, "true");
+        return {
+          ok: result.exitCode === 0,
+          code: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          host: asConfig.host,
+        };
+      }
+      const target = asString(host) ?? asString(asObject(host).host) ?? asString(asObject(host).sshHost);
       if (!target) return { ok: false, reason: "missing_ssh_host" };
       return runProcess(process.cwd(), "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target, "true"], 10000);
     },
@@ -1915,6 +2094,12 @@ function createSessionHandlers(
         cwd: asString(request.cwd) ?? parent?.cwd,
         folders: Array.isArray(request.folders) ? request.folders : parent?.folders,
         kind: parent?.kind,
+        // Official: sidechat inherits sshConfig / worktree from parent when present.
+        sshConfig: sessionSshConfigFromUnknown(request.sshConfig) ?? parent?.sshConfig,
+        originCwd: asString(request.originCwd) ?? parent?.originCwd,
+        worktreePath: asString(request.worktreePath) ?? parent?.worktreePath,
+        worktreeName: asString(request.worktreeName) ?? parent?.worktreeName,
+        useWorktree: typeof request.useWorktree === "boolean" ? request.useWorktree : parent?.useWorktree,
         origin: "sidechat",
         prompt,
         title: asString(request.title) ?? (parent ? `${parent.title} side chat` : "Side chat"),
@@ -1935,7 +2120,17 @@ function createSessionHandlers(
     cancelQueuedMessage: async () => true,
     enableAutoMerge: async () => true,
     disableAutoMerge: async () => true,
-    releaseWorktree: async () => true,
+    releaseWorktree: async (_event, id, options) => {
+      const sessionId = asString(id) ?? asString(asObject(id).sessionId);
+      if (!sessionId) return false;
+      const request = { ...asObject(id), ...asObject(options) };
+      const session = await store.releaseWorktree(sessionId, {
+        cleanupWorktree: request.cleanupWorktree !== false && request.cleanup !== false,
+        force: request.force !== false,
+      });
+      if (session) dispatchSessionEvent("session_updated", sessionId, session);
+      return toBridgeSession(session);
+    },
     rewind: async (_event, id, messageId) => {
       const sessionId = asString(id);
       if (sessionId) sessionRunner.stop(sessionId);
@@ -1979,7 +2174,7 @@ export function registerLocalSessionsHandlers(context: IpcHandlerContext): void 
   registerInterfaceHandlers(
     "claude.web",
     "LocalSessions",
-    createSessionHandlers(context.localSessions, context, LOCAL_SESSIONS_METHODS, "code"),
+    createSessionHandlers(context.localSessions, context, LOCAL_SESSIONS_METHODS),
     "claude.web.LocalSessions",
   );
   registerInterfaceHandlers("claude.web", "LocalSessionEnvironment", {

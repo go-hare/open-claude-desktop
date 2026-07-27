@@ -7,6 +7,7 @@ import {
   detectDotClaudeCliConfig,
   hasThirdPartyActivationKeys,
   hasUsableThirdPartyCredentials,
+  listDotClaudeModelIdsFromEnv,
   resolveDeploymentMode,
   resolveDeploymentModeFromUserData,
 } from "./deploymentMode";
@@ -185,12 +186,27 @@ it("detectDotClaudeCliConfig: baseUrl + token → detected (secret stays local)"
     ANTHROPIC_BASE_URL: "https://gateway.example.com",
     ANTHROPIC_AUTH_TOKEN: "sk-secret",
     ANTHROPIC_MODEL: "grok-4.5",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "grok-4.5",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "kimi-k3",
   });
   const config = detectDotClaudeCliConfig(home);
   expect(config?.baseUrl).toBe("https://gateway.example.com");
   expect(config?.authToken).toBe("sk-secret");
   expect(config?.model).toBe("grok-4.5");
+  expect(config?.models).toEqual(["grok-4.5", "kimi-k3"]);
   expect(config?.settingsPath).toContain("settings.json");
+});
+
+it("listDotClaudeModelIdsFromEnv: unique ordered model ids", () => {
+  expect(
+    listDotClaudeModelIdsFromEnv({
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "a",
+      ANTHROPIC_MODEL: "b",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "b",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "c",
+    }),
+  ).toEqual(["b", "a", "c"]);
+  expect(listDotClaudeModelIdsFromEnv({})).toEqual([]);
 });
 
 it("N1e dotClaude: persisted dotClaude maps to 3p shell, active when config present", () => {

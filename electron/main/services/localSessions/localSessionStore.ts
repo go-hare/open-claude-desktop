@@ -1,14 +1,27 @@
 import { app } from "electron";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { readCodeSessionMetadata, readCodeTranscript, resolveCodeTranscriptPath } from "./codeTranscriptJsonl";
+import {
+  clearCodeTranscriptCaches,
+  readCodeSessionMetadata,
+  readCodeTranscript,
+  resolveCodeTranscriptPath,
+} from "./codeTranscriptJsonl";
+import {
+  fetchRemoteTranscript,
+  normalizeSessionSshConfig,
+  type SessionSshConfig,
+} from "./sshTranscriptSync";
+import { createRemoteWorktree, removeRemoteWorktree } from "./sshRemoteWorktree";
+import { removeGitWorktree, resolveWorktreePath } from "./worktreePaths";
 
 export type LocalSessionKind = "epitaxy" | "code";
 
 export type LocalSessionMessage = { id: string; role: "user" | "assistant" | "system"; text: string; createdAt: string; raw?: unknown };
 
 export type LocalSessionRuntime = {
-  kind: "local" | "claude-cli";
+  kind: "local" | "claude-cli" | "claude-cli-ssh";
   executable?: string;
   lastExitCode?: number | null;
   lastError?: string;
@@ -51,6 +64,21 @@ export type LocalSession = {
   sourceBranch?: string;
   useWorktree?: boolean;
   worktreeName?: string;
+  /**
+   * Official residual: absolute worktree path after lease/create.
+   * `cwd` is switched to this path; `originCwd` keeps the base repo.
+   */
+  worktreePath?: string;
+  /** Base repository cwd before worktree switch (official originCwd). */
+  originCwd?: string;
+  /**
+   * Official residual: when set, getTranscript byte-syncs remote jsonl via SSH
+   * into ~/.claude/projects/ssh-<cliSessionId>/ before parsing.
+   */
+  sshConfig?: SessionSshConfig;
+  sshRemoteTranscriptPath?: string;
+  sshRemoteProjectDir?: string;
+  sshLocalTranscriptSize?: number;
   visibility?: string;
   agent?: string;
   agents?: unknown;
@@ -100,6 +128,9 @@ export type StartLocalSessionInput = {
   sourceBranch?: string;
   useWorktree?: boolean;
   worktreeName?: string;
+  worktreePath?: string;
+  originCwd?: string;
+  sshConfig?: SessionSshConfig;
   agent?: string;
   agents?: unknown;
   enabledMcpTools?: unknown[];
@@ -404,19 +435,178 @@ export class LocalSessionStore {
     if (!session) return [];
     let liveEvents = this.getLiveEvents(id);
     if (session.cliSessionId) {
-      const fromDisk = await readCodeTranscript(session.cliSessionId, session.cwd);
+      // Official: ssh sessions → fetchRemoteTranscript (byte-sync mirror) before disk read.
+      // Local sessions → loadTranscriptFromDisk with cwd/worktree/origin hints.
+      let fromDisk: unknown[] = [];
+      if (session.sshConfig) {
+        fromDisk = await fetchRemoteTranscript(
+          {
+            sessionId: session.id,
+            cliSessionId: session.cliSessionId,
+            sshConfig: session.sshConfig,
+            sshRemoteTranscriptPath: session.sshRemoteTranscriptPath,
+            sshRemoteProjectDir: session.sshRemoteProjectDir,
+            sshLocalTranscriptSize: session.sshLocalTranscriptSize,
+          },
+          {
+            onSessionPatch: (patch) => {
+              this.update(id, patch as Partial<LocalSession>);
+            },
+            onLocalFileRewritten: () => {
+              clearCodeTranscriptCaches();
+            },
+          },
+        );
+      } else {
+        fromDisk = await readCodeTranscript(session.cliSessionId, {
+          cwd: session.cwd,
+          worktreePath: session.worktreePath,
+          originCwd: session.originCwd,
+        });
+      }
       if (fromDisk.length > 0) {
-        // The CLI echoes desktop-sent user rows into the jsonl with the same outer uuid —
+        // Official zke: CLI echoes desktop-sent user rows with the same outer uuid —
         // drop live-tail rows already on disk so the merged view has no duplicates.
-        const onDisk = new Set(fromDisk.map((event) => outerEventUuid(event)).filter(Boolean));
+        // Do NOT text-dedupe live users: intentional re-sends of the same prompt use a
+        // new outer uuid and must stay visible. Mismatched-uuid double paint is handled by
+        // (1) minting messageUuid on start/send + stdin stamp, and (2) web promote of
+        // isLocalOptimistic plain-user seeds by same trimmed text.
+        const onDisk = new Set(
+          fromDisk.map((event) => outerEventUuid(event)).filter((id): id is string => Boolean(id)),
+        );
         liveEvents = liveEvents.filter((event) => {
           const outer = outerEventUuid(event);
-          return !outer || !onDisk.has(outer);
+          if (outer && onDisk.has(outer)) return false;
+          return true;
         });
         return [...fromDisk, ...liveEvents];
       }
     }
     return liveEvents;
+  }
+
+  /**
+   * Official worktree attach residual: set worktreePath, switch cwd, keep originCwd.
+   */
+  attachWorktree(
+    id: string,
+    input: { worktreePath: string; worktreeName?: string; originCwd?: string },
+  ): LocalSession | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const worktreePath = path.resolve(input.worktreePath);
+    const originCwd = input.originCwd
+      ?? session.originCwd
+      ?? (session.worktreePath ? session.originCwd : session.cwd);
+    return this.update(id, {
+      originCwd: originCwd ? path.resolve(originCwd) : originCwd,
+      worktreePath,
+      worktreeName: input.worktreeName ?? session.worktreeName ?? path.basename(worktreePath),
+      useWorktree: true,
+      cwd: worktreePath,
+    });
+  }
+
+  /**
+   * Resolve worktree path via git porcelain when only worktreeName/useWorktree is set,
+   * then attach (official post-create session field write).
+   * SSH sessions: createRemoteWorktree over host-pipe ssh (official createRemoteWorktree subset).
+   */
+  async ensureWorktreeResolved(id: string): Promise<LocalSession | null> {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if (session.worktreePath) {
+      // Local: require host existence. SSH: remote path is not on host FS.
+      if (session.sshConfig || fs.existsSync(session.worktreePath)) {
+        if (session.cwd !== session.worktreePath) {
+          return this.update(id, { cwd: session.worktreePath });
+        }
+        return session;
+      }
+    }
+    if (!session.useWorktree && !session.worktreeName) return session;
+
+    if (session.sshConfig) {
+      const baseRepo =
+        session.originCwd ||
+        session.sshConfig.remoteCwd ||
+        session.cwd;
+      if (!baseRepo) return session;
+      const remote = await createRemoteWorktree({
+        sshConfig: session.sshConfig,
+        baseRepo,
+        worktreeName: session.worktreeName,
+        sourceBranch: session.sourceBranch,
+      });
+      if (!remote.success) {
+        // Official skips non-git remote repos (null) rather than failing the turn hard.
+        if (remote.skipped) return session;
+        return session;
+      }
+      return this.attachWorktree(id, {
+        worktreePath: remote.worktree.path,
+        worktreeName: remote.worktree.name,
+        originCwd: baseRepo,
+      });
+    }
+
+    const originCwd = session.originCwd ?? session.cwd;
+    const resolved = await resolveWorktreePath({
+      originCwd,
+      cwd: session.cwd,
+      worktreeName: session.worktreeName,
+      worktreePath: session.worktreePath,
+    });
+    if (!resolved) return session;
+    return this.attachWorktree(id, {
+      worktreePath: resolved,
+      worktreeName: session.worktreeName,
+      originCwd: originCwd,
+    });
+  }
+
+  /**
+   * Official releaseWorktree residual: optionally remove git worktree, restore originCwd.
+   * SSH sessions use removeRemoteWorktree (host-pipe) instead of local git.
+   */
+  async releaseWorktree(
+    id: string,
+    options?: { cleanupWorktree?: boolean; force?: boolean },
+  ): Promise<LocalSession | null> {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const originCwd = session.originCwd;
+    const worktreePath = session.worktreePath;
+    if (!originCwd && !worktreePath) {
+      return this.update(id, { useWorktree: false, worktreeName: undefined });
+    }
+
+    if (options?.cleanupWorktree !== false && originCwd && worktreePath) {
+      if (session.sshConfig) {
+        await removeRemoteWorktree({
+          sshConfig: session.sshConfig,
+          baseRepo: originCwd,
+          worktreePath,
+          branchName: session.worktreeName,
+          force: options?.force !== false,
+        });
+      } else {
+        await removeGitWorktree({
+          originCwd,
+          worktreePath,
+          force: options?.force !== false,
+        });
+      }
+    }
+
+    return this.update(id, {
+      cwd: originCwd ?? session.cwd,
+      originCwd: undefined,
+      worktreePath: undefined,
+      worktreeName: undefined,
+      useWorktree: false,
+      sourceBranch: undefined,
+    });
   }
 
   getSessionsForScheduledTask(scheduledTaskId: string): LocalSession[] {
@@ -428,11 +618,22 @@ export class LocalSessionStore {
     const prompt = input.prompt ?? input.message ?? "";
     const folders = uniqueStrings(input.folders).length > 0 ? uniqueStrings(input.folders) : uniqueStrings(input.userSelectedFolders);
     const userSelectedFiles = uniqueStrings(input.userSelectedFiles);
-    const messageRaw = input.messageUuid || userSelectedFiles.length > 0 ? {
-      ...(input.messageUuid ? { messageUuid: input.messageUuid } : {}),
+    // Always mint a stable uuid for the first user prompt so CLI jsonl echo can
+    // share identity with the live-tail seed (prevents double user bubbles).
+    const firstUserUuid =
+      (typeof input.messageUuid === "string" && input.messageUuid.length > 0
+        ? input.messageUuid
+        : undefined)
+      ?? ((prompt || userSelectedFiles.length > 0) ? randomUUID() : undefined);
+    const messageRaw = firstUserUuid || userSelectedFiles.length > 0 ? {
+      ...(firstUserUuid ? { messageUuid: firstUserUuid, uuid: firstUserUuid } : {}),
       ...(userSelectedFiles.length > 0 ? { userSelectedFiles } : {}),
     } : undefined;
-    const cwd = input.cwd ?? folders[0];
+    // Reject empty-host / non-Hd shapes (normalizeSessionSshConfig returns null).
+    const sshConfig = normalizeSessionSshConfig(input.sshConfig) ?? undefined;
+    // Official: session.cwd for SSH is remoteCwd (not a host path). Prefer explicit cwd,
+    // then remoteCwd, then folders[0].
+    const cwd = input.cwd ?? sshConfig?.remoteCwd ?? folders[0];
     const kind = input.kind ?? this.defaultKind;
     const sessionKind = kind === "code" ? "code" : "cowork";
     const idPrefix = sessionKind === "cowork" ? "local" : kind;
@@ -458,6 +659,16 @@ export class LocalSessionStore {
       sourceBranch: input.sourceBranch,
       useWorktree: input.useWorktree,
       worktreeName: input.worktreeName,
+      worktreePath: input.worktreePath,
+      // Official: keep base repo when starting into a worktree / remote ssh session.
+      originCwd:
+        input.originCwd
+        ?? (input.useWorktree || input.worktreePath
+          ? input.cwd ?? sshConfig?.remoteCwd ?? folders[0]
+          : sshConfig
+            ? sshConfig.remoteCwd ?? input.cwd ?? folders[0]
+            : undefined),
+      sshConfig,
       agent: input.agent,
       agents: input.agents,
       enabledMcpTools: input.enabledMcpTools,
@@ -477,7 +688,22 @@ export class LocalSessionStore {
       transcript: [],
     };
     if (prompt || userSelectedFiles.length > 0) {
-      const firstMessage = createMessage("user", prompt, timestamp, messageRaw);
+      // Mark seed as local-optimistic so the web store can promote-by-text when the CLI
+      // jsonl echo lands with a different outer uuid (official zke is same-uuid; product
+      // defense matches isLocalOptimistic residual from epitaxy optimistic send path).
+      const seedRaw = {
+        ...(asRecord(messageRaw)),
+        type: "user",
+        uuid: firstUserUuid ?? asRecord(messageRaw).uuid,
+        isLocalOptimistic: true,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: prompt }],
+        },
+        text: prompt,
+        ...(userSelectedFiles.length > 0 ? { userSelectedFiles } : {}),
+      };
+      const firstMessage = createMessage("user", prompt, timestamp, seedRaw);
       this.liveBuffers.set(session.id, [transcriptMessage(session.id, firstMessage)]);
     }
     this.sessions.set(session.id, session);
@@ -605,7 +831,11 @@ export class LocalSessionStore {
     if (!session) return null;
     if (!isPlaceholderSessionTitle(session.title, session.kind === "code" ? "code" : "cowork")) return session;
     if (!session.cliSessionId) return this.refreshTitleFromMessages(id);
-    const jsonlPath = await resolveCodeTranscriptPath(session.cliSessionId, session.cwd);
+    const jsonlPath = await resolveCodeTranscriptPath(session.cliSessionId, {
+      cwd: session.cwd,
+      worktreePath: session.worktreePath,
+      originCwd: session.originCwd,
+    });
     if (!jsonlPath) return this.refreshTitleFromMessages(id);
     const meta = await readCodeSessionMetadata(jsonlPath, session.cliSessionId).catch(() => null);
     const derived = meta && !isPlaceholderSessionTitle(meta.title, session.kind === "code" ? "code" : "cowork") ? meta.title : null;

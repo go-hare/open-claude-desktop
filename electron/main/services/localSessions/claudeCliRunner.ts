@@ -10,8 +10,10 @@ import {
   resolveCliModelArg,
   type Custom3pEnterpriseConfig,
 } from "../custom3p/custom3pCliEnv";
+import { resolveDeploymentModeFromUserData } from "../custom3p/deploymentMode";
 import { getLocalSessionEnvironmentSync } from "./localSessionEnvironmentStore";
 import type { LocalSession, LocalSessionStore, LocalToolPermissionRequest } from "./localSessionStore";
+import { resolveSshRemoteCwd, spawnClaudeOverSsh } from "./sshCliSpawn";
 
 type RunnerCallbacks = {
   onEvent: (event: Record<string, unknown>) => void;
@@ -180,20 +182,51 @@ function resolveLocalSessionEnvironment(userDataPath: string | undefined): Recor
   }
 }
 
-export function spawnClaude(executable: string, args: string[], cwd: string): ChildProcessWithoutNullStreams {
+export function resolveClaudeSpawnEnv(): Record<string, string | undefined> {
   const userDataPath = resolveDesktopUserDataPath();
-  const env = buildClaudeCliSpawnEnv({
+  return buildClaudeCliSpawnEnv({
     processEnv: process.env,
     localSessionEnv: resolveLocalSessionEnvironment(userDataPath),
     userDataPath,
   });
+}
+
+export function spawnClaude(executable: string, args: string[], cwd: string): ChildProcessWithoutNullStreams {
+  const env = resolveClaudeSpawnEnv();
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(executable)) {
     return spawn("cmd.exe", ["/d", "/s", "/c", executable, ...args], { cwd, env, windowsHide: true });
   }
   return spawn(executable, args, { cwd, env, windowsHide: true });
 }
 
+/**
+ * Official WZ(sshConfig) → eAr kind ssh + configureSSHSpawn residual (product host-pipe):
+ * when session.sshConfig is set, spawn remote `claude` over ssh instead of local binary.
+ */
+export function spawnClaudeForSession(
+  session: LocalSession,
+  executable: string,
+  args: string[],
+  cwd: string,
+): ChildProcessWithoutNullStreams {
+  if (session.sshConfig) {
+    const remoteCwd = resolveSshRemoteCwd(session);
+    return spawnClaudeOverSsh({
+      sshConfig: session.sshConfig,
+      remoteCwd,
+      args,
+      hostEnv: resolveClaudeSpawnEnv(),
+      localCwd: process.cwd(),
+    });
+  }
+  return spawnClaude(executable, args, cwd);
+}
+
 function resolveCwd(session: LocalSession): string {
+  // SSH sessions use remote paths — do not require host existence.
+  if (session.sshConfig) {
+    return session.cwd || session.sshConfig.remoteCwd || process.cwd();
+  }
   if (session.cwd && fs.existsSync(session.cwd)) return session.cwd;
   return process.cwd();
 }
@@ -258,6 +291,23 @@ function resolveAppliedEnterpriseForSpawn(): Custom3pEnterpriseConfig | null {
   try {
     const userDataPath = resolveDesktopUserDataPath();
     if (!userDataPath) return null;
+    // dotClaude: spawn routing is ~/.claude, not configLibrary. Using bag
+    // inferenceModels here would allow --model deepseek-v4-pro against a
+    // multi-provider gateway that only knows grok/kimi → API 502 unknown provider.
+    const snapshot = resolveDeploymentModeFromUserData(userDataPath);
+    if (
+      snapshot.resolution.mode === "dotClaude"
+      || snapshot.resolution.persistedDeploymentMode === "dotClaude"
+    ) {
+      const models =
+        snapshot.dotClaudeConfig?.models
+        ?? (snapshot.dotClaudeConfig?.model ? [snapshot.dotClaudeConfig.model] : []);
+      if (models.length === 0) return null;
+      return {
+        inferenceProvider: "gateway",
+        inferenceModels: models.map((name) => ({ name })),
+      };
+    }
     return readAppliedCustom3pFromDesktopShellSettings(userDataPath).enterprise;
   } catch {
     return null;
@@ -347,8 +397,13 @@ function buildClaudeArgs(session: LocalSession, request: Record<string, unknown>
   return args;
 }
 
-function userInputLine(prompt: string): string {
-  return `${JSON.stringify({
+/**
+ * Official stream-json user line. When `messageUuid` is set (desktop start/send),
+ * stamp it as outer `uuid` so the CLI jsonl echo shares identity with the live-tail
+ * seed → getTranscript uuid-dedupe drops the seed (no double user bubble).
+ */
+function userInputLine(prompt: string, messageUuid?: string): string {
+  const payload: Record<string, unknown> = {
     type: "user",
     session_id: "",
     message: {
@@ -356,7 +411,13 @@ function userInputLine(prompt: string): string {
       content: [{ type: "text", text: prompt }],
     },
     parent_tool_use_id: null,
-  })}\n`;
+  };
+  if (messageUuid && messageUuid.length > 0) {
+    payload.uuid = messageUuid;
+    // Some CLI residual paths also honor messageUuid on the envelope.
+    payload.messageUuid = messageUuid;
+  }
+  return `${JSON.stringify(payload)}\n`;
 }
 
 function promptWithSelectedFiles(prompt: string, userSelectedFiles: unknown): string {
@@ -748,15 +809,46 @@ export class ClaudeCliRunner {
     if (!session.cliSessionId && !shouldForkFromSource) this.store.setCliSessionId(sessionId, cliSessionId);
     const args = buildClaudeArgs({ ...session, cliSessionId }, request, cliSessionId, hadCliSession || shouldForkFromSource, shouldForkFromSource);
 
-    this.store.setRunning(sessionId, true, { kind: "claude-cli", executable, startedAt: nowIso(), lastError: undefined, lastExitCode: null });
+    const spawnKind = session.sshConfig ? "claude-cli-ssh" : "claude-cli";
+    const spawnLabel = session.sshConfig
+      ? `ssh://${session.sshConfig.host}:${resolveSshRemoteCwd(session)}`
+      : executable;
+
+    this.store.setRunning(sessionId, true, {
+      kind: spawnKind,
+      executable: spawnLabel,
+      startedAt: nowIso(),
+      lastError: undefined,
+      lastExitCode: null,
+    });
     this.callbacks.onSessionUpdated(sessionId);
+
+    // Prefer explicit request.messageUuid (web createMessageUuid / start seed). Fall back to
+    // the live-tail user seed uuid so CLI echo shares identity when home start omitted it.
+    const requestUuid = stringValue(request.messageUuid) ?? stringValue(request.uuid);
+    const seededUuid = (() => {
+      if (requestUuid) return requestUuid;
+      for (const event of this.store.getLiveEvents(sessionId)) {
+        const record = asRecord(event);
+        if (stringValue(record.type) !== "user") continue;
+        const eventText =
+          stringValue(record.text)
+          ?? contentText(asRecord(record.message).content)
+          ?? stringValue(asRecord(record.message).content);
+        if ((eventText ?? "").trim() !== text) continue;
+        return stringValue(record.uuid) ?? stringValue(record.messageUuid) ?? stringValue(record.id);
+      }
+      return undefined;
+    })();
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawnClaude(executable, args, resolveCwd(session));
-      child.stdin.write(userInputLine(promptWithSelectedFiles(text, request.userSelectedFiles)));
+      child = spawnClaudeForSession(session, executable, args, resolveCwd(session));
+      child.stdin.write(
+        userInputLine(promptWithSelectedFiles(text, request.userSelectedFiles), seededUuid),
+      );
     } catch (error) {
-      this.finishWithError(sessionId, executable, error);
+      this.finishWithError(sessionId, spawnLabel, error);
       return false;
     }
 
@@ -769,7 +861,7 @@ export class ClaudeCliRunner {
       turn.stderr.push(data.toString("utf8"));
       if (turn.stderr.join("").length > 16_000) turn.stderr = [turn.stderr.join("").slice(-16_000)];
     });
-    child.on("error", (error) => this.finishWithError(sessionId, executable, error));
+    child.on("error", (error) => this.finishWithError(sessionId, spawnLabel, error));
     child.on("close", (code, signal) => {
       stdout.close();
       const current = this.active.get(sessionId);
@@ -778,7 +870,13 @@ export class ClaudeCliRunner {
       this.clearPendingPermissions(sessionId, current);
       const stderr = current?.stderr.join("").trim();
       if (code && code !== 0) this.emitError(sessionId, stderr || `claude exited with code ${code}`);
-      this.store.setRunning(sessionId, false, { kind: "claude-cli", executable, lastExitCode: code, lastError: code ? stderr : undefined, finishedAt: nowIso() });
+      this.store.setRunning(sessionId, false, {
+        kind: spawnKind,
+        executable: spawnLabel,
+        lastExitCode: code,
+        lastError: code ? stderr : undefined,
+        finishedAt: nowIso(),
+      });
       this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
       this.callbacks.onSessionUpdated(sessionId);
     });
@@ -979,6 +1077,16 @@ export class ClaudeCliRunner {
     if (event.type === "system" && stringValue(event.subtype) === "init" && Array.isArray(event.slash_commands)) {
       this.store.setSlashCommands(sessionId, event.slash_commands.filter((command): command is string => typeof command === "string" && command.length > 0));
     }
+    // Official worktree residual: after CLI creates/enters a worktree, resolve abs path
+    // (git porcelain) and switch session.cwd → worktreePath while keeping originCwd.
+    if (event.type === "system" && stringValue(event.subtype) === "init") {
+      const current = this.store.getSession(sessionId);
+      if (current && (current.useWorktree || current.worktreeName) && !current.worktreePath) {
+        void this.store.ensureWorktreeResolved(sessionId).then((updated) => {
+          if (updated?.worktreePath) this.callbacks.onSessionUpdated(sessionId);
+        });
+      }
+    }
     // Official ion Fke/Uke: system init/status carry permissionMode (and init model).
     // CLI emits system:status whenever toolPermissionContext.mode changes (EnterPlanMode,
     // ExitPlanMode, Shift+Tab, slash /plan, etc.). Persist so composer pill re-syncs.
@@ -1074,7 +1182,8 @@ export class ClaudeCliRunner {
       }, CONTROL_REQUEST_TIMEOUT_MS);
 
       try {
-        child = spawnClaude(executable, args, cwd);
+        // SSH sessions probe the remote CLI the same way as runTurn (host-pipe).
+        child = spawnClaudeForSession(session, executable, args, cwd);
       } catch {
         finish(null);
         return;
