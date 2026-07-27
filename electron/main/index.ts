@@ -57,9 +57,11 @@ export type DesktopAppRuntime = {
 function defaultTelemetryConfig(): DesktopTelemetryConfig {
   // Official N1e residual — do not hardcode "3p"; empty userData bag is 1p.
   // Official vst residual: cookielessOrigin: e.type === "3p"
+  // Product dotClaude mode resolves to the 3p shell, so it lands in "3p" here.
   let deploymentMode: "1p" | "3p" = "1p";
   try {
-    deploymentMode = resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
+    const mode = resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
+    deploymentMode = mode === "3p" ? "3p" : "1p";
   } catch {
     deploymentMode = "1p";
   }
@@ -74,6 +76,21 @@ function installProcessSignalHandlers(): void {
   for (const signal of ["SIGINT", "SIGTERM", "SIGQUIT", "SIGHUP"] as const) {
     process.on(signal, () => app.quit());
   }
+}
+
+/**
+ * Dev-mode stdio guard: when the launching shell dies (taskkill / terminal close),
+ * electron's stdout pipe breaks. Any later console.info → EPIPE would otherwise
+ * surface as an uncaughtException system dialog and kill the main process.
+ * Swallow only harmless stdio/connection teardown codes; rethrow everything else.
+ */
+function installStdioGuards(): void {
+  const SWALLOW = new Set(["EPIPE", "ERR_STREAM_DESTROYED", "ECONNRESET"]);
+  process.on("uncaughtException", (err) => {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code && SWALLOW.has(code)) return;
+    throw err;
+  });
 }
 
 function applyUserDataOverride(): void {
@@ -105,10 +122,12 @@ function applyProductAppName(): void {
 function getInitialMainViewUrlOverride(options: DesktopAppOptions): string {
   let deploymentMode: "1p" | "3p" = "1p";
   try {
-    deploymentMode =
-      options.desktopTelemetryConfig?.deploymentMode === "3p" || options.desktopTelemetryConfig?.deploymentMode === "1p"
-        ? options.desktopTelemetryConfig.deploymentMode
+    const telemetryMode = options.desktopTelemetryConfig?.deploymentMode;
+    const resolved =
+      telemetryMode === "3p" || telemetryMode === "1p"
+        ? telemetryMode
         : resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
+    deploymentMode = resolved === "3p" ? "3p" : "1p";
   } catch {
     deploymentMode = "1p";
   }
@@ -230,6 +249,7 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   applyUserDataOverride();
   registerAppProtocolScheme();
   installProcessSignalHandlers();
+  installStdioGuards();
 
   const paths = options.paths ?? resolveElectronShellPaths();
   const runtime = createDesktopAppRuntime({ ...options, paths });

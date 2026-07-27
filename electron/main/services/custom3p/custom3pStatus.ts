@@ -56,10 +56,20 @@ export type Custom3pLoginDesktopStatus = {
   source: Custom3pSource;
   provider: string | null;
   bootstrapHost: string | null;
-  deploymentMode: "1p" | "3p";
+  deploymentMode: "1p" | "3p" | "dotClaude";
   thirdPartyActivated: boolean;
   degraded: boolean;
   detail: string;
+  /**
+   * Product extension: ~/.claude/settings.json has usable routing env, so the
+   * login page may offer a "Continue with ~/.claude" card. Never contains the
+   * secret — only the base URL host for display.
+   */
+  dotClaude?: {
+    available: boolean;
+    host: string | null;
+    model?: string;
+  };
 };
 
 export type Custom3pBootstrapState = {
@@ -171,12 +181,13 @@ export function custom3pHealth(userDataPath?: string): Custom3pHealthState {
     endpoint: endpointOf(resolution),
     checkedAt,
     detail: resolution.detail,
-    deploymentMode: resolution.mode,
+    deploymentMode: resolution.mode === "3p" ? "3p" : "1p",
   };
 }
 
 /**
  * Official getLoginDesktop3pStatus residual (app.asar `hgr` / `fot`).
+ * Product extension: also surfaces ~/.claude detection for the dotClaude card.
  */
 export function custom3pLoginDesktopStatus(userDataPath?: string): Custom3pLoginDesktopStatus {
   if (!userDataPath) {
@@ -192,7 +203,7 @@ export function custom3pLoginDesktopStatus(userDataPath?: string): Custom3pLogin
     };
   }
   const snap = resolveDeploymentModeFromUserData(userDataPath);
-  const { resolution } = snap;
+  const { resolution, dotClaudeConfig } = snap;
   const enterprise = resolution.enterprise ?? snap.enterprise;
   const provider =
     typeof enterprise?.inferenceProvider === "string" && enterprise.inferenceProvider.length > 0
@@ -209,17 +220,33 @@ export function custom3pLoginDesktopStatus(userDataPath?: string): Custom3pLogin
     }
   }
   const chooserDisabled = enterprise?.disableDeploymentModeChooser === true;
-  const enabled = !chooserDisabled && resolution.thirdPartyActivated;
+  const dotClaudeMode = snap.persistedDeploymentMode === "dotClaude";
+  const enabled = !chooserDisabled && (resolution.thirdPartyActivated || dotClaudeMode);
   return {
     enabled,
-    source: sourceFromResolution(resolution),
+    source: dotClaudeMode ? { type: "local", remote: false } : sourceFromResolution(resolution),
     provider,
     bootstrapHost,
-    deploymentMode: resolution.mode,
+    deploymentMode: dotClaudeMode ? "dotClaude" : resolution.mode,
     thirdPartyActivated: resolution.thirdPartyActivated,
     degraded: resolution.degraded,
     detail: resolution.detail,
+    dotClaude: dotClaudeConfig
+      ? {
+          available: true,
+          host: hostOf(dotClaudeConfig.baseUrl),
+          ...(dotClaudeConfig.model ? { model: dotClaudeConfig.model } : {}),
+        }
+      : { available: false, host: null },
   };
+}
+
+function hostOf(baseUrl: string): string | null {
+  try {
+    return new URL(baseUrl).hostname || null;
+  } catch {
+    return null;
+  }
 }
 
 /** Official Bai / bootstrapState_$store residual. */

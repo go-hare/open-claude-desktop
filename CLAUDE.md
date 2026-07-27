@@ -79,6 +79,15 @@
 - health / login-desktop status / bootstrapState 一律从 resolution 派生，不得写死 healthy。
 - 产品 **不发明** 官方 Anthropic OAuth 登录成功；1p logged-out 只保证 bootstrap 身份态对齐。
 
+### dotClaude 模式（产品扩展，无官方 residual）
+
+- `preferences.deploymentMode === "dotClaude"`：直接用用户已有 `~/.claude` CLI 配置运行，**不迁移、不复制**到 configLibrary。
+- 探测：`detectDotClaudeCliConfig()`（`deploymentMode.ts`）读 `~/.claude/settings.json` 的 `env.ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN|API_KEY`；只读，绝不写该文件。
+- 分辨率：`resolveDeploymentMode` 把 dotClaude 映射到 3p shell（合成 `cowork_3p_*` 账号过 gate）；配置消失 → degraded，登录页回退普通 chooser。
+- spawn 直通：`buildClaudeCliSpawnEnv` 在 dotClaude 下**不注入 bag 也不压制 ~/.claude 继承**，只加 `CLAUDE_CODE_ENTRYPOINT=claude-desktop-3p` + host-managed flags；路由/模型/密钥完全由 CLI 自己解析。
+- 登录页：`getLoginDesktop3pStatus` 带 `dotClaude:{available,host,model}`（不含密钥）→ web 第三张卡「Continue with ~/.claude」。
+- health：`recomputeConfigHealth` 在 dotClaude 下返回 `not_testable`（banner 隐藏；「打开设置修复」对 CLI 配置无意义）。
+
 ### 1p 主窗口 / 登录页（LoginRoute + LoginDesktop）
 
 - 官方 **尺寸**：LoginRoute（`c632c9594-Bv5AdbQY.js` `jn`）对**主窗口** `resize(600,600,{center:true})`，离开时 `resize(1200,800)`。**不是**新 BrowserWindow。520×340 只是 Verify sign-in code；900×720 是 Setup。

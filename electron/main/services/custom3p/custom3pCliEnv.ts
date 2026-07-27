@@ -32,7 +32,13 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import {
+  DOT_CLAUDE_DEPLOYMENT_MODE,
+  detectDotClaudeCliConfig,
+  normalizePersistedDeploymentMode,
+} from "./deploymentMode";
 import {
   getAppliedCustom3pConfigLibraryBag,
   migrateLegacyShellCustom3pConfigsToLibrary,
@@ -441,6 +447,51 @@ const PROVIDER_FLAG_KEYS = [
   "CLAUDE_CODE_USE_FOUNDRY",
 ] as const;
 
+/** Read persisted chooser mode from desktop-shell-settings (dotClaude passthrough gate). */
+function readPersistedDeploymentModeFromUserData(
+  userDataPath: string | undefined,
+): string | undefined {
+  if (!userDataPath) return undefined;
+  try {
+    const filePath = path.join(userDataPath, DESKTOP_SHELL_SETTINGS_FILE);
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    const preferences =
+      typeof raw.preferences === "object" && raw.preferences !== null
+        ? (raw.preferences as Record<string, unknown>)
+        : {};
+    return normalizePersistedDeploymentMode(preferences.deploymentMode ?? raw.deploymentMode);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * dotClaude env forwarding: read the user's `~/.claude/settings.json` `env` bag
+ * fresh from disk (string values only). Never cached, never written to userData —
+ * editing CLI config takes effect on the next spawned session. Returns {} when
+ * the file is absent or the CLI config is not usable (stale dotClaude choice).
+ */
+export function readDotClaudeSettingsEnv(
+  injected?: Record<string, string> | null,
+): Record<string, string> {
+  if (injected !== undefined) return injected ?? {};
+  if (!detectDotClaudeCliConfig()) return {};
+  try {
+    const raw = JSON.parse(
+      fs.readFileSync(path.join(os.homedir(), ".claude", "settings.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const env = raw.env;
+    if (typeof env !== "object" || env === null || Array.isArray(env)) return {};
+    return Object.fromEntries(
+      Object.entries(env as Record<string, unknown>).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Official HFi residual (host spawn env), product simplified:
  *   process.env → local-session-environment → clear provider flags → G4+sessionEnvVars
@@ -448,6 +499,11 @@ const PROVIDER_FLAG_KEYS = [
  *
  * custom3p from configLibrary (wrA residual; shell bag legacy fallback) wins over
  * process.env / ~/.claude inheritance for routing keys (BASE_URL / API key / entrypoint).
+ *
+ * Product dotClaude mode (deploymentMode === "dotClaude"): pass-through — no bag
+ * inject AND no ~/.claude suppression. Routing / model / keys resolve inside the
+ * CLI from ~/.claude exactly as in the terminal; we only pin the desktop
+ * entrypoint + host-managed flags.
  */
 export function buildClaudeCliSpawnEnv(options: {
   processEnv?: NodeJS.ProcessEnv;
@@ -455,6 +511,10 @@ export function buildClaudeCliSpawnEnv(options: {
   userDataPath?: string;
   /** Test / DI inject; when set, skip disk read. */
   appliedEnterpriseConfig?: Custom3pEnterpriseConfig | null;
+  /** Test / DI inject for the persisted chooser mode; when undefined, read from disk. */
+  persistedDeploymentMode?: string | null;
+  /** Test / DI inject for ~/.claude env forwarding; when undefined, read live from disk. */
+  dotClaudeSettingsEnv?: Record<string, string> | null;
   /** When false, skip 3p inject even if disk has applied config. Default true. */
   applyCustom3p?: boolean;
 }): NodeJS.ProcessEnv {
@@ -470,6 +530,28 @@ export function buildClaudeCliSpawnEnv(options: {
     delete env[key];
   }
   delete env.CLAUDECODE;
+
+  const persistedMode =
+    options.persistedDeploymentMode !== undefined
+      ? (options.persistedDeploymentMode ?? undefined)
+      : readPersistedDeploymentModeFromUserData(options.userDataPath);
+
+  if (persistedMode === DOT_CLAUDE_DEPLOYMENT_MODE) {
+    // dotClaude pass-through: host-managed flags only, routing stays with ~/.claude.
+    // IMPORTANT: the desktop is GUI-launched — process.env does NOT inherit the
+    // terminal's ANTHROPIC_*. So "let the CLI read ~/.claude itself" needs help:
+    // forward the settings.json env bag (fresh read at every spawn; never
+    // persisted into userData) so spawned sessions actually hit the user's
+    // CLI gateway. Skills / MCP / agents / other settings still resolve from
+    // ~/.claude natively by the CLI — nothing is mirrored.
+    env.CLAUDE_CODE_ENTRYPOINT = "claude-desktop-3p";
+    Object.assign(env, buildHostManagedCliFlags({}));
+    Object.assign(env, readDotClaudeSettingsEnv(options.dotClaudeSettingsEnv));
+    for (const key of ["DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING"] as const) {
+      if (env[key] === "") delete env[key];
+    }
+    return env;
+  }
 
   const applyCustom3p = options.applyCustom3p !== false;
   let enterprise: Custom3pEnterpriseConfig | null | undefined =

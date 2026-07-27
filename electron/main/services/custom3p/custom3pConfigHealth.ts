@@ -327,6 +327,21 @@ export async function recomputeConfigHealth(userDataPath?: string): Promise<Conf
   const snap = resolveDeploymentModeFromUserData(userDataPath);
   const { resolution } = snap;
   const source = sourceFromResolution(resolution);
+
+  // Product dotClaude mode: config is owned by ~/.claude, not configLibrary —
+  // the official "open Setup to fix" banner would be wrong. Report not_testable
+  // (AQt hides it) with a detail string explaining the CLI owns the config.
+  if (snap.persistedDeploymentMode === "dotClaude") {
+    const health: ConfigHealth = {
+      state: "not_testable",
+      source,
+      endpoint: snap.dotClaudeConfig?.baseUrl,
+      checkedAt,
+      message: resolution.detail,
+    };
+    cachedHealth = health;
+    return health;
+  }
   const enterprise = resolution.enterprise;
 
   // Official: 1p with no 3p activation → Healthy (banner hidden via NotTestable/Healthy).

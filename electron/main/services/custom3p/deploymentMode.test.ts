@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 import {
   deploymentModeIs3p,
+  detectDotClaudeCliConfig,
   hasThirdPartyActivationKeys,
   hasUsableThirdPartyCredentials,
   resolveDeploymentMode,
@@ -159,4 +160,62 @@ it("resolveDeploymentModeFromUserData: official configLibrary bag with key → 3
   expect(snap.resolution.mode).toBe("3p");
   expect(snap.resolution.degraded).toBe(false);
   expect(snap.enterprise?.inferenceModels?.[0]?.name).toBe("deepseek-v4-pro");
+});
+
+function tempHomeWithClaudeSettings(env?: Record<string, unknown>): string {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "dotclaude-home-"));
+  tempDirs.push(home);
+  if (env) {
+    const claudeDir = path.join(home, ".claude");
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, "settings.json"), JSON.stringify({ env }), "utf8");
+  }
+  return home;
+}
+
+it("detectDotClaudeCliConfig: missing file / incomplete env → null", () => {
+  expect(detectDotClaudeCliConfig(tempHomeWithClaudeSettings())).toBeNull();
+  expect(
+    detectDotClaudeCliConfig(tempHomeWithClaudeSettings({ ANTHROPIC_BASE_URL: "https://x" })),
+  ).toBeNull();
+});
+
+it("detectDotClaudeCliConfig: baseUrl + token → detected (secret stays local)", () => {
+  const home = tempHomeWithClaudeSettings({
+    ANTHROPIC_BASE_URL: "https://gateway.example.com",
+    ANTHROPIC_AUTH_TOKEN: "sk-secret",
+    ANTHROPIC_MODEL: "grok-4.5",
+  });
+  const config = detectDotClaudeCliConfig(home);
+  expect(config?.baseUrl).toBe("https://gateway.example.com");
+  expect(config?.authToken).toBe("sk-secret");
+  expect(config?.model).toBe("grok-4.5");
+  expect(config?.settingsPath).toContain("settings.json");
+});
+
+it("N1e dotClaude: persisted dotClaude maps to 3p shell, active when config present", () => {
+  const r = resolveDeploymentMode({
+    enterprise: null,
+    persistedDeploymentMode: "dotClaude",
+    dotClaudeConfig: {
+      settingsPath: "/home/u/.claude/settings.json",
+      baseUrl: "https://gateway.example.com",
+      authToken: "sk-secret",
+    },
+  });
+  expect(r.mode).toBe("3p");
+  expect(r.thirdPartyActivated).toBe(true);
+  expect(r.degraded).toBe(false);
+  expect(r.detail).toContain("~/.claude");
+});
+
+it("N1e dotClaude: stale choice (config gone) → degraded, still 3p shell", () => {
+  const r = resolveDeploymentMode({
+    enterprise: null,
+    persistedDeploymentMode: "dotClaude",
+    dotClaudeConfig: null,
+  });
+  expect(r.mode).toBe("3p");
+  expect(r.thirdPartyActivated).toBe(false);
+  expect(r.degraded).toBe(true);
 });

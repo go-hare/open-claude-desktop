@@ -284,4 +284,60 @@ describe("custom3pCliEnv residual", () => {
     expect(spawnEnv.ANTHROPIC_BASE_URL).toBe("https://injected.example");
     expect(spawnEnv.ANTHROPIC_API_KEY).toBe("x");
   });
+
+  it("dotClaude mode: forwards ~/.claude env fresh from disk, bag never wins", () => {
+    const userData = temporaryDirectory();
+    // An applied configLibrary bag exists but must NOT win in dotClaude mode.
+    const appliedId = "19551b40-a9be-4ee5-b343-0ebd21e24152";
+    fs.mkdirSync(path.join(userData, "configLibrary"), { recursive: true });
+    fs.writeFileSync(
+      path.join(userData, "configLibrary", "_meta.json"),
+      JSON.stringify({ appliedId, entries: [{ id: appliedId, name: "Default" }] }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(userData, "configLibrary", `${appliedId}.json`),
+      JSON.stringify({
+        inferenceProvider: "gateway",
+        inferenceGatewayBaseUrl: "https://bag-should-not-win.example",
+        inferenceGatewayApiKey: "sk-bag",
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(userData, DESKTOP_SHELL_SETTINGS_FILE),
+      JSON.stringify({ preferences: { deploymentMode: "dotClaude" } }),
+      "utf8",
+    );
+
+    const spawnEnv = buildClaudeCliSpawnEnv({
+      // GUI process: no ANTHROPIC_* in process.env — routing must come from the
+      // ~/.claude env bag (DI-injected here as the live disk read would be).
+      processEnv: { PATH: "/usr/bin" },
+      userDataPath: userData,
+      dotClaudeSettingsEnv: {
+        ANTHROPIC_BASE_URL: "https://user-cli-config.example",
+        ANTHROPIC_AUTH_TOKEN: "sk-user-cli",
+        ANTHROPIC_MODEL: "grok-4.5",
+      },
+    });
+
+    expect(spawnEnv.CLAUDE_CODE_ENTRYPOINT).toBe("claude-desktop-3p");
+    expect(spawnEnv.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe("1");
+    // Routing / model / token are the CLI user's, forwarded fresh from ~/.claude.
+    expect(spawnEnv.ANTHROPIC_BASE_URL).toBe("https://user-cli-config.example");
+    expect(spawnEnv.ANTHROPIC_AUTH_TOKEN).toBe("sk-user-cli");
+    expect(spawnEnv.ANTHROPIC_MODEL).toBe("grok-4.5");
+  });
+
+  it("dotClaude stale (no usable ~/.claude config): forwards nothing, no fake routing", () => {
+    const spawnEnv = buildClaudeCliSpawnEnv({
+      processEnv: { PATH: "/usr/bin" },
+      persistedDeploymentMode: "dotClaude",
+      dotClaudeSettingsEnv: null,
+    });
+    expect(spawnEnv.CLAUDE_CODE_ENTRYPOINT).toBe("claude-desktop-3p");
+    expect(spawnEnv.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(spawnEnv.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
 });

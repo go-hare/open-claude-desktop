@@ -819,13 +819,14 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       //   jsA writes preferences.deploymentMode (void on clear)
       //   if mode !== "3p" → clear session residual + relaunchApp
       // Tjt validation: mode ∈ {"1p","3p","clear"}
+      // Product extension: "dotClaude" — run on existing ~/.claude CLI config.
       setDeploymentMode: async (_event, mode) => {
-        if (mode !== "1p" && mode !== "3p" && mode !== "clear") {
+        if (mode !== "1p" && mode !== "3p" && mode !== "clear" && mode !== "dotClaude") {
           throw new Error(
             'Argument "mode" at position 0 to method "setDeploymentMode" in interface "Custom3pSetup" failed to pass validation',
           );
         }
-        if (mode === "1p" || mode === "3p") {
+        if (mode === "1p" || mode === "3p" || mode === "dotClaude") {
           settings.setPreference("deploymentMode", mode);
         } else {
           // Official jsA(undefined): delete persisted chooser mode.
@@ -834,7 +835,7 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         publishCustom3pBootstrapState(context);
         // Official got: mode !== "3p" process relaunch after write.
         // Product soft SPA host (open-claude-web):
-        //   - "3p": write only (renderer soft-leaves to Cowork)
+        //   - "3p" / "dotClaude": write only (renderer soft-leaves to Cowork)
         //   - "clear": write only (renderer soft-leaves to /login after signed-out
         //     interstitial). Process kill here made countdown-end wait for full
         //     relaunch (~seconds) and flashed chooser mid-exit.

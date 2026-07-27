@@ -385,7 +385,13 @@ async function getBootstrap(
     value,
     settings,
     options.installId ?? DEFAULT_INSTALL_ID,
-    { synthesizeAccount: deployment.persistedDeploymentMode === "3p" },
+    // Product extension: persisted "dotClaude" also maps to the 3p shell, so the
+    // synthetic account lets the user straight into Cowork on ~/.claude config.
+    {
+      synthesizeAccount:
+        deployment.persistedDeploymentMode === "3p"
+        || deployment.persistedDeploymentMode === "dotClaude",
+    },
   );
 }
 

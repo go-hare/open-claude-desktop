@@ -25,6 +25,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   custom3pEnterpriseConfigFromUnknown,
@@ -36,13 +37,38 @@ import {
   migrateLegacyShellCustom3pConfigsToLibrary,
 } from "./custom3pConfigLibrary";
 
-export type DesktopDeploymentMode = "1p" | "3p";
+export type DesktopDeploymentMode = "1p" | "3p" | "dotClaude";
+
+/**
+ * Product extension (no official residual): "dotClaude" deployment mode lets the
+ * desktop run directly on the user's existing `~/.claude` CLI configuration —
+ * no configLibrary bag, no credential copy. Routing / models / keys resolve in
+ * the CLI exactly as they do in the terminal (zero migration for CLI users).
+ * Resolution maps it to the 3p shell (Cai) so bootstrap synthesizes an account;
+ * the spawn env passthrough branch lives in custom3pCliEnv.
+ */
+export const DOT_CLAUDE_DEPLOYMENT_MODE = "dotClaude" as const;
 
 export type EnterpriseActivationBag = Custom3pEnterpriseConfig & {
   bootstrapUrl?: string;
   bootstrapEnabled?: boolean;
   disableDeploymentModeChooser?: boolean;
   inferenceCredentialHelper?: string;
+};
+
+/**
+ * Detected routing credentials from the user's existing CLI config
+ * (`~/.claude/settings.json` env bag). Product dotClaude mode only — the
+ * desktop never writes this file; the CLI remains its owner.
+ */
+export type DotClaudeCliConfig = {
+  /** Absolute path of the settings file the values came from. */
+  settingsPath: string;
+  baseUrl: string;
+  /** env.ANTHROPIC_AUTH_TOKEN or env.ANTHROPIC_API_KEY. */
+  authToken?: string;
+  /** env.ANTHROPIC_MODEL (informational — model stays CLI-managed). */
+  model?: string;
 };
 
 export type DeploymentModeResolution = {
@@ -151,7 +177,9 @@ export function hasUsableThirdPartyCredentials(
 export function normalizePersistedDeploymentMode(
   value: unknown,
 ): DesktopDeploymentMode | undefined {
-  return value === "1p" || value === "3p" ? value : undefined;
+  return value === "1p" || value === "3p" || value === DOT_CLAUDE_DEPLOYMENT_MODE
+    ? value
+    : undefined;
 }
 
 export function enterpriseActivationFromUnknown(
@@ -204,13 +232,57 @@ export function mergeEnterpriseActivationBags(
   return merged;
 }
 
+/**
+ * Detect a usable CLI config at `~/.claude/settings.json` (env.ANTHROPIC_BASE_URL
+ * + AUTH_TOKEN or API_KEY). Read-only: never mutates the file, never copies the
+ * secret anywhere. Returns null when the file is absent/incomplete/invalid.
+ */
+export function detectDotClaudeCliConfig(homeDir?: string): DotClaudeCliConfig | null {
+  try {
+    const home = homeDir ?? os.homedir();
+    const settingsPath = path.join(home, ".claude", "settings.json");
+    const raw = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+    const env = record(raw.env);
+    const baseUrl = stringField(env.ANTHROPIC_BASE_URL);
+    const authToken = stringField(env.ANTHROPIC_AUTH_TOKEN) ?? stringField(env.ANTHROPIC_API_KEY);
+    if (!baseUrl || !authToken) return null;
+    const config: DotClaudeCliConfig = { settingsPath, baseUrl, authToken };
+    const model = stringField(env.ANTHROPIC_MODEL);
+    if (model) config.model = model;
+    return config;
+  } catch {
+    return null;
+  }
+}
+
 /** Official N1e decision without side effects. */
 export function resolveDeploymentMode(input: {
   enterprise: EnterpriseActivationBag | null | undefined;
   persistedDeploymentMode?: DesktopDeploymentMode | undefined;
+  /** Product dotClaude detection result (only consulted for that mode). */
+  dotClaudeConfig?: DotClaudeCliConfig | null | undefined;
 }): DeploymentModeResolution {
   const enterprise = input.enterprise ?? null;
   const persisted = input.persistedDeploymentMode;
+
+  // Product dotClaude mode: user explicitly chose to run on ~/.claude.
+  // Maps to the 3p shell (synthetic account, no official OAuth) but the CLI
+  // keeps owning routing. Stale choice (config since removed) → degraded, and
+  // the login page will surface the regular chooser instead of the card.
+  if (persisted === DOT_CLAUDE_DEPLOYMENT_MODE) {
+    const dotClaude = input.dotClaudeConfig ?? null;
+    return {
+      mode: "3p",
+      thirdPartyActivated: dotClaude !== null,
+      degraded: dotClaude === null,
+      detail: dotClaude
+        ? `dotClaude mode — routing from ~/.claude (${dotClaude.baseUrl})`
+        : "dotClaude mode stale — ~/.claude/settings.json has no ANTHROPIC_BASE_URL + token",
+      enterprise,
+      persistedDeploymentMode: persisted,
+    };
+  }
+
   const activated = hasThirdPartyActivationKeys(enterprise);
 
   if (!deploymentModeIs3p(enterprise, persisted)) {
@@ -244,6 +316,8 @@ export type DesktopShellDeploymentSnapshot = {
   appliedConfig: unknown | null;
   persistedDeploymentMode: DesktopDeploymentMode | undefined;
   enterprise: EnterpriseActivationBag | null;
+  /** Present when ~/.claude/settings.json has usable routing env (any mode). */
+  dotClaudeConfig: DotClaudeCliConfig | null;
   resolution: DeploymentModeResolution;
 };
 
@@ -304,10 +378,12 @@ export function resolveDeploymentModeFromUserData(
     appliedConfig: null,
     persistedDeploymentMode: undefined,
     enterprise: null,
+    dotClaudeConfig: null,
     resolution: resolveDeploymentMode({ enterprise: null }),
   };
 
   const persistedDeploymentMode = readPersistedDeploymentModeFromShell(userDataPath);
+  const dotClaudeConfig = detectDotClaudeCliConfig();
 
   let appliedId: string | null = null;
   let appliedConfig: unknown | null = null;
@@ -346,12 +422,14 @@ export function resolveDeploymentModeFromUserData(
     const resolution = resolveDeploymentMode({
       enterprise,
       persistedDeploymentMode,
+      dotClaudeConfig,
     });
     return {
       appliedId,
       appliedConfig,
       persistedDeploymentMode,
       enterprise,
+      dotClaudeConfig,
       resolution,
     };
   } catch {
@@ -359,6 +437,7 @@ export function resolveDeploymentModeFromUserData(
       const resolution = resolveDeploymentMode({
         enterprise: managedEnterprise,
         persistedDeploymentMode,
+        dotClaudeConfig,
       });
       return {
         ...empty,
@@ -366,6 +445,7 @@ export function resolveDeploymentModeFromUserData(
         appliedConfig,
         persistedDeploymentMode,
         enterprise: managedEnterprise,
+        dotClaudeConfig,
         resolution,
       };
     }
@@ -374,6 +454,7 @@ export function resolveDeploymentModeFromUserData(
       appliedId,
       appliedConfig,
       persistedDeploymentMode,
+      dotClaudeConfig,
     };
   }
 }
