@@ -14,7 +14,13 @@ import {
   type SessionSshConfig,
 } from "./sshTranscriptSync";
 import { createRemoteWorktree, removeRemoteWorktree } from "./sshRemoteWorktree";
-import { removeGitWorktree, resolveWorktreePath } from "./worktreePaths";
+import {
+  createLocalWorktree,
+  removeGitWorktree,
+  resolveWorktreePath,
+  type ChillingSlothLocation,
+} from "./worktreePaths";
+import type { WorktreePool } from "./worktreePool";
 
 export type LocalSessionKind = "epitaxy" | "code";
 
@@ -111,6 +117,34 @@ export type LocalSession = {
   runtime?: LocalSessionRuntime;
   metadata?: Record<string, unknown>;
   pendingToolPermissions?: LocalToolPermissionRequest[];
+  /**
+   * Official AutoArchiveEngine residual: session.prs[] with terminal states.
+   * Product persists lightweight PR heads so sweep can archive without re-query
+   * when every tracked PR is merged/closed.
+   */
+  prs?: LocalSessionPrRef[];
+  /**
+   * Official AutoFixEngine residual: session.autoFixEnabled + seenCommentIds.
+   * setAutoFixEnabled(sessionId, enabled) writes this; engine sweeps open PRs.
+   */
+  autoFixEnabled?: boolean;
+  /**
+   * Official seenCommentIds residual: map of `${repo}#${prNumber}` → comment ids.
+   */
+  seenCommentIds?: Record<string, string[]>;
+};
+
+/** Official session.prs entry subset (number + state + optional url/title/repo). */
+export type LocalSessionPrRef = {
+  number?: number;
+  state?: string;
+  /** true when merged_at present even if GitHub still says closed. */
+  merged?: boolean;
+  title?: string;
+  url?: string;
+  /** owner/repo when known (AutoFix getPrChecks residual). */
+  repo?: string;
+  updatedAt?: string;
 };
 
 export type StartLocalSessionInput = {
@@ -370,17 +404,6 @@ export class LocalSessionStore {
     }, 250);
   }
 
-  /**
-   * Register a metadata-only stub for a session discovered by scanning ~/.claude/projects
-   * jsonl (origin "cli-jsonl"). Lets getSession/getTranscript resolve the row while its
-   * content stays on disk in the jsonl. Debounced save — the sidebar scan can adopt many.
-   */
-  adoptScannedSession(session: LocalSession): void {
-    if (this.sessions.has(session.id)) return;
-    this.sessions.set(session.id, session);
-    this.saveSoon();
-  }
-
   private saveNow(): void {
     if (this.pendingSaveTimer) {
       clearTimeout(this.pendingSaveTimer);
@@ -508,10 +531,42 @@ export class LocalSessionStore {
   }
 
   /**
-   * Resolve worktree path via git porcelain when only worktreeName/useWorktree is set,
-   * then attach (official post-create session field write).
-   * SSH sessions: createRemoteWorktree over host-pipe ssh (official createRemoteWorktree subset).
+   * Resolve / create worktree then attach (official post-create session field write).
+   *
+   * Local residual (WorktreeManager.createWorktree):
+   *   parent = getWorktreeParentDir(base) ← chillingSlothLocation
+   *   branch = getBranchName(name) ← ccBranchPrefix
+   *   git worktree add …
+   * SSH: createRemoteWorktree over host-pipe ssh (official createRemoteWorktree subset).
+   *
+   * Prefs are read via optional getters so SettingsStore can inject without store owning prefs.
    */
+  private worktreePrefs: {
+    getChillingSlothLocation?: () => ChillingSlothLocation;
+    getCcBranchPrefix?: () => string | null | undefined;
+  } = {};
+
+  /**
+   * Official WorktreePool residual (pat / Flr) — optional; tryAcquire before create,
+   * releaseOrRemove instead of hard remove when pool enabled.
+   */
+  private worktreePool: WorktreePool | null = null;
+
+  setWorktreePreferenceReaders(readers: {
+    getChillingSlothLocation?: () => ChillingSlothLocation;
+    getCcBranchPrefix?: () => string | null | undefined;
+  }): void {
+    this.worktreePrefs = { ...this.worktreePrefs, ...readers };
+  }
+
+  setWorktreePool(pool: WorktreePool | null): void {
+    this.worktreePool = pool;
+  }
+
+  getWorktreePool(): WorktreePool | null {
+    return this.worktreePool;
+  }
+
   async ensureWorktreeResolved(id: string): Promise<LocalSession | null> {
     const session = this.sessions.get(id);
     if (!session) return null;
@@ -537,6 +592,9 @@ export class LocalSessionStore {
         baseRepo,
         worktreeName: session.worktreeName,
         sourceBranch: session.sourceBranch,
+        chillingSlothLocation:
+          this.worktreePrefs.getChillingSlothLocation?.() ?? "default",
+        ccBranchPrefix: this.worktreePrefs.getCcBranchPrefix?.() ?? "claude",
       });
       if (!remote.success) {
         // Official skips non-git remote repos (null) rather than failing the turn hard.
@@ -551,23 +609,90 @@ export class LocalSessionStore {
     }
 
     const originCwd = session.originCwd ?? session.cwd;
+    if (!originCwd) return session;
+
+    // Official WorktreePool tryAcquire residual — reuse clean warm worktree first.
+    const pool = this.worktreePool;
+    if (pool?.isEnabled()) {
+      try {
+        const acquired = await pool.tryAcquire({
+          baseRepo: originCwd,
+          sessionId: id,
+          preferPath: session.worktreePath,
+          sourceBranch: session.sourceBranch,
+        });
+        if (acquired) {
+          return this.attachWorktree(id, {
+            worktreePath: acquired.path,
+            worktreeName: acquired.name,
+            originCwd,
+          });
+        }
+      } catch (error) {
+        console.warn("[LocalSessionStore] WorktreePool.tryAcquire failed:", error);
+      }
+    }
+
+    // Prefer existing porcelain match (resume / CLI-created).
     const resolved = await resolveWorktreePath({
       originCwd,
       cwd: session.cwd,
       worktreeName: session.worktreeName,
       worktreePath: session.worktreePath,
     });
-    if (!resolved) return session;
-    return this.attachWorktree(id, {
-      worktreePath: resolved,
+    if (resolved) {
+      const attached = await this.attachWorktree(id, {
+        worktreePath: resolved,
+        worktreeName: session.worktreeName ?? path.basename(resolved),
+        originCwd,
+      });
+      if (pool?.isEnabled() && attached) {
+        pool.registerLease({
+          name: attached.worktreeName ?? path.basename(resolved),
+          path: resolved,
+          baseRepo: originCwd,
+          branch: session.sourceBranch,
+          leasedBy: id,
+        });
+      }
+      return attached;
+    }
+
+    // Official create path: parent dir + branch prefix from Claude Code settings.
+    const created = await createLocalWorktree({
+      baseRepo: originCwd,
       worktreeName: session.worktreeName,
-      originCwd: originCwd,
+      sourceBranch: session.sourceBranch,
+      chillingSlothLocation: this.worktreePrefs.getChillingSlothLocation?.() ?? "default",
+      ccBranchPrefix: this.worktreePrefs.getCcBranchPrefix?.() ?? "claude",
     });
+    if (!created.success) {
+      if (created.skipped) return session;
+      console.warn("[LocalSessionStore] createLocalWorktree failed:", created.error);
+      return session;
+    }
+    const attached = await this.attachWorktree(id, {
+      worktreePath: created.worktree.path,
+      worktreeName: created.worktree.name,
+      originCwd,
+    });
+    // Official: register newly created worktree as leased so release can pool it.
+    if (pool?.isEnabled() && attached) {
+      pool.registerLease({
+        name: created.worktree.name,
+        path: created.worktree.path,
+        baseRepo: originCwd,
+        branch: session.sourceBranch,
+        leasedBy: id,
+      });
+    }
+    return attached;
   }
 
   /**
    * Official releaseWorktree residual: optionally remove git worktree, restore originCwd.
-   * SSH sessions use removeRemoteWorktree (host-pipe) instead of local git.
+   * When WorktreePool is enabled, releaseOrRemove pools clean trees instead of always removing.
+   * SSH sessions use removeRemoteWorktree (host-pipe) instead of local git / pool.
    */
   async releaseWorktree(
     id: string,
@@ -590,6 +715,18 @@ export class LocalSessionStore {
           branchName: session.worktreeName,
           force: options?.force !== false,
         });
+      } else if (this.worktreePool?.isEnabled()) {
+        // Official releaseOrRemove: pool clean / remove dirty; detach session fields below.
+        try {
+          await this.worktreePool.releaseOrRemove(id);
+        } catch (error) {
+          console.warn("[LocalSessionStore] WorktreePool.releaseOrRemove failed:", error);
+          await removeGitWorktree({
+            originCwd,
+            worktreePath,
+            force: options?.force !== false,
+          });
+        }
       } else {
         await removeGitWorktree({
           originCwd,
@@ -809,6 +946,40 @@ export class LocalSessionStore {
     session.lastActivityAt = timestamp;
     this.save();
     return session;
+  }
+
+  /**
+   * Official setAutoFixEnabled residual:
+   *   i.autoFixEnabled = t; this.config.saveSession(i)
+   */
+  setAutoFixEnabled(id: string, enabled: boolean): LocalSession | null {
+    return this.update(id, { autoFixEnabled: enabled === true });
+  }
+
+  /**
+   * Official getSeenCommentIds residual.
+   */
+  getSeenCommentIds(id: string, prKey: string): string[] {
+    const session = this.sessions.get(id);
+    if (!session?.seenCommentIds) return [];
+    const list = session.seenCommentIds[prKey];
+    return Array.isArray(list) ? list.map(String) : [];
+  }
+
+  /**
+   * Official addSeenCommentIds residual — merge ids under prKey and save.
+   */
+  addSeenCommentIds(id: string, prKey: string, ids: string[]): LocalSession | null {
+    const session = this.sessions.get(id);
+    if (!session || ids.length === 0) return session ?? null;
+    const prev = session.seenCommentIds?.[prKey] ?? [];
+    const merged = [...new Set([...prev.map(String), ...ids.map(String)])];
+    return this.update(id, {
+      seenCommentIds: {
+        ...(session.seenCommentIds ?? {}),
+        [prKey]: merged,
+      },
+    });
   }
 
   /** Optional explicit title refresh after summarize / transcript settle. */

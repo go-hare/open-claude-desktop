@@ -1,6 +1,7 @@
 import { app, Menu, screen, shell } from "electron";
 import type { IpcHandlerContext } from "./context";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
+import { dispatchQuickEntrySubmitPayload } from "./settingsHandlers";
 import { setOriginalIncognitoTitleBarMode } from "../windows/createMainWindow";
 
 function navigationState(context: IpcHandlerContext) {
@@ -166,19 +167,71 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
       },
     },
     QuickWindow: {
-      requestDismiss: async () => {
+      /**
+       * Official quick-window.html residual (main-oBdKGVdT):
+       *   Enter → QuickWindow.requestDismiss(promptInput.value)  // raw string
+       *   Escape / outside click → requestDismiss(null)
+       * Native / richer path uses requestDismissWithPayload({text,images,chatId}).
+       * Product: string arg → IKA submit; null/empty → dismiss only.
+       */
+      requestDismiss: async (_event, payload) => {
         secondaryWindows.closeQuickWindow();
+        if (typeof payload === "string") {
+          const text = payload.trim();
+          // Official IKA: text.trim().length > 2 required (else mst no-op).
+          if (text.length > 2) {
+            dispatchQuickEntrySubmitPayload(context, { text: payload, images: [] });
+          }
+          return true;
+        }
+        if (payload && typeof payload === "object") {
+          dispatchQuickEntrySubmitPayload(context, payload);
+        }
         return true;
       },
+      /**
+       * Official IKA residual (Sst.requestQuickWindowDismissWithPayload):
+       * process payload → FSe/svi dispatchOnQuickEntrySubmit + show main.
+       * Must not dispatch-only: on Windows the quick panel was focused, so
+       * without show/focus the session starts in a hidden main view.
+       */
       requestDismissWithPayload: async (_event, payload) => {
-        dispatchBridgeEvent(mainView.webContents, "claude.web", "QuickEntry", "onQuickEntrySubmit", payload);
         secondaryWindows.closeQuickWindow();
+        dispatchQuickEntrySubmitPayload(context, payload);
         return true;
       },
-      requestSkooch: async () => {
-        // Official yst residual: native H9i (Swift QuickScreenshotView share strip)
-        // then Electron quick panel fallback — not openQuickWindow alone.
-        await activateQuickEntry(context);
+      /**
+       * Official quick-window residual (main-oBdKGVdT):
+       *   input debounce 750ms → requestSkooch(container.scrollWidth, scrollHeight)
+       * Resizes the *already-open* panel to content — must NOT call activateQuickEntry.
+       * Calling open/activate here re-shows the pill after Enter (user screenshot).
+       */
+      requestSkooch: async (_event, width, height) => {
+        const quick = secondaryWindows.getWindow("quick");
+        if (!quick || quick.isDestroyed() || !quick.isVisible()) {
+          // Panel gone / already dismissed — ignore late debounce after Enter.
+          return false;
+        }
+        const w = typeof width === "number" ? width : Number(width);
+        const h = typeof height === "number" ? height : Number(height);
+        const bounds = quick.getBounds();
+        // Content size from renderer; clamp so multi-line grows without runaway.
+        const nextW =
+          Number.isFinite(w) && w > 0
+            ? Math.min(Math.max(Math.ceil(w), 320), 900)
+            : bounds.width;
+        const nextH =
+          Number.isFinite(h) && h > 0
+            ? Math.min(Math.max(Math.ceil(h), 80), 700)
+            : bounds.height;
+        if (nextW !== bounds.width || nextH !== bounds.height) {
+          quick.setBounds({
+            x: bounds.x,
+            y: bounds.y,
+            width: nextW,
+            height: nextH,
+          });
+        }
         return true;
       },
     },

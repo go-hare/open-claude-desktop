@@ -75,6 +75,20 @@ function isCoworkOnboardingResumeStep(value: unknown): boolean {
 }
 
 /**
+ * Official chillingSlothLocation residual:
+ *   "default" | arbitrary path string | { customPath: string }
+ * Settings UI WorktreeSelect writes { customPath } for Custom… — must not reject as non-string.
+ */
+function isChillingSlothLocation(value: unknown): boolean {
+  if (typeof value === "string") return true;
+  return (
+    isPlainObject(value)
+    && typeof value.customPath === "string"
+    && value.customPath.trim().length > 0
+  );
+}
+
+/**
  * Official chromeExtension shape residual (optional nested fields).
  */
 function isChromeExtension(value: unknown): boolean {
@@ -117,7 +131,7 @@ const OFFICIAL_VALIDATORS: Record<string, Validator> = {
   plushRaccoonOption1: isOffOrAccelerator,
   plushRaccoonOption2: isOffOrAccelerator,
   plushRaccoonOption3: isOffOrAccelerator,
-  chillingSlothLocation: (v) => typeof v === "string",
+  chillingSlothLocation: isChillingSlothLocation,
   ccBranchPrefix: (v) => typeof v === "string",
   ccMaxWarmWorktrees: isNonNegInt,
   ccWorktreeReapAfterHours: isNonNegNumber,

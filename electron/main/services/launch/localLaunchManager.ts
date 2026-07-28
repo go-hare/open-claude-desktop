@@ -2,6 +2,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import {
+  getLaunchPreviewSession,
+  hashLaunchPreviewWorkspace,
+  launchPreviewPartitionName,
+  recordLaunchPreviewPersistedWorkspace,
+  type LaunchPreviewPersistStore,
+} from "./launchPreviewPersist";
 
 export type LaunchServerStatus = "starting" | "running" | "error" | "stopped";
 export type LaunchServerRecord = {
@@ -172,11 +179,72 @@ export async function readLaunchJsonConfigurations(
 
 export class LocalLaunchManager {
   private readonly servers = new Map<string, RunningServer>();
+  /**
+   * Official gi("launchEnabled") residual — MCP/tool isEnabled + start gate.
+   * Default true (SSA). Injected from SettingsStore so startCommand cannot bypass IPC.
+   */
+  private isLaunchEnabled: () => boolean = () => true;
+  /**
+   * Official gi("launchPreviewPersistSession") residual — partition + workspace list.
+   */
+  private isPreviewPersistEnabled: () => boolean = () => false;
+  private previewPersistStore: LaunchPreviewPersistStore | null = null;
+
+  setLaunchEnabledReader(reader: () => boolean): void {
+    this.isLaunchEnabled = reader;
+  }
+
+  /**
+   * Official launchPreviewPersistSession + launchPreviewPersistedWorkspaces residual.
+   */
+  setPreviewPersistAccess(opts: {
+    isPersistEnabled: () => boolean;
+    store: LaunchPreviewPersistStore;
+  }): void {
+    this.isPreviewPersistEnabled = opts.isPersistEnabled;
+    this.previewPersistStore = opts.store;
+  }
+
+  /**
+   * Official L4/D5e residual after a server starts: create/cache partition session
+   * and optionally append workspace key to launchPreviewPersistedWorkspaces.
+   */
+  attachPreviewPersistContext(cwd: string): {
+    workspaceKey: string;
+    persist: boolean;
+    partition: string;
+  } {
+    const workspaceKey = hashLaunchPreviewWorkspace(cwd);
+    const persist = this.isPreviewPersistEnabled() === true;
+    getLaunchPreviewSession(workspaceKey, persist);
+    if (persist && this.previewPersistStore) {
+      recordLaunchPreviewPersistedWorkspace(workspaceKey, this.previewPersistStore);
+    }
+    return {
+      workspaceKey,
+      persist,
+      partition: launchPreviewPartitionName(workspaceKey, persist),
+    };
+  }
+
+  /**
+   * Official Launch / MCP isEnabled residual (preference, not capability).
+   * isAvailable stays true; Ea() = launchEnabled && isAvailable on settings.
+   */
+  isEnabled(): boolean {
+    return this.isLaunchEnabled() !== false;
+  }
+
+  private denyIfDisabled(): { error: string } | null {
+    if (this.isEnabled()) return null;
+    return { error: "launch_disabled" };
+  }
 
   /**
    * Official Launch.getConfiguredServices residual:
    *   new fm(cwd).getConfig() → servers from .claude/launch.json only.
    * Empty / missing file → [] (renderer shows no-config + Set up). Never invent package.json scripts.
+   * Still readable when launchEnabled is off (UI can show no-config vs has-config; start is gated).
    */
   async getConfiguredServices(cwd: string): Promise<Array<{ name: string; port?: number }>> {
     const configs = await readLaunchJsonConfigurations(cwd);
@@ -204,6 +272,8 @@ export class LocalLaunchManager {
   }
 
   async startFromConfig(cwd: string, name?: string): Promise<{ serverId?: string; error?: string }> {
+    const denied = this.denyIfDisabled();
+    if (denied) return denied;
     const configs = await readLaunchJsonConfigurations(cwd);
     const selected = configs.find((cfg) => cfg.name === name) ?? configs[0];
     if (!selected) {
@@ -226,6 +296,8 @@ export class LocalLaunchManager {
     args: string[],
     port: number,
   ): Promise<{ serverId?: string; error?: string }> {
+    const denied = this.denyIfDisabled();
+    if (denied) return denied;
     try {
       const serverId = id("server");
       const record: RunningServer = {
@@ -256,6 +328,12 @@ export class LocalLaunchManager {
         });
       });
       this.servers.set(serverId, record);
+      // Official D5e residual: on start, create preview partition context for cwd.
+      try {
+        this.attachPreviewPersistContext(cwd);
+      } catch {
+        /* partition residual best-effort */
+      }
       waitForPort(port, 5000)
         .then((ok) => {
           if (this.servers.get(serverId) === record && ok) record.status = "running";
@@ -276,6 +354,8 @@ export class LocalLaunchManager {
   }
 
   async restartServer(serverId: string): Promise<{ serverId?: string; error?: string }> {
+    const denied = this.denyIfDisabled();
+    if (denied) return denied;
     const server = this.servers.get(serverId);
     if (!server?.command) return { error: "server not found" };
     await this.stopServer(serverId);

@@ -11,6 +11,16 @@ import {
 } from "../services/extensions/desktopExtensions";
 import { FeatureStateStore } from "../services/featureState/featureStateStore";
 import { LocalLaunchManager } from "../services/launch/localLaunchManager";
+import { LaunchPreviewViewManager } from "../services/launch/launchPreviewViewManager";
+import {
+  buildClaudePreviewCliMcpConfig,
+  type ClaudePreviewMcpHost,
+} from "../services/launch/claudePreviewMcpServer";
+import {
+  getClaudePreviewSessionCwd,
+  registerClaudePreviewMcpHost,
+  setClaudePreviewCliMcpConfigCache,
+} from "../services/launch/claudePreviewHostRegistry";
 import { getLocalSkillFiles, listLocalSkills } from "../services/localSessions/localAgentAssets";
 import { mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
 import { listOpenDocuments, readOpenDocumentAsBase64 } from "../services/openDocuments/openDocumentsStore";
@@ -310,6 +320,85 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   const events = originalEventSurface(context);
   const featureState = new FeatureStateStore();
   const launch = new LocalLaunchManager();
+  // Official gi("launchEnabled"): SSA default true; only explicit false disables.
+  // Manager-level gate covers startFromConfig / startCommand / restart (tool path).
+  launch.setLaunchEnabledReader(
+    () => context.settings.getPreferences().launchEnabled !== false,
+  );
+  // Official gi("launchPreviewPersistSession") + launchPreviewPersistedWorkspaces residual.
+  const previewPersistStore = {
+    getPersistedWorkspaces: () => {
+      const raw = context.settings.getPreferences().launchPreviewPersistedWorkspaces;
+      return Array.isArray(raw)
+        ? raw.filter((item): item is string => typeof item === "string")
+        : [];
+    },
+    setPersistedWorkspaces: (keys: string[]) => {
+      context.settings.setPreference("launchPreviewPersistedWorkspaces", keys);
+    },
+  };
+  launch.setPreviewPersistAccess({
+    isPersistEnabled: () =>
+      context.settings.getPreferences().launchPreviewPersistSession === true,
+    store: previewPersistStore,
+  });
+  /**
+   * Official Launch Preview WebContentsView residual (w5e / showPreview):
+   * host-owned overlay over mainWindow.contentView; partition from launchPreviewPersist.
+   */
+  const previewViews = new LaunchPreviewViewManager({
+    getMainWindow: () => context.windows.mainWindow,
+    getMainWebContents: () => context.windows.mainView?.webContents,
+    isPersistEnabled: () =>
+      context.settings.getPreferences().launchPreviewPersistSession === true,
+    persistStore: previewPersistStore,
+    // Official DMA residual — Launch.elementSelected for select-element mode.
+    onElementSelected: (serverId, elementContext) => {
+      events.launchElementSelected(serverId, elementContext);
+    },
+    log: (...args) => {
+      try {
+        console.info(...args);
+      } catch {
+        /* ignore */
+      }
+    },
+  });
+  const ensurePreviewContext = (serverId: string | null | undefined): void => {
+    if (!serverId) return;
+    const server = launch.getServer(serverId);
+    if (!server) return;
+    if (previewViews.has(serverId)) return;
+    previewViews.ensureContext({
+      serverId,
+      port: server.port,
+      cwd: server.cwd,
+      initialUrl: launch.getPreviewUrl(serverId) ?? undefined,
+    });
+  };
+  /**
+   * Official Claude Preview MCP host residual (voA / KOi / InternalMcp):
+   * register Launch + preview view managers for Code CLI HTTP bridge + tool dispatch.
+   */
+  const claudePreviewHost: ClaudePreviewMcpHost = {
+    launch,
+    previewViews,
+    isLaunchEnabled: () => launch.isEnabled(),
+    ensurePreviewContext: (serverId) => ensurePreviewContext(serverId),
+    isSSH: () => false,
+  };
+  registerClaudePreviewMcpHost(claudePreviewHost);
+  void buildClaudePreviewCliMcpConfig({
+    host: claudePreviewHost,
+    getSessionCwd: () => getClaudePreviewSessionCwd(),
+    isSSH: false,
+  })
+    .then((config) => {
+      setClaudePreviewCliMcpConfigCache(config);
+    })
+    .catch(() => {
+      setClaudePreviewCliMcpConfigCache(null);
+    });
   const spaces = featureState.loadMap<Record<string, unknown>>("spaces");
   const artifacts = featureState.loadMap<Record<string, unknown>>("artifacts");
   const memories = featureState.loadMap<string>("memories");
@@ -443,6 +532,8 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   });
   const rememberPreview = (result: { serverId?: string; error?: string }) => {
     if (result.serverId) {
+      // Official D5e residual: ensure WebContentsView context on start.
+      ensurePreviewContext(result.serverId);
       previewUrl = launch.getPreviewUrl(result.serverId);
       if (previewUrl) events.launchPreviewUrlChanged(result.serverId, previewUrl);
       events.launchActiveServersUpdated(launch.getActiveServers());
@@ -1568,39 +1659,169 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         persistOrbitDeploys();
         return true;
       },
-      destroyPreview: async () => true,
+      destroyPreview: async (_event, serverId) => {
+        const id = asString(serverId) ?? asString(asObject(serverId).serverId);
+        if (!id) return false;
+        return previewViews.destroy(id);
+      },
       getPreviewUrl: async (_event, serverId) => previewUrl ?? launch.getPreviewUrl(asString(serverId) ?? undefined),
       getLogs: async (_event, serverId) => launch.getLogs(String(serverId ?? "")),
-      capturePreviewScreenshot: async (_event, urlOrOptions, maybeOptions) => {
-        const target = asString(urlOrOptions) ?? asString(asObject(urlOrOptions).url) ?? previewUrl ?? launch.getPreviewUrl(asString(asObject(urlOrOptions).serverId) ?? undefined);
+      /**
+       * Official capturePreviewScreenshot(serverId) residual — QOi via WebContentsView CDP.
+       * Args: serverId string (primary). Legacy url/options bag still accepted as fallback.
+       * Returns raw base64 PNG string (no data: prefix) or null.
+       */
+      capturePreviewScreenshot: async (_event, serverIdOrUrl, maybeOptions) => {
+        const bag = asObject(serverIdOrUrl);
+        const serverId =
+          asString(serverIdOrUrl)
+          ?? asString(bag.serverId)
+          ?? null;
+        if (serverId && previewViews.has(serverId)) {
+          return previewViews.capturePreviewScreenshot(serverId);
+        }
+        // Legacy / html-file path: offscreen BrowserWindow capture of a URL.
+        const target =
+          asString(bag.url)
+          ?? (asString(serverIdOrUrl)?.startsWith("http") || asString(serverIdOrUrl)?.startsWith("file:")
+            ? asString(serverIdOrUrl)
+            : null)
+          ?? previewUrl
+          ?? (serverId ? launch.getPreviewUrl(serverId) : null);
         if (!target) return null;
-        return captureUrlScreenshot(target, maybeOptions ?? urlOrOptions);
+        const dataUrl = await captureUrlScreenshot(target, maybeOptions ?? serverIdOrUrl);
+        // Normalize to raw base64 like official QOi (FE adds data: prefix).
+        const raw = asString(dataUrl);
+        if (!raw) return null;
+        const comma = raw.indexOf(",");
+        return raw.startsWith("data:") && comma >= 0 ? raw.slice(comma + 1) : raw;
       },
-      clearPreviewViewport: async () => true,
-      goBack: async () => true,
-      goForward: async () => true,
-      hidePreview: async () => true,
-      showPreview: async () => true,
+      /**
+       * Official clearPreviewViewport(serverId) residual — clear device metrics.
+       * Not hidePreview (that is a separate API).
+       */
+      clearPreviewViewport: async (_event, serverId) => {
+        const id = asString(serverId) ?? asString(asObject(serverId).serverId);
+        return id ? previewViews.clearPreviewViewport(id) : false;
+      },
+      goBack: async (_event, serverId) => {
+        const id = asString(serverId) ?? asString(asObject(serverId).serverId);
+        return id ? previewViews.goBack(id) : false;
+      },
+      goForward: async (_event, serverId) => {
+        const id = asString(serverId) ?? asString(asObject(serverId).serverId);
+        return id ? previewViews.goForward(id) : false;
+      },
+      /**
+       * Official hidePreview residual — hide WebContentsView (optionally by serverId).
+       */
+      hidePreview: async (_event, serverId) => {
+        const id = asString(serverId) ?? asString(asObject(serverId).serverId) ?? undefined;
+        return previewViews.hidePreview(id);
+      },
+      /**
+       * Official showPreview(serverId, bounds) residual — scale by main zoom, addChildView.
+       * Args may be (serverId, bounds) or single options bag.
+       */
+      showPreview: async (_event, serverIdOrOpts, boundsMaybe) => {
+        const bag = asObject(serverIdOrOpts);
+        const id =
+          asString(serverIdOrOpts)
+          ?? asString(bag.serverId)
+          ?? null;
+        const boundsRaw = boundsMaybe !== undefined ? asObject(boundsMaybe) : asObject(bag.bounds ?? bag);
+        if (!id) return false;
+        ensurePreviewContext(id);
+        const bounds = {
+          x: Number(boundsRaw.x) || 0,
+          y: Number(boundsRaw.y) || 0,
+          width: Number(boundsRaw.width) || 0,
+          height: Number(boundsRaw.height) || 0,
+        };
+        return previewViews.showPreview(id, bounds);
+      },
       loadHtmlPreview: async (_event, filePath) => {
         const target = asString(filePath);
         if (!target) return "";
         previewUrl = `file://${target}`;
         return previewUrl;
       },
-      navigatePreview: async (_event, url) => {
-        previewUrl = asString(url) ?? asString(asObject(url).url) ?? previewUrl;
+      navigatePreview: async (_event, serverIdOrUrl, maybeUrl) => {
+        // Official: navigatePreview(serverId, url) or navigatePreview(url).
+        const asId = asString(serverIdOrUrl);
+        const asUrl = asString(maybeUrl) ?? asString(asObject(serverIdOrUrl).url);
+        if (asId && asUrl && previewViews.has(asId)) {
+          previewUrl = asUrl;
+          return ok({ url: asUrl, navigated: previewViews.navigate(asId, asUrl) });
+        }
+        const url = asUrl ?? asId ?? previewUrl;
+        if (url && asId && launch.getServer(asId)) {
+          ensurePreviewContext(asId);
+          previewUrl = url;
+          return ok({ url, navigated: previewViews.navigate(asId, url) });
+        }
+        previewUrl = url ?? previewUrl;
         return ok({ url: previewUrl });
       },
       pickHtmlFile: async (_event, cwd) => {
         const result = await dialog.showOpenDialog(context.windows.mainWindow, { defaultPath: asString(cwd) ?? undefined, properties: ["openFile"], filters: [{ name: "HTML", extensions: ["html", "htm"] }] });
         return result.canceled ? null : result.filePaths[0] ?? null;
       },
-      refreshPreview: async () => true,
-      setPreviewColorScheme: async () => true,
-      setPreviewViewport: async () => true,
-      startFromConfig: async (_event, cwd, name) => rememberPreview(await launch.startFromConfig(asString(cwd) ?? process.cwd(), asString(name) ?? undefined)),
+      refreshPreview: async (_event, serverId) => {
+        const id = asString(serverId) ?? asString(asObject(serverId).serverId);
+        return id ? previewViews.refresh(id) : false;
+      },
+      /**
+       * Official setPreviewColorScheme(serverId, scheme) residual.
+       * scheme: "light" | "dark"
+       */
+      setPreviewColorScheme: async (_event, serverId, scheme) => {
+        const id = asString(serverId) ?? asString(asObject(serverId).serverId);
+        const value =
+          asString(scheme)
+          ?? asString(asObject(serverId).scheme)
+          ?? asString(asObject(scheme).scheme);
+        if (!id || !value) return false;
+        return previewViews.setPreviewColorScheme(id, value);
+      },
+      /**
+       * Official setPreviewViewport(serverId, width, height) residual.
+       * FE mobile preset: 375×812; desktop uses clearPreviewViewport.
+       */
+      setPreviewViewport: async (_event, serverId, width, height) => {
+        const bag = asObject(serverId);
+        const id = asString(serverId) ?? asString(bag.serverId);
+        const w =
+          typeof width === "number"
+            ? width
+            : typeof bag.width === "number"
+              ? bag.width
+              : Number(width);
+        const h =
+          typeof height === "number"
+            ? height
+            : typeof bag.height === "number"
+              ? bag.height
+              : Number(height);
+        if (!id || !Number.isFinite(w) || !Number.isFinite(h)) return false;
+        return previewViews.setPreviewViewport(id, w, h);
+      },
+      startFromConfig: async (_event, cwd, name) => {
+        // launchEnabled gate lives in LocalLaunchManager (IPC + startCommand/tool path).
+        return rememberPreview(
+          await launch.startFromConfig(asString(cwd) ?? process.cwd(), asString(name) ?? undefined),
+        );
+      },
+      /**
+       * Official MCP/tool isEnabled residual — preference gate (not isAvailable).
+       * Settings Ea() still = launchEnabled && isAvailable on the web side.
+       */
+      isEnabled: async () => launch.isEnabled(),
+      // isAvailable is registered via registerInterfaceSyncHandlers below (capability residual).
       stopServer: async (_event, serverId) => {
-        const stopped = await launch.stopServer(String(serverId ?? ""));
+        const id = String(serverId ?? "");
+        const stopped = await launch.stopServer(id);
+        if (id) previewViews.destroy(id);
         events.launchActiveServersUpdated(launch.getActiveServers());
         return stopped;
       },
@@ -1608,7 +1829,22 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         const value = asString(input) ?? asString(asObject(input).name) ?? `deploy-${Date.now()}`;
         return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || `deploy-${Date.now()}`;
       },
-      toggleSelectionMode: async () => true,
+      /**
+       * Official toggleSelectionMode(serverId, enabled) residual — CDP Overlay inspect.
+       * On pick → Launch.elementSelected event with ZFt context.
+       */
+      toggleSelectionMode: async (_event, serverId, enabled) => {
+        const bag = asObject(serverId);
+        const id = asString(serverId) ?? asString(bag.serverId);
+        const on =
+          typeof enabled === "boolean"
+            ? enabled
+            : typeof bag.enabled === "boolean"
+              ? bag.enabled
+              : Boolean(enabled);
+        if (!id) return false;
+        return previewViews.toggleSelectionMode(id, on);
+      },
       unpublishDeploy: async (_event, appName) => {
         for (const [deployId, deploy] of orbitDeploys.entries()) {
           if (deploy.appName === appName || deploy.id === appName) orbitDeploys.delete(deployId);
@@ -1681,8 +1917,15 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       && (globalThis as { isDeveloperApprovedDevUrlOverrideEnabled?: boolean })
         .isDeveloperApprovedDevUrlOverrideEnabled === true,
   }, "claude.web.ClaudeVM");
+  /**
+   * Official Launch residual (cadc35a07 P/k + app.asar MCP isEnabled):
+   *   isAvailable = process capability (always true when LocalLaunchManager present)
+   *   isEnabled / launchEnabled = preference gate (tool + startCommand + startFromConfig)
+   *   settings Ea() = launchEnabled && isAvailable
+   */
   registerInterfaceSyncHandlers("claude.web", "Launch", {
     isAvailable: () => true,
+    isEnabled: () => launch.isEnabled(),
   }, "claude.web.Launch");
 
   // Custom3pSetup is fully owned by settingsHandlers (pot/got/jsA residual).

@@ -14,10 +14,24 @@ import { resolveDeploymentModeFromUserData } from "../custom3p/deploymentMode";
 import { getLocalSessionEnvironmentSync } from "./localSessionEnvironmentStore";
 import type { LocalSession, LocalSessionStore, LocalToolPermissionRequest } from "./localSessionStore";
 import { resolveSshRemoteCwd, spawnClaudeOverSsh } from "./sshCliSpawn";
+import { getClaudePreviewCliMcpConfigCache, setClaudePreviewSessionCwd } from "../launch/claudePreviewHostRegistry";
 
 type RunnerCallbacks = {
   onEvent: (event: Record<string, unknown>) => void;
   onSessionUpdated: (sessionId: string) => void;
+  /**
+   * Official NotificationService.requestUserAttention residual — fire when a
+   * tool_permission_request is presented and the app is not focused.
+   * dockBounceEnabled is checked inside the attention service.
+   */
+  onPermissionAttention?: () => void;
+  /** Official stopFlashFrame residual — cancel bounce / flashFrame(false). */
+  onPermissionAttentionStop?: () => void;
+  /**
+   * Official gi("bypassPermissionsModeEnabled") — clamp spawn --permission-mode.
+   * Missing reader → treat as false (do not invent bypass enabled).
+   */
+  isBypassPermissionsModeEnabled?: () => boolean;
 };
 
 type ActiveTurn = {
@@ -340,7 +354,14 @@ function assistantTextFromEvent(event: Record<string, unknown>): string | undefi
   return undefined;
 }
 
-function buildClaudeArgs(session: LocalSession, request: Record<string, unknown>, cliSessionId: string, resume: boolean, forkSession = false): string[] {
+function buildClaudeArgs(
+  session: LocalSession,
+  request: Record<string, unknown>,
+  cliSessionId: string,
+  resume: boolean,
+  forkSession = false,
+  options: { bypassPermissionsModeEnabled?: boolean } = {},
+): string[] {
   const sessionRaw = asRecord(session);
   // Official CLI (claude-code main.tsx): --include-partial-messages requires --print
   // and --output-format=stream-json. Without --print, QueryEngine never yields
@@ -366,7 +387,11 @@ function buildClaudeArgs(session: LocalSession, request: Record<string, unknown>
     ?? normalizeModel(session.model, enterprise);
   if (model) args.push("--model", model);
 
-  const permissionMode = normalizePermissionMode(stringValue(request.permissionMode) ?? session.permissionMode);
+  // Official clamp (app.asar): bypassPermissions && !gi("bypassPermissionsModeEnabled") → acceptEdits.
+  let permissionMode = normalizePermissionMode(stringValue(request.permissionMode) ?? session.permissionMode);
+  if (permissionMode === "bypassPermissions" && options.bypassPermissionsModeEnabled !== true) {
+    permissionMode = "acceptEdits";
+  }
   if (permissionMode) {
     if (permissionMode === "bypassPermissions") args.push("--allow-dangerously-skip-permissions");
     args.push("--permission-mode", permissionMode);
@@ -381,16 +406,39 @@ function buildClaudeArgs(session: LocalSession, request: Record<string, unknown>
   pushStringOption(args, "--append-system-prompt", request.systemPromptAppend ?? request.appendSystemPrompt ?? sessionRaw.systemPromptAppend);
   pushStringOption(args, "--agent", request.agent ?? sessionRaw.agent);
   pushJsonOption(args, "--agents", request.agents ?? sessionRaw.agents);
-  pushJsonOption(args, "--mcp-config", request.mcpServers ?? sessionRaw.mcpServers);
+  // Official InternalMcp Claude Preview (voA) for ccd: inject when Launch enabled.
+  // CLI cannot load SDK instances → host HTTP bridge config (serializable).
+  // SSH residual: official isEnabled requires !isSSH — skip for ssh sessions.
+  const previewCliMcp =
+    session.sshConfig
+      ? null
+      : getClaudePreviewCliMcpConfigCache();
+  const baseMcp =
+    request.mcpServers
+    ?? sessionRaw.mcpServers
+    ?? undefined;
+  const mergedMcp =
+    previewCliMcp
+      ? {
+          ...(typeof baseMcp === "object" && baseMcp && !Array.isArray(baseMcp)
+            ? (baseMcp as Record<string, unknown>)
+            : {}),
+          ...previewCliMcp,
+        }
+      : baseMcp;
+  pushJsonOption(args, "--mcp-config", mergedMcp);
   pushJsonOption(args, "--mcp-config", request.remoteMcpServers ?? sessionRaw.remoteMcpServers);
   pushListOption(args, "--allowedTools", request.enabledMcpTools ?? request.allowedTools ?? sessionRaw.enabledMcpTools);
   pushListOption(args, "--disallowedTools", request.disallowedTools ?? sessionRaw.disallowedTools);
   pushListOption(args, "--tools", request.tools ?? sessionRaw.tools);
   const settingSources = stringList(request.settingSources);
   if (settingSources.length > 0) args.push("--setting-sources", settingSources.join(","));
-  if (request.useWorktree === true) {
+  // Official host createWorktree already leased path into session.cwd — do not also
+  // pass bare --worktree (would double-create). Only pass when host has not attached.
+  const useWorktree = request.useWorktree === true || session.useWorktree === true;
+  if (useWorktree && !session.worktreePath) {
     args.push("--worktree");
-    const worktreeName = stringValue(request.worktreeName);
+    const worktreeName = stringValue(request.worktreeName) ?? session.worktreeName;
     if (worktreeName) args.push(worktreeName);
   }
 
@@ -402,13 +450,53 @@ function buildClaudeArgs(session: LocalSession, request: Record<string, unknown>
  * stamp it as outer `uuid` so the CLI jsonl echo shares identity with the live-tail
  * seed → getTranscript uuid-dedupe drops the seed (no double user bubble).
  */
-function userInputLine(prompt: string, messageUuid?: string): string {
+/**
+ * Build CLI stream-json user line. Optional images → Anthropic content blocks
+ * (type image / source base64) so preview-annotation / paste images reach the model.
+ */
+function userInputLine(
+  prompt: string,
+  messageUuid?: string,
+  images?: unknown,
+): string {
+  const content: Array<Record<string, unknown>> = [];
+  const imageList = Array.isArray(images) ? images : [];
+  for (const raw of imageList) {
+    const record = asRecord(raw);
+    const base64 =
+      stringValue(record.base64)
+      ?? stringValue(record.data)
+      ?? stringValue(record.media);
+    if (!base64) continue;
+    // Strip data-URL prefix if a caller passed a full dataUrl.
+    const comma = base64.indexOf(",");
+    const data =
+      base64.startsWith("data:") && comma >= 0 ? base64.slice(comma + 1) : base64;
+    const mediaType =
+      stringValue(record.mimeType)
+      ?? stringValue(record.media_type)
+      ?? stringValue(record.mediaType)
+      ?? "image/png";
+    content.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: mediaType,
+        data,
+      },
+    });
+  }
+  if (prompt.trim().length > 0) {
+    content.push({ type: "text", text: prompt });
+  } else if (content.length === 0) {
+    content.push({ type: "text", text: prompt });
+  }
   const payload: Record<string, unknown> = {
     type: "user",
     session_id: "",
     message: {
       role: "user",
-      content: [{ type: "text", text: prompt }],
+      content,
     },
     parent_tool_use_id: null,
   };
@@ -807,7 +895,19 @@ export class ClaudeCliRunner {
     const shouldForkFromSource = !hadCliSession && Boolean(forkSourceCliSessionId);
     const cliSessionId = session.cliSessionId ?? forkSourceCliSessionId ?? randomUUID();
     if (!session.cliSessionId && !shouldForkFromSource) this.store.setCliSessionId(sessionId, cliSessionId);
-    const args = buildClaudeArgs({ ...session, cliSessionId }, request, cliSessionId, hadCliSession || shouldForkFromSource, shouldForkFromSource);
+    // Official KOi sessionCwd residual for Claude Preview MCP tools.
+    setClaudePreviewSessionCwd(resolveCwd(session));
+    const args = buildClaudeArgs(
+      { ...session, cliSessionId },
+      request,
+      cliSessionId,
+      hadCliSession || shouldForkFromSource,
+      shouldForkFromSource,
+      {
+        bypassPermissionsModeEnabled:
+          this.callbacks.isBypassPermissionsModeEnabled?.() === true,
+      },
+    );
 
     const spawnKind = session.sshConfig ? "claude-cli-ssh" : "claude-cli";
     const spawnLabel = session.sshConfig
@@ -845,7 +945,11 @@ export class ClaudeCliRunner {
     try {
       child = spawnClaudeForSession(session, executable, args, resolveCwd(session));
       child.stdin.write(
-        userInputLine(promptWithSelectedFiles(text, request.userSelectedFiles), seededUuid),
+        userInputLine(
+          promptWithSelectedFiles(text, request.userSelectedFiles),
+          seededUuid,
+          request.images,
+        ),
       );
     } catch (error) {
       this.finishWithError(sessionId, spawnLabel, error);
@@ -967,6 +1071,8 @@ export class ClaudeCliRunner {
       },
     });
     if (!ok) return { ok: false, error: "permission_response_channel_unavailable", requestId, decision };
+    // Official stopFlashFrame residual after user answers the permission prompt.
+    this.callbacks.onPermissionAttentionStop?.();
     // Official shell: ExitPlanMode once with _targetMode also updates host session.permissionMode
     // so Mode pill seeds match CLI setMode without waiting for the next status event.
     if (decision === "once" && pending.toolName === "ExitPlanMode") {
@@ -1158,7 +1264,10 @@ export class ClaudeCliRunner {
     if (!cliSessionId) return Promise.resolve(null);
     const executable = defaultClaudeExecutable();
     // buildClaudeArgs already includes --print for stream_event partials.
-    const args = buildClaudeArgs(session, {}, cliSessionId, true);
+    const args = buildClaudeArgs(session, {}, cliSessionId, true, false, {
+      bypassPermissionsModeEnabled:
+        this.callbacks.isBypassPermissionsModeEnabled?.() === true,
+    });
     const cwd = resolveCwd(session);
     const requestId = randomUUID();
 
@@ -1257,6 +1366,8 @@ export class ClaudeCliRunner {
     turn.pendingPermissions.set(requestId, pending);
     this.store.setPendingToolPermission(sessionId, pending);
     this.callbacks.onEvent({ type: "tool_permission_request", sessionId, request: pending });
+    // Official NotificationService.requestUserAttention residual (dockBounceEnabled).
+    this.callbacks.onPermissionAttention?.();
     this.callbacks.onSessionUpdated(sessionId);
   }
 

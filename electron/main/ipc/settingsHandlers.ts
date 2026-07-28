@@ -54,6 +54,7 @@ import {
   syncMenuBarTray,
 } from "../services/settings/menuBarTray";
 import {
+  setLaunchPreviewPersistPreferenceAccess,
   runPreferencePostWriteEffects,
   runPreferencePreWriteHook,
 } from "../services/settings/preferenceEffects";
@@ -171,25 +172,57 @@ function isDotClaudeDeploymentMode(context: IpcHandlerContext): boolean {
  *
  * FSe: if mainView loaded → dispatchOnQuickEntrySubmit; else loadURL root then dispatch.
  * Product: mainView already hosts open-claude-web; dispatch + show/focus matches FSe/svi.
+ *
+ * Exported so windowHandlers.QuickWindow.requestDismissWithPayload uses the same path
+ * (show main + focus + event). Dispatch-only left the main window behind → user saw
+ * Quick Entry close with no desktop session.
  */
-function dispatchQuickEntrySubmitPayload(
+export function dispatchQuickEntrySubmitPayload(
   context: IpcHandlerContext,
-  payload: {
-    text: string;
-    images: Array<{ base64: string; mimeType: string; filename?: string }>;
-    chatId?: string;
-  },
+  payload: unknown,
 ): void {
+  const record =
+    typeof payload === "object" && payload !== null
+      ? (payload as Record<string, unknown>)
+      : {};
+  const text = typeof record.text === "string" ? record.text : "";
+  const images = Array.isArray(record.images)
+    ? (record.images as Array<{ base64: string; mimeType: string; filename?: string }>)
+    : [];
+  const chatId =
+    typeof record.chatId === "string" && record.chatId.length > 0
+      ? record.chatId
+      : undefined;
+  const normalized = { text, images, chatId };
+
   const wc = context.windows.mainView.webContents;
   if (!wc || wc.isDestroyed()) {
     console.warn("[settingsHandlers] IKA: mainView webContents unavailable; dropping payload");
     return;
   }
   const send = () => {
+    // Official FSe/svi: bring main forward first so navigation is visible after Quick Entry dismiss.
+    try {
+      if (process.platform === "win32") {
+        try {
+          app.focus();
+        } catch {
+          /* ignore */
+        }
+      }
+      showMainWindowFromTray(() => context.windows.mainWindow);
+      if (!context.windows.mainWindow.isDestroyed()) {
+        context.windows.mainWindow.show();
+        context.windows.mainWindow.focus();
+      }
+      wc.focus();
+    } catch (error) {
+      console.warn("[settingsHandlers] IKA: failed to show/focus main", error);
+    }
     console.info("[settingsHandlers] IKA dispatchOnQuickEntrySubmit", {
-      textLen: payload.text?.trim?.().length ?? 0,
-      images: payload.images?.length ?? 0,
-      chatId: payload.chatId ?? null,
+      textLen: text.trim().length,
+      images: images.length,
+      chatId: chatId ?? null,
       url: (() => {
         try {
           return wc.getURL();
@@ -198,11 +231,10 @@ function dispatchQuickEntrySubmitPayload(
         }
       })(),
     });
-    dispatchBridgeEvent(wc, "claude.web", "QuickEntry", "onQuickEntrySubmit", payload);
+    dispatchBridgeEvent(wc, "claude.web", "QuickEntry", "onQuickEntrySubmit", normalized);
+    // Late requestSkooch debounce / race: keep Quick Entry closed after main takes focus.
     try {
-      showMainWindowFromTray(() => context.windows.mainWindow);
-      context.windows.mainWindow.focus();
-      wc.focus();
+      context.windows.secondaryWindows?.closeQuickWindow?.();
     } catch {
       /* ignore */
     }
@@ -555,6 +587,18 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
   const events = originalEventSurface(context);
   // Official keepAwakeEnabled: restore powerSaveBlocker from persisted prefs on boot.
   syncKeepAwakeFromPreferences(settings.getPreferences());
+  // Official Rh.on("launchPreviewPersistSession") residual access for iOi clear.
+  setLaunchPreviewPersistPreferenceAccess({
+    getPersistedWorkspaces: () => {
+      const raw = settings.getPreferences().launchPreviewPersistedWorkspaces;
+      return Array.isArray(raw)
+        ? raw.filter((item): item is string => typeof item === "string")
+        : [];
+    },
+    setPersistedWorkspaces: (keys) => {
+      settings.setPreference("launchPreviewPersistedWorkspaces", keys);
+    },
+  });
   // Official lKA / Rh.on("menuBarEnabled"): tray from gi("menuBarEnabled") on boot + toggle.
   // Official Lst click: yst() quick entry first, else show main (Qst).
   configureMenuBarTray({

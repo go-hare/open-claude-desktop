@@ -90,6 +90,35 @@ describe("readLaunchJsonConfigurations / getConfiguredServices residual", () => 
     expect(await mgr.getConfiguredServices(cwd)).toEqual([{ name: "vite", port: 5176 }]);
   });
 
+  it("gates startFromConfig/startCommand when launchEnabled is false", async () => {
+    const cwd = mkCwd();
+    fs.mkdirSync(path.join(cwd, ".claude"), { recursive: true });
+    fs.writeFileSync(
+      path.join(cwd, ".claude", "launch.json"),
+      JSON.stringify({
+        configurations: [
+          {
+            name: "vite",
+            runtimeExecutable: "npm",
+            runtimeArgs: ["run", "dev"],
+            port: 5176,
+          },
+        ],
+      }),
+    );
+    const mgr = new LocalLaunchManager();
+    mgr.setLaunchEnabledReader(() => false);
+    expect(mgr.isEnabled()).toBe(false);
+    // Config still readable (UI residual); start hard-gated.
+    expect(await mgr.getConfiguredServices(cwd)).toEqual([{ name: "vite", port: 5176 }]);
+    expect(await mgr.startFromConfig(cwd, "vite")).toEqual({
+      error: "launch_disabled",
+    });
+    expect(
+      await mgr.startCommand(cwd, "x", "echo", ["hi"], 3000),
+    ).toEqual({ error: "launch_disabled" });
+  });
+
   it("skips framebuffer entries", async () => {
     const cwd = mkCwd();
     fs.mkdirSync(path.join(cwd, ".claude"), { recursive: true });

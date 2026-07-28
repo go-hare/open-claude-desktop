@@ -9,7 +9,6 @@ import {
   readCodeSessionMetadata,
   readCodeTranscript,
   resolveCodeTranscriptPath,
-  scanCodeSessionFiles,
   stripThinkingBlocks,
 } from "./codeTranscriptJsonl";
 
@@ -270,34 +269,6 @@ it("readCodeTranscript: caches by mtime/size; incremental append on same inode g
   // Unchanged mtime/size → pure cache hit
   const third = await readCodeTranscript("sess-cache", cwd, configDir);
   expect(third).toHaveLength(2);
-});
-
-it("scanCodeSessionFiles: lists jsonl newest-first with limit; skips agent-*.jsonl", async () => {
-  const configDir = tempDir("code-tr-config-");
-  writeCliJsonl(configDir, "D:\\a", "old", [{ type: "user" }]);
-  writeCliJsonl(configDir, "D:\\b", "new", [{ type: "user" }]);
-  // non-jsonl ignored
-  fs.writeFileSync(
-    path.join(configDir, "projects", mangleCodeProjectDir("D:\\a"), "notes.txt"),
-    "ignore me",
-  );
-  // agent sub-transcript ignored as a session entry (official agent-*.jsonl)
-  fs.writeFileSync(
-    path.join(configDir, "projects", mangleCodeProjectDir("D:\\a"), "agent-xyz.jsonl"),
-    JSON.stringify({ type: "assistant" }) + "\n",
-  );
-
-  const files = await scanCodeSessionFiles(configDir);
-  expect(files).toHaveLength(2);
-  expect(files.map((f) => f.cliSessionId).sort()).toEqual(["new", "old"]);
-  expect(files.every((f) => f.filePath.endsWith(".jsonl"))).toBe(true);
-  expect(files.every((f) => typeof f.size === "number")).toBe(true);
-
-  const limited = await scanCodeSessionFiles(configDir, 1);
-  expect(limited).toHaveLength(1);
-
-  // missing projects dir → empty, not throw
-  expect(await scanCodeSessionFiles(path.join(configDir, "nope"))).toEqual([]);
 });
 
 it("readCodeSessionMetadata: custom-title wins, else first non-boilerplate user text (head/tail windows)", async () => {

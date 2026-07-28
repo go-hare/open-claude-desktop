@@ -86,7 +86,13 @@ export const officialPreferencesSegmentSchema = z
     plushRaccoonOption3: z
       .union([z.literal("off"), z.object({ accelerator: z.string() })])
       .optional(),
-    chillingSlothLocation: z.string().optional(),
+    // Official: "default" | path string | { customPath } (WorktreeSelect Custom…).
+    chillingSlothLocation: z
+      .union([
+        z.string(),
+        z.object({ customPath: z.string().min(1) }),
+      ])
+      .optional(),
     ccBranchPrefix: z.string().optional(),
     ccMaxWarmWorktrees: z.number().int().min(0).optional(),
     ccWorktreeReapAfterHours: z.number().min(0).optional(),

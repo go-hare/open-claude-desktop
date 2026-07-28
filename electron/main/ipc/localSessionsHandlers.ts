@@ -23,10 +23,24 @@ import { getTranscriptFeedback, submitTranscriptFeedback } from "../services/loc
 import { getLocalSessionEnvironment, saveLocalSessionEnvironment } from "../services/localSessions/localSessionEnvironmentStore";
 import { loadOriginalNodePty } from "../services/originalRuntime/originalRuntimeModules";
 import type { IpcHandlerContext } from "./context";
-import { getLocalSessionRunner } from "./localSessionRunner";
+import {
+  getCodeSessionAttentionService,
+  getLocalSessionRunner,
+  setFocusedCodeSession,
+} from "./localSessionRunner";
 import { originalEventSurface } from "./originalEventSurface";
 import { describeMcpServer, mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
 import { getOfficialGitDiff } from "../services/localSessions/officialGitDiff";
+import {
+  availableCodePermissionModes,
+  clampCodePermissionMode,
+} from "../services/localSessions/codePermissionModePolicy";
+import { CodeAutoArchiveEngine } from "../services/localSessions/codeAutoArchiveEngine";
+import { CodeAutoFixEngine } from "../services/localSessions/codeAutoFixEngine";
+import {
+  createJsonWorktreeRegistry,
+  WorktreePool,
+} from "../services/localSessions/worktreePool";
 import { resolveSshRemoteCwd } from "../services/localSessions/sshCliSpawn";
 import {
   buildSshArgv,
@@ -44,7 +58,7 @@ const TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
 // Code LocalSessions only. Cowork LocalAgentModeSessions is registered solely via
 // coworkSessionsHandlers + CoworkSessionManager (see registerDesktopIpc).
 const LOCAL_SESSIONS_METHODS = [
-  "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkPty","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getDetectedProjects","getDiffFileContent","getEffort","getEffortCatalogDefaults","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getMergeBase","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrReviewComments","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
+  "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkPty","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getAvailablePermissionModes","getDetectedProjects","getDiffFileContent","getEffort","getEffortCatalogDefaults","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getMergeBase","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrIssueComments","getPrReviewComments","getPrReviews","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
 ] as const;
 
 function asString(value: unknown): string | null {
@@ -130,9 +144,21 @@ const BRIDGE_SESSION_KEYS = [
   "runtime",
   "pendingToolPermissions",
   "mountedProjects",
+  // Official AutoArchive residual — session.prs terminal list.
+  "prs",
+  // Official AutoFix residual.
+  "autoFixEnabled",
+  "seenCommentIds",
 ] as const;
 
-function toBridgeSession(session: unknown): unknown {
+/**
+ * Bridge session view. When bypassPermissionsModeEnabled is off, surface
+ * clamped permissionMode so Mode pill matches spawn (acceptEdits residual).
+ */
+function toBridgeSession(
+  session: unknown,
+  options?: { bypassPermissionsModeEnabled?: boolean },
+): unknown {
   const raw = asObject(session);
   const id = asString(raw.id) ?? asString(raw.sessionId);
   if (!id) return session;
@@ -140,6 +166,12 @@ function toBridgeSession(session: unknown): unknown {
   const out: Record<string, unknown> = {};
   for (const key of BRIDGE_SESSION_KEYS) {
     if (raw[key] !== undefined) out[key] = raw[key];
+  }
+  if (typeof out.permissionMode === "string") {
+    out.permissionMode = clampCodePermissionMode(
+      out.permissionMode,
+      options?.bypassPermissionsModeEnabled === true,
+    );
   }
   return {
     ...out,
@@ -152,8 +184,11 @@ function toBridgeSession(session: unknown): unknown {
   };
 }
 
-function toBridgeSessions(sessions: unknown[]): unknown[] {
-  return sessions.map(toBridgeSession);
+function toBridgeSessions(
+  sessions: unknown[],
+  options?: { bypassPermissionsModeEnabled?: boolean },
+): unknown[] {
+  return sessions.map((session) => toBridgeSession(session, options));
 }
 
 async function commandExists(command: string): Promise<boolean> {
@@ -349,12 +384,28 @@ async function currentBranch(cwd: string | null): Promise<string | null> {
   return gitText(cwd, ["branch", "--show-current"]);
 }
 
+/**
+ * Resolve PR for a branch head. Uses state=all so closed/merged PRs are visible
+ * (AutoArchiveEngine residual needs terminal states; open-only would never archive).
+ * Prefer open PR when multiple heads match; else first (GitHub returns newest first).
+ */
 async function githubPullForBranch(cwd: string | null, branch?: string | null) {
   const repo = await githubRepo(cwd);
   const headBranch = branch ?? await currentBranch(cwd);
   if (!repo || !headBranch) return null;
-  const result = await githubRequest(githubApiPath(`/repos/${repo.owner}/${repo.repo}/pulls`, { state: "open", head: `${repo.owner}:${headBranch}`, per_page: 1 }));
-  return result.ok && Array.isArray(result.data) ? result.data[0] ?? null : null;
+  const result = await githubRequest(
+    githubApiPath(`/repos/${repo.owner}/${repo.repo}/pulls`, {
+      state: "all",
+      head: `${repo.owner}:${headBranch}`,
+      per_page: 10,
+    }),
+  );
+  if (!result.ok || !Array.isArray(result.data) || result.data.length === 0) {
+    return null;
+  }
+  const pulls = result.data as Array<Record<string, unknown>>;
+  const open = pulls.find((pull) => String(pull.state ?? "").toLowerCase() === "open");
+  return open ?? pulls[0] ?? null;
 }
 
 async function githubPull(cwd: string | null, number?: number | null, branch?: string | null) {
@@ -975,8 +1026,17 @@ function createSessionHandlers(
     events.localSessionEvent(event);
   };
 
+  /** Live read of bypass pref for bridge clamp (Mode pill vs spawn parity). */
+  const bypassBridgeOpts = () => ({
+    bypassPermissionsModeEnabled:
+      asObject(context.settings.getPreferences()).bypassPermissionsModeEnabled === true,
+  });
+  const bridgeSession = (session: unknown) => toBridgeSession(session, bypassBridgeOpts());
+  const bridgeSessions = (sessions: unknown[]) =>
+    toBridgeSessions(sessions, bypassBridgeOpts());
+
   const dispatchSessionEvent = (type: string, sessionId?: string, session?: unknown) => {
-    dispatchBridgeSessionEvent({ type, sessionId, session: toBridgeSession(session) });
+    dispatchBridgeSessionEvent({ type, sessionId, session: bridgeSession(session) });
   };
 
   const sessionRunner = getLocalSessionRunner(context);
@@ -1006,7 +1066,7 @@ function createSessionHandlers(
       permissionMode: asString(permissionMode),
       userSelectedFiles,
     });
-    return toBridgeSession(sessionId ? store.getSession(sessionId) ?? session : session);
+    return bridgeSession(sessionId ? store.getSession(sessionId) ?? session : session);
   };
 
   const startDiffReview = async (cwdOrSession: unknown, options: unknown, title: string) => {
@@ -1030,7 +1090,7 @@ function createSessionHandlers(
     const session = store.start({ cwd, prompt, title, origin: "diff-review", permissionMode: "default" });
     dispatchSessionEvent("start", session.id, session);
     sessionRunner.runTurn(session.id, prompt, { cwd, origin: "diff-review" });
-    return toBridgeSession(session);
+    return bridgeSession(session);
   };
 
   const getTeleportReadinessFor = async (sessionOrCwd: unknown) => {
@@ -1090,7 +1150,7 @@ function createSessionHandlers(
     });
     dispatchSessionEvent("start", session.id, updated ?? session);
     sessionRunner.runTurn(session.id, prompt, { cwd: readiness.cwd, origin: "teleport-local-handoff" });
-    return { success: true, localOnly: true, mode: "local-handoff", session: toBridgeSession(updated ?? session), readiness };
+    return { success: true, localOnly: true, mode: "local-handoff", session: bridgeSession(updated ?? session), readiness };
   };
 
   const shellPtyBaseSessionId = (sessionId: string) => {
@@ -1187,8 +1247,8 @@ function createSessionHandlers(
   };
 
   const realHandlers: InterfaceHandlers = {
-    getAll: async () => toBridgeSessions(listStoredSessions()),
-    getSession: async (_event, id) => (asString(id) ? toBridgeSession(store.getSession(asString(id)!)) : null),
+    getAll: async () => bridgeSessions(listStoredSessions()),
+    getSession: async (_event, id) => (asString(id) ? bridgeSession(store.getSession(asString(id)!)) : null),
     getTranscript: async (_event, id) => (asString(id) ? await store.getTranscript(asString(id)!) : []),
     start: async (_event, input) => {
       const request = asObject(input);
@@ -1216,11 +1276,21 @@ function createSessionHandlers(
           ?? asString(request.cwd)
           ?? undefined;
       }
+      // Official clamp: startSession permissionMode respects bypassPermissionsModeEnabled.
+      const bypassOk =
+        asObject(context.settings.getPreferences()).bypassPermissionsModeEnabled === true;
+      if (typeof startInput.permissionMode === "string") {
+        startInput.permissionMode = clampCodePermissionMode(
+          startInput.permissionMode,
+          bypassOk,
+        );
+      }
       const session = store.start(startInput as never);
       dispatchSessionEvent("start", session.id, session);
       const prompt = asString(request.prompt) ?? asString(request.message) ?? "";
       const userSelectedFiles = stringArray(request.userSelectedFiles);
-      // Official: worktree lease before first turn when useWorktree is set.
+      // Official: worktree lease before first turn when useWorktree is set
+      // (createLocalWorktree uses chillingSlothLocation + ccBranchPrefix).
       if (session.useWorktree || session.worktreeName) {
         await store.ensureWorktreeResolved(session.id);
       }
@@ -1232,18 +1302,18 @@ function createSessionHandlers(
         dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", "CCDScheduledTasks", "onScheduledTaskEvent", payload);
         dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", "CoworkScheduledTasks", "onScheduledTaskEvent", payload);
       }
-      return toBridgeSession(store.getSession(session.id) ?? session);
+      return bridgeSession(store.getSession(session.id) ?? session);
     },
     importCliSession: async (_event, input) => {
       const session = store.importSession(asObject(input) as never);
       dispatchSessionEvent("start", session.id, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     updateSession: async (_event, id, input) => {
       const sessionId = asString(id);
       const session = sessionId ? store.update(sessionId, asObject(input) as never) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     sendMessage: sendCodeMessage,
     sendSideChatMessage: async (_event, id, text) => {
@@ -1251,13 +1321,13 @@ function createSessionHandlers(
       const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text, "user") : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
       if (sessionId && session && typeof text === "string") sessionRunner.runTurn(sessionId, text);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     forkSession: async (_event, id, messageId) => {
       const sessionId = asString(id);
       const session = sessionId ? await store.fork(sessionId, asString(messageId) ?? undefined) : null;
       if (session) dispatchSessionEvent("start", session.id, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     archive: async (_event, id) => {
       const sessionId = asString(id);
@@ -1309,13 +1379,13 @@ function createSessionHandlers(
       const sessionId = asString(id);
       const session = sessionId ? store.addFolders(sessionId, directories) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     addFolderToSession: async (_event, id, folder) => {
       const sessionId = asString(id);
       const session = sessionId ? store.addFolders(sessionId, [folder]) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     addTrustedFolder: async (_event, folder) => {
       const target = asString(folder);
@@ -1370,7 +1440,7 @@ function createSessionHandlers(
     },
     getSessionsForScheduledTask: async (_event, scheduledTaskId) => {
       const id = asString(scheduledTaskId) ?? asString(asObject(scheduledTaskId).scheduledTaskId);
-      return id ? toBridgeSessions(store.getSessionsForScheduledTask(id)) : [];
+      return id ? bridgeSessions(store.getSessionsForScheduledTask(id)) : [];
     },
     getSupportedCommands: async (_event, request) => getSupportedCommands(store, asObject(request)),
     getSessionsBridgeEnabled: async () => {
@@ -1398,28 +1468,32 @@ function createSessionHandlers(
     getEffortCatalogDefaults: async (_event, model) => {
       try {
         const applied = await sessionRunner.probeCatalogEffortDefaults(asString(model) ?? undefined);
+        // CLI get_settings always returns effortLevels on success (model catalog or
+        // CLI's own fallback ladder). Pass through as-is — do not invent a second ladder.
         if (applied) return applied;
       } catch {
         // ignore — fall through
       }
+      // Probe failed: null levels → UI shows single current stop until retry succeeds.
+      // Never substitute a hardcoded Anthropic 5-stop here.
       return { effort: null, effortLevels: null, ultracodeOfferable: null };
     },
     getEffort: async (_event, id) => {
       const sessionId = asString(id);
       if (!sessionId) return { effort: "medium", effortLevels: null, ultracodeOfferable: null };
-      // Official get_settings → applied is the runtime truth (effort + effortLevels +
-      // ultracodeOfferable for the slider ladder). Host store is the fallback when the
-      // CLI cannot report (e.g. no active turn and probe times out).
+      // Official get_settings → applied is the runtime truth. CLI always includes
+      // effortLevels when the control call succeeds; product must not invent levels.
       try {
         const applied = await sessionRunner.getAppliedEffort(sessionId);
-        if (applied?.effort) {
+        // Accept bag even when effort string is missing — levels still authoritative.
+        if (applied && (applied.effort || applied.effortLevels)) {
           const current = store.getSession(sessionId);
-          if (current && current.effort !== applied.effort) {
+          if (applied.effort && current && current.effort !== applied.effort) {
             const session = store.update(sessionId, { effort: applied.effort });
             if (session) dispatchSessionEvent("session_updated", sessionId, session);
           }
           return {
-            effort: applied.effort,
+            effort: applied.effort ?? current?.effort ?? "medium",
             effortLevels: applied.effortLevels,
             ultracodeOfferable: applied.ultracodeOfferable,
           };
@@ -1427,6 +1501,8 @@ function createSessionHandlers(
       } catch {
         // ignore — fall through to host store
       }
+      // Store only keeps the selected effort string — no catalog. Returning null
+      // levels is honest (UI: single-stop until CLI reports); do not fake 5 stops.
       return {
         effort: store.getSession(sessionId)?.effort ?? "medium",
         effortLevels: null,
@@ -1438,7 +1514,7 @@ function createSessionHandlers(
       if (!sessionId) return null;
       const current = store.getSession(sessionId);
       const parsed = parseEffortFlagSettings({ effortLevel: effort ?? null }, current?.effort);
-      if (!parsed) return toBridgeSession(current);
+      if (!parsed) return bridgeSession(current);
       const session = parsed.clear
         ? store.update(sessionId, { effort: undefined })
         : store.update(sessionId, { effort: String(parsed.effort) });
@@ -1462,13 +1538,30 @@ function createSessionHandlers(
       }
       // Official config changes fan out on session_updated so composer triggers re-sync without reload.
       if (session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
+    /**
+     * Official default for new Code draft is always "default".
+     * bypassPermissionsModeEnabled only gates whether bypass is selectable — not the default.
+     */
     getDefaultPermissionMode: async () => "default",
-    getPermissionMode: async (_event, id) => (asString(id) ? store.getSession(asString(id)!)?.permissionMode ?? "default" : "default"),
+    /** Modes the Code composer may offer (Os residual + bypass pref gate). */
+    getAvailablePermissionModes: async () => {
+      const bypassOk =
+        asObject(context.settings.getPreferences()).bypassPermissionsModeEnabled === true;
+      return availableCodePermissionModes(bypassOk);
+    },
+    getPermissionMode: async (_event, id) => {
+      if (!asString(id)) return "default";
+      const raw = store.getSession(asString(id)!)?.permissionMode ?? "default";
+      return clampCodePermissionMode(String(raw), bypassBridgeOpts().bypassPermissionsModeEnabled);
+    },
     setPermissionMode: async (_event, id, mode) => {
       const sessionId = asString(id);
-      const nextMode = String(mode ?? "default");
+      const bypassOk =
+        asObject(context.settings.getPreferences()).bypassPermissionsModeEnabled === true;
+      // Official clamp: bypass without pref → acceptEdits (app.asar residual).
+      const nextMode = clampCodePermissionMode(String(mode ?? "default"), bypassOk);
       // Persist host first so Mode pill / next --permission-mode see the value even if
       // the active CLI turn rejects control_request (no turn / stdin closed).
       const session = sessionId ? store.update(sessionId, { permissionMode: nextMode }) : null;
@@ -1480,7 +1573,7 @@ function createSessionHandlers(
         } catch {
           // ignore — host mode still updated
         }
-        const bridged = toBridgeSession(session);
+        const bridged = bridgeSession(session);
         dispatchSessionEvent("session_updated", sessionId, session);
         // Official ion Mode pill: permission_mode_changed → be(s.permissionMode).
         dispatchBridgeSessionEvent({
@@ -1490,35 +1583,49 @@ function createSessionHandlers(
           session: bridged,
         });
       }
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     setModel: async (_event, id, model) => {
       const sessionId = asString(id);
       const session = sessionId ? store.update(sessionId, { model: String(model ?? "") }) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
-    setVisibility: async (_event, id, visibility) => toBridgeSession(asString(id) ? store.update(asString(id)!, { visibility: String(visibility ?? "") }) : null),
-    setFocusedSession: async () => true,
+    setVisibility: async (_event, id, visibility) => bridgeSession(asString(id) ? store.update(asString(id)!, { visibility: String(visibility ?? "") }) : null),
+    setFocusedSession: async (_event, id) => {
+      // Official focusedSessionChanged residual — close Code idle notifications.
+      setFocusedCodeSession(context, asString(id));
+      return true;
+    },
     setFastMode: async () => true,
-    setAutoFixEnabled: async () => true,
+    setAutoFixEnabled: async (_event, id, enabled) => {
+      // Official setAutoFixEnabled(sessionId, enabled) residual.
+      const sessionId = asString(id);
+      if (!sessionId) return false;
+      const session = store.setAutoFixEnabled(sessionId, enabled === true);
+      if (session) {
+        dispatchSessionEvent("session_updated", sessionId, session);
+        ensureCodeAutoFixEngine(context).onSessionUpdated(session);
+      }
+      return Boolean(session);
+    },
     setMcpServers: async (_event, id, mcpServers) => {
       const sessionId = asString(id);
       const session = sessionId ? store.update(sessionId, { mcpServers } as never) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     replaceEnabledMcpTools: async (_event, id, enabledMcpTools) => {
       const sessionId = asString(id);
       const session = sessionId ? store.update(sessionId, { enabledMcpTools: Array.isArray(enabledMcpTools) ? enabledMcpTools : [] } as never) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     replaceRemoteMcpServers: async (_event, id, remoteMcpServers) => {
       const sessionId = asString(id);
       const session = sessionId ? store.update(sessionId, { remoteMcpServers } as never) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     setAvailableCodeModels: async () => true,
     setChromePermissionMode: async () => true,
@@ -1545,6 +1652,8 @@ function createSessionHandlers(
         return { ok: false, error: "invalid_tool_permission_response", requestId: request, decision: mode };
       }
       const result = sessionRunner.respondToToolPermission(id, request, mode as "always" | "deny" | "once", updatedInput);
+      // stopFlashFrame also runs inside runner; belt-and-suspenders for focus path.
+      getCodeSessionAttentionService(context).stopFlashFrame();
       dispatchBridgeSessionEvent({
         type: result.ok === false ? "tool_permission_response_failed" : "tool_permission_resolved",
         sessionId: id,
@@ -1571,7 +1680,7 @@ function createSessionHandlers(
       // Reads the durable jsonl (custom-title wins) — the live buffer is cleared by then.
       const refreshed = await store.refreshTitleFromTranscript(sessionId) ?? store.getSession(sessionId);
       if (refreshed) dispatchSessionEvent("session_updated", sessionId, refreshed);
-      return { summary, title: refreshed?.title ?? null, session: toBridgeSession(refreshed) };
+      return { summary, title: refreshed?.title ?? null, session: bridgeSession(refreshed) };
     },
     summarizeTranscript: async (_event, transcript) => Array.isArray(transcript) ? transcript.map(textFromTranscriptItem).join("\n").slice(0, 1000) : "",
     getPlanForSession: async (_event, id) => {
@@ -1829,12 +1938,68 @@ function createSessionHandlers(
       const comments = await githubRequest(`/repos/${result.repo.owner}/${result.repo.repo}/pulls/${pullNumber}/comments?per_page=100`);
       return comments.ok && Array.isArray(comments.data) ? comments.data : [];
     },
+    /**
+     * Official getPrReviews residual — pulls/{n}/reviews (summary review notes).
+     */
+    getPrReviews: async (_event, cwdOrSession, prNumberOrBranch) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const number = issueOrPrNumber(prNumberOrBranch);
+      const branch = asString(prNumberOrBranch) && !number ? asString(prNumberOrBranch) : null;
+      const result = await githubPull(cwd, number, branch);
+      if (!result.ok || !result.repo) return [];
+      const pullNumber = Number(asObject(result.pull).number);
+      if (!pullNumber) return [];
+      const reviews = await githubRequest(
+        `/repos/${result.repo.owner}/${result.repo.repo}/pulls/${pullNumber}/reviews?per_page=100`,
+      );
+      return reviews.ok && Array.isArray(reviews.data) ? reviews.data : [];
+    },
+    /**
+     * Official getPrIssueComments residual — issues/{n}/comments (PR conversation).
+     */
+    getPrIssueComments: async (_event, cwdOrSession, prNumberOrBranch) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const number = issueOrPrNumber(prNumberOrBranch);
+      const branch = asString(prNumberOrBranch) && !number ? asString(prNumberOrBranch) : null;
+      const result = await githubPull(cwd, number, branch);
+      if (!result.ok || !result.repo) return [];
+      const pullNumber = Number(asObject(result.pull).number);
+      if (!pullNumber) return [];
+      const comments = await githubRequest(
+        `/repos/${result.repo.owner}/${result.repo.repo}/issues/${pullNumber}/comments?per_page=100`,
+      );
+      return comments.ok && Array.isArray(comments.data) ? comments.data : [];
+    },
     getPrStateForBranch: async (_event, cwdOrSession, branch) => {
       const cwd = cwdFromSession(store, cwdOrSession);
       const pull = await githubPullForBranch(cwd, asString(branch));
       if (!pull) return null;
       const raw = asObject(pull);
-      return { number: raw.number, state: raw.state, title: raw.title, url: raw.html_url, draft: raw.draft, merged: raw.merged_at !== null && raw.merged_at !== undefined };
+      const result = {
+        number: raw.number,
+        state: raw.state,
+        title: raw.title,
+        url: raw.html_url,
+        draft: raw.draft,
+        merged: raw.merged_at !== null && raw.merged_at !== undefined,
+      };
+      // Official session.prs residual: cache PR head on the session when id known.
+      const sessionId =
+        asString(cwdOrSession)
+        ?? asString(asObject(cwdOrSession).id)
+        ?? asString(asObject(cwdOrSession).sessionId);
+      if (sessionId && store.getSession(sessionId)) {
+        const ref = prRefFromGithubPull(pull);
+        if (ref) {
+          const existing = store.getSession(sessionId)?.prs ?? [];
+          const next = [
+            ...existing.filter((pr) => pr.number !== ref.number),
+            ref,
+          ];
+          store.update(sessionId, { prs: next });
+        }
+      }
+      return result;
     },
     createLocalPr: async (_event, cwdOrSession, title, body, options) => {
       const cwd = cwdFromSession(store, cwdOrSession);
@@ -1845,7 +2010,27 @@ function createSessionHandlers(
       if (asString(title)) args.push("--title", asString(title)!);
       if (asString(body)) args.push("--body", asString(body)!);
       if (!asString(title) && !asString(body)) args.push("--fill");
-      return runProcess(cwd, "gh", args, 30000);
+      const created = await runProcess(cwd, "gh", args, 30000);
+      // Best-effort: after create, refresh session.prs so AutoArchive sees the open PR.
+      const sessionId =
+        asString(cwdOrSession)
+        ?? asString(asObject(cwdOrSession).id)
+        ?? asString(asObject(cwdOrSession).sessionId);
+      if (sessionId && store.getSession(sessionId)) {
+        try {
+          const pull = await githubPullForBranch(cwd, undefined);
+          const ref = prRefFromGithubPull(pull);
+          if (ref) {
+            const existing = store.getSession(sessionId)?.prs ?? [];
+            store.update(sessionId, {
+              prs: [...existing.filter((pr) => pr.number !== ref.number), ref],
+            });
+          }
+        } catch {
+          /* ignore — create result still returned */
+        }
+      }
+      return created;
     },
     generateLocalPrContent: async (_event, cwdOrSession) => generatePrContent(cwdFromSession(store, cwdOrSession)),
     updatePrBody: async (_event, cwdOrSession, prNumber, body) => runProcess(cwdFromSession(store, cwdOrSession), "gh", ["pr", "edit", String(prNumber ?? ""), "--body", String(body ?? "")], 30000),
@@ -2107,7 +2292,7 @@ function createSessionHandlers(
       const updated = store.update(session.id, { metadata: { ...(session.metadata ?? {}), sideChat: true, parentSessionId: parentId } });
       dispatchSessionEvent("start", session.id, updated ?? session);
       if (prompt) sessionRunner.runTurn(session.id, prompt, request);
-      return toBridgeSession(updated ?? session);
+      return bridgeSession(updated ?? session);
     },
     stopSideChat: async (_event, id) => {
       const sessionId = asString(id) ?? asString(asObject(id).sessionId);
@@ -2129,7 +2314,7 @@ function createSessionHandlers(
         force: request.force !== false,
       });
       if (session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     rewind: async (_event, id, messageId) => {
       const sessionId = asString(id);
@@ -2170,7 +2355,420 @@ function createSessionHandlers(
   return handlers;
 }
 
+const autoArchiveEngines = new WeakMap<IpcHandlerContext, CodeAutoArchiveEngine>();
+const autoFixEngines = new WeakMap<IpcHandlerContext, CodeAutoFixEngine>();
+const worktreePools = new WeakMap<IpcHandlerContext, WorktreePool>();
+
+/**
+ * Map GitHub pull payload → official session.prs entry residual.
+ */
+function prRefFromGithubPull(pull: unknown, repoSlug?: string | null): {
+  number?: number;
+  state?: string;
+  merged?: boolean;
+  title?: string;
+  url?: string;
+  repo?: string;
+  updatedAt?: string;
+} | null {
+  const raw = asObject(pull);
+  if (!raw || Object.keys(raw).length === 0) return null;
+  const number = Number(raw.number);
+  const merged =
+    raw.merged_at !== null && raw.merged_at !== undefined
+      ? true
+      : raw.merged === true;
+  // Official terminal: merged preferred over closed string.
+  let state = typeof raw.state === "string" ? raw.state : undefined;
+  if (merged) state = "merged";
+  const base = asObject(raw.base);
+  const head = asObject(raw.head);
+  const repoFromPull =
+    asString(asObject(base.repo).full_name)
+    ?? asString(asObject(head.repo).full_name)
+    ?? asString(repoSlug)
+    ?? undefined;
+  return {
+    number: Number.isFinite(number) && number > 0 ? number : undefined,
+    state,
+    merged: merged || undefined,
+    title: asString(raw.title) ?? undefined,
+    url: asString(raw.html_url) ?? asString(raw.url) ?? undefined,
+    repo: repoFromPull,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Official AutoArchiveEngine residual (vlr): start on LocalSessions registration.
+ * gi("ccAutoArchiveOnPrClose") gates each sweep.
+ * Prefers session.prs; network refresh writes prs back onto the session.
+ */
+function ensureCodeAutoArchiveEngine(context: IpcHandlerContext): CodeAutoArchiveEngine {
+  const existing = autoArchiveEngines.get(context);
+  if (existing) return existing;
+  const store = context.localSessions;
+  const engine = new CodeAutoArchiveEngine({
+    store,
+    isEnabled: () =>
+      asObject(context.settings.getPreferences()).ccAutoArchiveOnPrClose === true,
+    lookupPrs: async (session) => {
+      const cwd = session.worktreePath || session.cwd || session.originCwd;
+      if (!cwd || session.sshConfig) return null;
+      try {
+        const pull = await githubPullForBranch(cwd, undefined);
+        if (!pull) return [];
+        const ref = prRefFromGithubPull(pull);
+        return ref ? [ref] : [];
+      } catch {
+        return null;
+      }
+    },
+    writePrs: (sessionId, prs) => {
+      store.update(sessionId, { prs });
+    },
+    archiveSession: async (sessionId, options) => {
+      if (options?.cleanupWorktree) {
+        try {
+          await store.releaseWorktree(sessionId, { cleanupWorktree: true });
+        } catch {
+          /* best-effort cleanup */
+        }
+      }
+      const ok = store.archive(sessionId);
+      if (ok) {
+        dispatchBridgeEvent(
+          context.windows.mainView.webContents,
+          "claude.web",
+          "LocalSessions",
+          "onEvent",
+          { type: "archived", sessionId },
+        );
+      }
+      return ok;
+    },
+  });
+  engine.start();
+  autoArchiveEngines.set(context, engine);
+  return engine;
+}
+
+/**
+ * Official AutoFixEngine residual (Klr): start alongside AutoArchive on LocalSessions register.
+ * Requires session.autoFixEnabled + prs[]; wakes via sendMessage with <ci-monitor-event>.
+ */
+function ensureCodeAutoFixEngine(context: IpcHandlerContext): CodeAutoFixEngine {
+  const existing = autoFixEngines.get(context);
+  if (existing) return existing;
+  const store = context.localSessions;
+  const engine = new CodeAutoFixEngine({
+    store,
+    getPrChecks: async (cwd, prNumber, repo) => {
+      try {
+        const path = repo
+          ? `/repos/${repo}/pulls/${prNumber}`
+          : null;
+        // Prefer existing githubPull helper when no explicit repo.
+        const pullResult = await githubPull(cwd, prNumber, null);
+        if (!pullResult.ok || !pullResult.repo) {
+          return { ok: false, error: pullResult.error ?? "pull_not_found" };
+        }
+        const pull = asObject(pullResult.pull);
+        const head = asObject(pull.head);
+        const sha = asString(head.sha);
+        const ownerRepo = `${pullResult.repo.owner}/${pullResult.repo.repo}`;
+        if (!sha) return { ok: false, error: "pull_head_sha_not_found", prState: asString(pull.state) };
+        const [checkRuns, status] = await Promise.all([
+          githubRequest(`/repos/${ownerRepo}/commits/${sha}/check-runs`),
+          githubRequest(`/repos/${ownerRepo}/commits/${sha}/status`),
+        ]);
+        const rawChecks = checkRuns.ok
+          ? (asObject(checkRuns.data).check_runs as unknown[])
+          : [];
+        const checks = Array.isArray(rawChecks)
+          ? rawChecks.map((item) => {
+              const c = asObject(item);
+              const conclusion = asString(c.conclusion) ?? "";
+              const name = asString(c.name) ?? asString(c.app?.name) ?? "check";
+              const failed =
+                conclusion === "failure"
+                || conclusion === "timed_out"
+                || conclusion === "cancelled";
+              return {
+                name,
+                conclusion,
+                status: asString(c.status) ?? undefined,
+                bucket: failed ? "fail" : conclusion === "success" ? "pass" : "pending",
+              };
+            })
+          : [];
+        // Also fold combined status statuses.
+        if (status.ok) {
+          const statuses = asObject(status.data).statuses;
+          if (Array.isArray(statuses)) {
+            for (const item of statuses) {
+              const s = asObject(item);
+              const state = asString(s.state) ?? "";
+              if (state === "failure" || state === "error") {
+                checks.push({
+                  name: asString(s.context) ?? "status",
+                  conclusion: state,
+                  bucket: "fail",
+                });
+              }
+            }
+          }
+        }
+        void path; // reserved when repo-only path expands
+        return {
+          ok: checkRuns.ok || status.ok,
+          success: checkRuns.ok || status.ok,
+          checks,
+          prState: asString(pull.state) ?? undefined,
+          mergeable:
+            pull.mergeable === false
+              ? "CONFLICTING"
+              : pull.mergeable === true
+                ? "MERGEABLE"
+                : undefined,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+    getPrReviewComments: async (cwd, prNumber, _repo) => {
+      try {
+        const result = await githubPull(cwd, prNumber, null);
+        if (!result.ok || !result.repo) return { success: false, comments: [] };
+        const comments = await githubRequest(
+          `/repos/${result.repo.owner}/${result.repo.repo}/pulls/${prNumber}/comments?per_page=100`,
+        );
+        if (!comments.ok || !Array.isArray(comments.data)) {
+          return { success: false, comments: [] };
+        }
+        return {
+          success: true,
+          comments: comments.data.map((item) => {
+            const c = asObject(item);
+            const user = asObject(c.user);
+            return {
+              id: c.id as string | number | undefined,
+              dedupId: `line:${String(c.id ?? "")}`,
+              author: asString(user.login) ?? undefined,
+              body: asString(c.body) ?? undefined,
+              path: asString(c.path) ?? undefined,
+              line: typeof c.line === "number" ? c.line : undefined,
+              userType: asString(user.type) ?? undefined,
+              authorAssociation: asString(c.author_association) ?? undefined,
+            };
+          }),
+        };
+      } catch {
+        return { success: false, comments: [] };
+      }
+    },
+    // Official getPrReviews residual — review summaries (CHANGES_REQUESTED / COMMENT / …).
+    getPrReviews: async (cwd, prNumber, _repo) => {
+      try {
+        const result = await githubPull(cwd, prNumber, null);
+        if (!result.ok || !result.repo) return { success: false, comments: [] };
+        const reviews = await githubRequest(
+          `/repos/${result.repo.owner}/${result.repo.repo}/pulls/${prNumber}/reviews?per_page=100`,
+        );
+        if (!reviews.ok || !Array.isArray(reviews.data)) {
+          return { success: false, comments: [] };
+        }
+        return {
+          success: true,
+          comments: reviews.data.map((item) => {
+            const c = asObject(item);
+            const user = asObject(c.user);
+            return {
+              id: c.id as string | number | undefined,
+              dedupId: `review:${String(c.id ?? "")}`,
+              author: asString(user.login) ?? undefined,
+              body: asString(c.body) ?? undefined,
+              state: asString(c.state) ?? undefined,
+              userType: asString(user.type) ?? undefined,
+              authorAssociation: asString(c.author_association) ?? undefined,
+            };
+          }),
+        };
+      } catch {
+        return { success: false, comments: [] };
+      }
+    },
+    // Official getPrIssueComments residual — PR conversation thread.
+    getPrIssueComments: async (cwd, prNumber, _repo) => {
+      try {
+        const result = await githubPull(cwd, prNumber, null);
+        if (!result.ok || !result.repo) return { success: false, comments: [] };
+        const comments = await githubRequest(
+          `/repos/${result.repo.owner}/${result.repo.repo}/issues/${prNumber}/comments?per_page=100`,
+        );
+        if (!comments.ok || !Array.isArray(comments.data)) {
+          return { success: false, comments: [] };
+        }
+        return {
+          success: true,
+          comments: comments.data.map((item) => {
+            const c = asObject(item);
+            const user = asObject(c.user);
+            return {
+              id: c.id as string | number | undefined,
+              dedupId: `issue:${String(c.id ?? "")}`,
+              author: asString(user.login) ?? undefined,
+              body: asString(c.body) ?? undefined,
+              userType: asString(user.type) ?? undefined,
+              authorAssociation: asString(c.author_association) ?? undefined,
+            };
+          }),
+        };
+      } catch {
+        return { success: false, comments: [] };
+      }
+    },
+    getGhLogin: async () => {
+      try {
+        const result = await runProcess(process.cwd(), "gh", ["api", "user", "--jq", ".login"], 10000);
+        if (result.ok && typeof result.stdout === "string") {
+          return result.stdout.trim() || null;
+        }
+      } catch {
+        /* soft */
+      }
+      return null;
+    },
+    sendMessage: async (sessionId, text) => {
+      // Official AutoFix wake → sessionManager.sendMessage (starts a turn).
+      store.sendMessage(sessionId, text, "user");
+      try {
+        const runner = getLocalSessionRunner(context);
+        runner.runTurn(sessionId, text);
+      } catch {
+        /* best-effort wake */
+      }
+      const session = store.getSession(sessionId);
+      if (session) {
+        dispatchBridgeEvent(
+          context.windows.mainView.webContents,
+          "claude.web",
+          "LocalSessions",
+          "onEvent",
+          { type: "session_updated", sessionId, session: toBridgeSession(session) },
+        );
+      }
+    },
+    log: (...args) => {
+      try {
+        console.info(...args);
+      } catch {
+        /* ignore */
+      }
+    },
+  });
+  engine.start();
+  autoFixEngines.set(context, engine);
+  return engine;
+}
+
+/**
+ * Official WorktreePool residual (Flr / pat):
+ *   isEnabled = AppFeatures.chillingSlothPool (ft 1992087837)
+ *   prefs = ccMaxWarmWorktrees + ccWorktreeReapAfterHours
+ *   registry = userData/worktree-pool.json
+ * Wired into LocalSessionStore.ensureWorktreeResolved / releaseWorktree.
+ */
+function ensureWorktreePool(context: IpcHandlerContext): WorktreePool {
+  const existing = worktreePools.get(context);
+  if (existing) return existing;
+  const store = context.localSessions;
+  const registryPath = path.join(app.getPath("userData"), "worktree-pool.json");
+  const pool = new WorktreePool({
+    registry: createJsonWorktreeRegistry(registryPath),
+    isEnabled: () => {
+      try {
+        const features = context.settings.getSupportedFeatures();
+        return features.chillingSlothPool?.status === "supported";
+      } catch {
+        return false;
+      }
+    },
+    prefs: () => {
+      const prefs = asObject(context.settings.getPreferences());
+      const maxWarmRaw = prefs.ccMaxWarmWorktrees;
+      const reapHoursRaw = prefs.ccWorktreeReapAfterHours;
+      const maxWarm =
+        typeof maxWarmRaw === "number" && Number.isFinite(maxWarmRaw)
+          ? Math.max(0, Math.floor(maxWarmRaw))
+          : 3;
+      const reapHours =
+        typeof reapHoursRaw === "number" && Number.isFinite(reapHoursRaw)
+          ? Math.max(0, reapHoursRaw)
+          : 24;
+      return {
+        maxWarm,
+        reapAfterMs: Math.floor(reapHours * 3600 * 1000),
+      };
+    },
+    getSessionPoolState: (sessionId) => {
+      const session = store.getSession(sessionId);
+      if (!session) return null;
+      const lastActivityAt = Date.parse(session.lastActivityAt ?? session.updatedAt ?? "") || 0;
+      return {
+        isRunning: session.isRunning === true,
+        isArchived: session.archived === true,
+        isRemote: Boolean(session.sshConfig),
+        worktreePinned: false,
+        lastActivityAt,
+      };
+    },
+    hasLoadedSessions: () => true,
+    detachWorktreeFromSession: (sessionId, worktreePath) => {
+      const session = store.getSession(sessionId);
+      if (!session) return;
+      if (worktreePath && session.worktreePath && path.resolve(session.worktreePath) !== path.resolve(worktreePath)) {
+        return;
+      }
+      store.update(sessionId, {
+        worktreePath: undefined,
+        worktreeName: undefined,
+        useWorktree: false,
+        cwd: session.originCwd ?? session.cwd,
+        originCwd: undefined,
+        sourceBranch: undefined,
+      });
+    },
+    attachWorktreeToSession: (sessionId, entry) => {
+      void store.attachWorktree(sessionId, {
+        worktreePath: entry.path,
+        worktreeName: entry.name,
+        originCwd: entry.baseRepo,
+      });
+    },
+    log: (...args) => {
+      try {
+        console.info(...args);
+      } catch {
+        /* ignore */
+      }
+    },
+  });
+  store.setWorktreePool(pool);
+  pool.start();
+  worktreePools.set(context, pool);
+  return pool;
+}
+
 export function registerLocalSessionsHandlers(context: IpcHandlerContext): void {
+  // Ensure runner (and worktree pref readers / attention) are wired before first start.
+  getLocalSessionRunner(context);
+  ensureCodeAutoArchiveEngine(context);
+  ensureCodeAutoFixEngine(context);
+  ensureWorktreePool(context);
   registerInterfaceHandlers(
     "claude.web",
     "LocalSessions",

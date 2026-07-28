@@ -22,6 +22,10 @@ import {
   type SessionSshConfig,
   type SshExecResult,
 } from "./sshTranscriptSync";
+import {
+  getWorktreeBranchName,
+  type ChillingSlothLocation,
+} from "./worktreePaths";
 
 export type RemoteWorktreeLease = {
   name: string;
@@ -43,9 +47,37 @@ export function generateRemoteWorktreeName(prefix = "ccd"): string {
   return `${prefix}-${randomBytes(4).toString("hex")}`;
 }
 
-export function defaultRemoteWorktreePath(baseRepo: string, name: string): string {
+/**
+ * Official getWorktreeParentDir residual on remote (POSIX join):
+ *   default → baseRepo/.claude/worktrees
+ *   customPath → customPath/basename(baseRepo)  (remote path; no host path.resolve)
+ */
+export function getRemoteWorktreeParentDir(
+  baseRepo: string,
+  chillingSlothLocation: ChillingSlothLocation = "default",
+): string {
   const base = baseRepo.replace(/\/+$/, "") || ".";
-  return `${base}/.claude/worktrees/${name}`;
+  if (
+    chillingSlothLocation
+    && typeof chillingSlothLocation === "object"
+    && "customPath" in chillingSlothLocation
+    && typeof chillingSlothLocation.customPath === "string"
+    && chillingSlothLocation.customPath.trim()
+  ) {
+    const custom = chillingSlothLocation.customPath.replace(/\/+$/, "").trim();
+    const baseName = base.split("/").filter(Boolean).pop() || "repo";
+    return `${custom}/${baseName}`;
+  }
+  return `${base}/.claude/worktrees`;
+}
+
+export function defaultRemoteWorktreePath(
+  baseRepo: string,
+  name: string,
+  chillingSlothLocation: ChillingSlothLocation = "default",
+): string {
+  const parent = getRemoteWorktreeParentDir(baseRepo, chillingSlothLocation);
+  return `${parent}/${name}`;
 }
 
 async function execRemote(
@@ -64,19 +96,35 @@ export async function createRemoteWorktree(options: {
   baseRepo: string;
   /** Optional explicit worktree name; otherwise generated. */
   worktreeName?: string;
-  /** Branch to create/cut (defaults to worktree name). */
+  /** Branch to create/cut (defaults to getWorktreeBranchName / name). */
   branchName?: string;
   /** Source ref (defaults HEAD). */
   sourceBranch?: string;
-  /** Absolute remote path; default baseRepo/.claude/worktrees/<name>. */
+  /** Absolute remote path; default parent/name from chillingSlothLocation. */
   worktreePath?: string;
+  /** Official gi("chillingSlothLocation") residual (remote POSIX paths). */
+  chillingSlothLocation?: ChillingSlothLocation;
+  /** Official gi("ccBranchPrefix") residual. */
+  ccBranchPrefix?: string | null;
   execSsh?: (config: SessionSshConfig, cmd: string) => Promise<SshExecResult>;
 }): Promise<RemoteWorktreeResult> {
   const baseRepo = options.baseRepo.trim();
   if (!baseRepo) return { success: false, error: "missing baseRepo" };
   const name = sanitizeWorktreeName(options.worktreeName || generateRemoteWorktreeName());
-  const branch = sanitizeWorktreeName(options.branchName || name);
-  const worktreePath = (options.worktreePath || defaultRemoteWorktreePath(baseRepo, name)).trim();
+  // Keep prefix/name slash (official getBranchName); sanitize segments only.
+  const rawBranch =
+    options.branchName
+    || getWorktreeBranchName(name, options.ccBranchPrefix ?? "claude");
+  const branch =
+    rawBranch
+      .split("/")
+      .map((part) => sanitizeWorktreeName(part))
+      .filter(Boolean)
+      .join("/") || name;
+  const worktreePath = (
+    options.worktreePath
+    || defaultRemoteWorktreePath(baseRepo, name, options.chillingSlothLocation ?? "default")
+  ).trim();
   const source = options.sourceBranch?.trim();
   const execSsh = options.execSsh ?? defaultExecSsh;
 

@@ -57,4 +57,25 @@ describe("validateAppPreference HSA residual", () => {
       }).ok,
     ).toBe(true);
   });
+
+  it("accepts chillingSlothLocation default | string | { customPath }", () => {
+    expect(validateAppPreference("chillingSlothLocation", "default").ok).toBe(
+      true,
+    );
+    expect(
+      validateAppPreference("chillingSlothLocation", "/worktrees-root").ok,
+    ).toBe(true);
+    expect(
+      validateAppPreference("chillingSlothLocation", {
+        customPath: "D:\\wt",
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateAppPreference("chillingSlothLocation", { customPath: "  " }).ok,
+    ).toBe(false);
+    expect(validateAppPreference("chillingSlothLocation", { path: "x" }).ok).toBe(
+      false,
+    );
+    expect(validateAppPreference("chillingSlothLocation", 12).ok).toBe(false);
+  });
 });

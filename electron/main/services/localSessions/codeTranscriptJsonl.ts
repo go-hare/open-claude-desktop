@@ -19,7 +19,7 @@
 
 import { open, lstat, readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 
 type JsonlRecord = Record<string, unknown>;
 
@@ -545,49 +545,6 @@ export async function readCodeTranscript(
   }
 
   return messages.slice();
-}
-
-export type CodeSessionFileInfo = {
-  cliSessionId: string;
-  filePath: string;
-  mtimeMs: number;
-  size: number;
-  /** Project dir name (mangled cwd); real cwd is read from jsonl content. */
-  projectDir: string;
-};
-
-/**
- * Enumerate CLI session jsonl files (metadata paths only — no content read).
- * Official does NOT call this on getAll. Keep for explicit import / diagnostics only.
- */
-export async function scanCodeSessionFiles(
-  configDir: string = defaultConfigDir(),
-  limit = 500,
-): Promise<CodeSessionFileInfo[]> {
-  const projectsDir = join(configDir, "projects");
-  const projects = await readdir(projectsDir, { withFileTypes: true }).catch(() => []);
-  const files: CodeSessionFileInfo[] = [];
-  for (const project of projects) {
-    if (!project.isDirectory()) continue;
-    const dirPath = join(projectsDir, project.name);
-    const entries = await readdir(dirPath, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-      // Skip agent sub-transcripts (official agent-*.jsonl) — never list as sessions.
-      if (entry.name.startsWith("agent-")) continue;
-      const filePath = join(dirPath, entry.name);
-      const stat = await lstat(filePath).catch(() => null);
-      if (!stat?.isFile()) continue;
-      files.push({
-        cliSessionId: basename(entry.name, ".jsonl"),
-        filePath,
-        mtimeMs: stat.mtimeMs,
-        size: stat.size,
-        projectDir: project.name,
-      });
-    }
-  }
-  return files.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit);
 }
 
 function contentToText(content: unknown): string {

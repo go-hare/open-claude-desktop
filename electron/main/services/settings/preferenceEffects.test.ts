@@ -72,6 +72,25 @@ describe("preferenceEffects eZt / xn residual", () => {
     );
   });
 
+  it("launchPreviewPersistSession false clears persisted workspaces (iOi residual)", async () => {
+    const { setLaunchPreviewPersistPreferenceAccess } = await import(
+      "./preferenceEffects"
+    );
+    let workspaces = ["abc", "def"];
+    setLaunchPreviewPersistPreferenceAccess({
+      getPersistedWorkspaces: () => workspaces,
+      setPersistedWorkspaces: (keys) => {
+        workspaces = keys;
+      },
+    });
+    await runPreferencePostWriteEffects("launchPreviewPersistSession", false, true);
+    expect(workspaces).toEqual([]);
+    workspaces = ["x"];
+    await runPreferencePostWriteEffects("launchPreviewPersistSession", true, false);
+    expect(workspaces).toEqual(["x"]);
+    setLaunchPreviewPersistPreferenceAccess(null);
+  });
+
   it("chicagoEnabled triggers GrowthBook UrA/y7 refresh when lifecycle active", async () => {
     const refresh = vi.fn(async () => ({ kind: "hardcoded" as const }));
     setActiveCoworkGrowthBookLifecycle({

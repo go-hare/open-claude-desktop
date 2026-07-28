@@ -27,6 +27,7 @@ import { applyKeepAwakeEnabled } from "./keepAwake";
 import { applyMenuBarEnabled } from "./menuBarTray";
 import { getActiveCoworkGrowthBookLifecycle } from "../coworkHostLoop/coworkGrowthBookLifecycle";
 import { reconcileWakeScheduler } from "./wakeScheduler";
+import { clearLaunchPreviewPersistedSessions } from "../launch/launchPreviewPersist";
 
 export type PreferencePreWriteHook = (
   value: unknown,
@@ -37,6 +38,24 @@ export type PreferencePostWriteEffect = (
   value: unknown,
   previous: unknown,
 ) => void | Promise<void>;
+
+/**
+ * Official Rh.on("launchPreviewPersistSession") residual needs read/write of
+ * launchPreviewPersistedWorkspaces. Injected from settingsHandlers so this
+ * module stays free of SettingsStore import cycles.
+ */
+export type LaunchPreviewPersistPreferenceAccess = {
+  getPersistedWorkspaces: () => string[];
+  setPersistedWorkspaces: (keys: string[]) => void;
+};
+
+let launchPreviewPersistAccess: LaunchPreviewPersistPreferenceAccess | null = null;
+
+export function setLaunchPreviewPersistPreferenceAccess(
+  access: LaunchPreviewPersistPreferenceAccess | null,
+): void {
+  launchPreviewPersistAccess = access;
+}
 
 /** Official LLA residual. */
 export const DictationMicCheckReason = {
@@ -232,6 +251,13 @@ export async function runPreferencePostWriteEffects(
   if (key === "wakeSchedulerEnabled") {
     // Official Rh.on("wakeSchedulerEnabled", () => e.reconcile())
     await reconcileWakeScheduler();
+    return;
+  }
+  if (key === "launchPreviewPersistSession") {
+    // Official Rh.on("launchPreviewPersistSession", c => { if (!c) iOi() })
+    if (value === false && launchPreviewPersistAccess) {
+      await clearLaunchPreviewPersistedSessions(launchPreviewPersistAccess);
+    }
   }
 }
 

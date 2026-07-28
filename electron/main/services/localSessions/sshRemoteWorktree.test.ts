@@ -16,6 +16,14 @@ it("defaultRemoteWorktreePath nests under .claude/worktrees", () => {
   );
 });
 
+it("defaultRemoteWorktreePath respects chillingSloth customPath", () => {
+  expect(
+    defaultRemoteWorktreePath("/home/u/proj", "ccd-ab12", {
+      customPath: "/wt-root",
+    }),
+  ).toBe("/wt-root/proj/ccd-ab12");
+});
+
 it("generateRemoteWorktreeName: stable prefix", () => {
   expect(generateRemoteWorktreeName("ccd")).toMatch(/^ccd-[a-f0-9]{8}$/);
 });
@@ -38,15 +46,18 @@ it("createRemoteWorktree: success path via fake exec", async () => {
     baseRepo: "/home/u/proj",
     worktreeName: "ccd-test1",
     sourceBranch: "main",
+    ccBranchPrefix: "claude",
     execSsh,
   });
   expect(result.success).toBe(true);
   if (result.success) {
     expect(result.worktree.path).toBe("/home/u/proj/.claude/worktrees/ccd-test1");
-    expect(result.worktree.branch).toBe("ccd-test1");
+    // Official getBranchName residual: prefix/name
+    expect(result.worktree.branch).toBe("claude/ccd-test1");
     expect(result.worktree.sourceBranch).toBe("main");
   }
   expect(commands.some((c) => c.includes("worktree add"))).toBe(true);
+  expect(commands.some((c) => c.includes("claude/ccd-test1"))).toBe(true);
 });
 
 it("createRemoteWorktree: non-git base is skipped", async () => {
