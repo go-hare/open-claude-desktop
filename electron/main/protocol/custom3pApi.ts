@@ -106,6 +106,11 @@ const FEATURE_FLAGS: Record<string, unknown> = {
   claudeai_customize_memory_tab_main: { defaultValue: true },
   // Official Wt Discovery: only when true (missing → hide). Product residual: on for 3P local connectors.
   cai_opt_in_connector_suggestions: { defaultValue: true },
+  // Official Claude Code _t / St (cc989143e): Qp missing → hide. Enable for 3P desktop residual.
+  ccr_autofix_ui: { defaultValue: true },
+  ccr_velvet_broom: { defaultValue: true },
+  // Classify stays off unless product later opts in (official entitlement; counts toward plan usage).
+  // claudeai_session_state intentionally omitted (missing → hide).
   cache_scoped_prompt_ordering: {
     defaultValue: { enable_tool_search: true },
   },

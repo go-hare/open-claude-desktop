@@ -49,6 +49,39 @@ function slug(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || `extension-${Date.now()}`;
 }
 
+/**
+ * Official BLA residual (app.asar / index.js):
+ *   slug segment; if empty after sanitize → xxHash-like x{32hex}; id = `${prefix}.${author}.${name}`
+ *   prefixes: local.dxt | local.mcpb | local.unpacked
+ * Official kC/dG: id.startsWith("local.dxt"|"local.unpacked") [+ product local.mcpb].
+ */
+function officialSlugSegment(input: string): string {
+  const cleaned = input
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-_.]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (cleaned.length > 0 || input.length === 0) return cleaned;
+  // Official i(): FNV-ish 128-bit when sanitize empties a non-empty source.
+  const mask = (1n << 128n) - 1n;
+  let hash = 0x6c62272e07bb014262b821756295c58dn;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= BigInt(input.charCodeAt(i));
+    hash = (hash * 0x0000000001000000000000000000013bn) & mask;
+  }
+  return `x${hash.toString(16).padStart(32, "0")}`;
+}
+
+function officialLocalExtensionId(
+  manifest: ExtensionManifest,
+  prefix: "local.dxt" | "local.mcpb" | "local.unpacked",
+): string {
+  const author = officialSlugSegment(manifest.author?.name ?? "");
+  const name = officialSlugSegment(manifest.name);
+  return `${prefix}.${author}.${name}`;
+}
+
 function userExtensionsDir(userDataDir: string): string {
   return path.join(userDataDir, "extensions");
 }
@@ -139,8 +172,25 @@ async function readManifestFromDirectory(dir: string): Promise<ExtensionManifest
   return normalizeManifest(null, path.basename(dir));
 }
 
-function manifestId(manifest: ExtensionManifest, fallback?: string | null): string {
-  if (fallback && fallback.trim()) return slug(fallback);
+function manifestId(
+  manifest: ExtensionManifest,
+  options?: { fallback?: string | null; prefix?: "local.dxt" | "local.mcpb" | "local.unpacked" },
+): string {
+  // Prefer official local.* identity when prefix known (install path).
+  if (options?.prefix) {
+    // If caller already passes a full official id, keep it (identity mismatch guard residual).
+    const fb = options.fallback?.trim();
+    if (
+      fb
+      && (fb.startsWith("local.dxt")
+        || fb.startsWith("local.mcpb")
+        || fb.startsWith("local.unpacked"))
+    ) {
+      return fb;
+    }
+    return officialLocalExtensionId(manifest, options.prefix);
+  }
+  if (options?.fallback?.trim()) return slug(options.fallback);
   const author = manifest.author?.name ?? "local";
   return `${slug(author)}.${slug(manifest.name)}`;
 }
@@ -226,7 +276,7 @@ export async function setInstalledExtensionEnabled(userDataDir: string, extensio
 
 export async function installUnpackedExtension(userDataDir: string, sourceDir: string, requestedId?: string | null): Promise<InstalledExtension> {
   const manifest = await readManifestFromDirectory(sourceDir);
-  const id = manifestId(manifest, requestedId);
+  const id = manifestId(manifest, { fallback: requestedId, prefix: "local.unpacked" });
   const target = path.join(userExtensionsDir(userDataDir), id);
   if (path.resolve(sourceDir) !== path.resolve(target)) {
     await fs.rm(target, { recursive: true, force: true });
@@ -242,9 +292,22 @@ export async function installUnpackedExtension(userDataDir: string, sourceDir: s
 }
 
 export async function installDxtArchive(userDataDir: string, dxtPath: string, requestedId?: string | null): Promise<InstalledExtension> {
-  const baseName = path.basename(dxtPath).replace(/\.(dxt|zip)$/i, "");
-  const manifest = normalizeManifest(null, baseName);
-  const id = manifestId(manifest, requestedId ?? baseName);
+  const baseName = path.basename(dxtPath).replace(/\.(dxt|zip|mcpb)$/i, "");
+  const lower = dxtPath.toLowerCase();
+  const prefix: "local.dxt" | "local.mcpb" = lower.endsWith(".mcpb") ? "local.mcpb" : "local.dxt";
+  // Prefer real manifest.json inside archive when present (product still copies archive file as-is).
+  let manifest = normalizeManifest(null, baseName);
+  try {
+    // Lightweight: if path is already an unpacked-looking dir side-car, ignore; archive manifest
+    // full unzip residual stays in official install pipeline — basename fallback is honest for zip copy.
+    const siblingManifest = await readJson<Record<string, unknown>>(
+      path.join(path.dirname(dxtPath), "manifest.json"),
+    );
+    if (siblingManifest) manifest = normalizeManifest(siblingManifest, baseName);
+  } catch {
+    /* ignore */
+  }
+  const id = manifestId(manifest, { fallback: requestedId, prefix });
   const target = path.join(userExtensionsDir(userDataDir), `${id}${path.extname(dxtPath) || ".dxt"}`);
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.copyFile(dxtPath, target);
