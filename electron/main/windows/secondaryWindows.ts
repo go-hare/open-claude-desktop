@@ -82,7 +82,7 @@ export function createSecondaryWindowManager(mainWindow: BrowserWindow, paths: E
   const definitions: Record<SecondaryWindowName, SecondaryWindowDefinition> = {
     about: {
       name: "about",
-      title: "About Claude-Deepseek",
+      title: "About Claudex",
       html: paths.aboutWindowHtml,
       preload: paths.aboutWindowPreload,
       width: 420,
@@ -230,10 +230,15 @@ export function createSecondaryWindowManager(mainWindow: BrowserWindow, paths: E
     child.on("closed", () => {
       if (state.quick === child) delete state.quick;
     });
-    // Official blur → dmA(null) dismiss residual for quick entry
+    // Official blur → dmA(null) dismiss residual for quick entry.
+    // Defer hide one tick so Enter → requestDismiss can show/focus main first;
+    // synchronous hide on blur races Windows focus and leaves main in background
+    // ("主窗口没进行" while session already started).
     child.on("blur", () => {
-      if (!isAlive(child)) return;
-      if (child.isVisible()) child.hide();
+      setTimeout(() => {
+        if (!isAlive(child)) return;
+        if (child.isVisible()) child.hide();
+      }, 0);
     });
 
     await child.loadFile(definition.html);

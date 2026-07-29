@@ -556,7 +556,20 @@ function createDeveloperMenu(context: IpcHandlerContext): MenuItemConstructorOpt
       { label: "打开 MCP 日志文件", click: () => void openMcpLogFile(context) },
       {
         label: "重新加载 MCP 配置",
-        click: () => dispatchBridgeEvent(getMainView(context), "claude.settings", "MCP", "mcpConfigChange", context.settings.getMcpServersConfig()),
+        click: () => {
+          // Official residual: re-read claude_desktop_config.json#mcpServers then push.
+          const reloaded =
+            typeof context.settings.reloadMcpServersConfigFromOfficial === "function"
+              ? context.settings.reloadMcpServersConfigFromOfficial()
+              : context.settings.getMcpServersConfig();
+          dispatchBridgeEvent(
+            getMainView(context),
+            "claude.settings",
+            "MCP",
+            "mcpConfigChange",
+            reloaded,
+          );
+        },
       },
       { type: "separator" },
       { label: "配置第三方推理…", click: () => void openCustom3pSetupWindow(context.windows.mainWindow) },
@@ -658,7 +671,7 @@ function createApplicationMenuTemplate(context: IpcHandlerContext): MenuItemCons
 
 export function installApplicationMenu(context: IpcHandlerContext): void {
   // Keep menu app name on product identity — never bare "Claude" (official collision).
-  const productName = process.env.CLAUDE_PRODUCT_NAME ?? "Claude-Deepseek";
+  const productName = process.env.CLAUDE_PRODUCT_NAME ?? "Claudex";
   if (app.getName() !== productName) app.setName(productName);
 
   const rebuild = () => {

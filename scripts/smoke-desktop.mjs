@@ -6,12 +6,12 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packaged = process.argv.includes("--packaged");
 const timeoutMs = Number(process.env.CLAUDE_DESKTOP_SMOKE_TIMEOUT_MS ?? 20000);
-const packagedMacAppRoot = path.join(root, "out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app");
-const packagedWinRoot = path.join(root, `out/Claude-Deepseek-win32-${process.arch}`);
+const packagedMacAppRoot = path.join(root, "out/Claudex-darwin-arm64/Claudex.app");
+const packagedWinRoot = path.join(root, `out/Claudex-win32-${process.arch}`);
 const packagedAppRoot = process.platform === "win32" ? packagedWinRoot : packagedMacAppRoot;
 const appBinary = process.platform === "win32"
-  ? path.join(packagedWinRoot, "Claude-Deepseek.exe")
-  : path.join(packagedMacAppRoot, "Contents/MacOS/Claude");
+  ? path.join(packagedWinRoot, "Claudex.exe")
+  : path.join(packagedMacAppRoot, "Contents/MacOS/Claudex");
 const electronBinary = path.join(root, "node_modules/.bin/electron");
 const electronCli = path.join(root, "node_modules/electron/cli.js");
 const userDataDir = path.join(root, packaged ? ".smoke-user-data-packaged" : ".smoke-user-data");
@@ -75,7 +75,7 @@ function consume(chunk, stream) {
   while ((newlineIndex = lineBuffer.indexOf("\n")) >= 0) {
     const line = lineBuffer.slice(0, newlineIndex);
     lineBuffer = lineBuffer.slice(newlineIndex + 1);
-    const match = line.match(/\[claude-deepseek-smoke\] (.+)/);
+    const match = line.match(/\[claudex-smoke\] (.+)/);
     if (!match) continue;
     try {
       marker = JSON.parse(match[1]);
@@ -95,7 +95,7 @@ child.stderr.on("data", (chunk) => consume(chunk, process.stderr));
 const timeout = setTimeout(() => {
   if (!settled) {
     settled = true;
-    console.error(`[claude-deepseek-smoke-runner] timeout after ${timeoutMs}ms`);
+    console.error(`[claudex-smoke-runner] timeout after ${timeoutMs}ms`);
     killChild();
   }
 }, timeoutMs);
@@ -133,14 +133,14 @@ child.on("close", async (code, signal) => {
     const markerClaudeCode = marker.claudeCode ?? {};
     const usesBundledExecutable = markerClaudeCode.usesBundledExecutable === true;
     if (packaged && (!claudeCodeBinaryExists || !usesBundledExecutable)) {
-      console.error(`[claude-deepseek-smoke-runner] claude code binary check failed exists=${claudeCodeBinaryExists} usesBundled=${usesBundledExecutable} expected=${expectedClaudeCodeBinary}`);
+      console.error(`[claudex-smoke-runner] claude code binary check failed exists=${claudeCodeBinaryExists} usesBundled=${usesBundledExecutable} expected=${expectedClaudeCodeBinary}`);
       process.exit(1);
     }
     await writeRuntimeCoverage(signal);
-    console.log(`[claude-deepseek-smoke-runner] ok packaged=${packaged} signal=${signal ?? "none"}`);
+    console.log(`[claudex-smoke-runner] ok packaged=${packaged} signal=${signal ?? "none"}`);
     process.exit(0);
   }
-  console.error(`[claude-deepseek-smoke-runner] failed code=${code} signal=${signal ?? "none"}`);
-  if (output) console.error(`[claude-deepseek-smoke-runner] captured ${output.length} bytes`);
+  console.error(`[claudex-smoke-runner] failed code=${code} signal=${signal ?? "none"}`);
+  if (output) console.error(`[claudex-smoke-runner] captured ${output.length} bytes`);
   process.exit(code || 1);
 });

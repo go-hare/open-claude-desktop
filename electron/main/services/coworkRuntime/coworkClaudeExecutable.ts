@@ -57,7 +57,7 @@ export function resolveCoworkDisclaimerExecutable(): string | undefined {
       : undefined,
     path.resolve(
       process.cwd(),
-      "out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app/Contents/Helpers/disclaimer",
+      "out/Claudex-darwin-arm64/Claudex.app/Contents/Helpers/disclaimer",
     ),
   ];
   return candidates.find(

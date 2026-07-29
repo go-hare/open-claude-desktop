@@ -13,8 +13,8 @@ const defaultOfficialAsarCandidates = [
   process.env.CLAUDE_ORIGINAL_ASAR,
   process.env.CLAUDE_ORIGINAL_RESOURCES ? path.join(process.env.CLAUDE_ORIGINAL_RESOURCES, "app.asar") : undefined,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources", "app.asar") : undefined,
-  path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources/app.asar"),
-  String.raw`D:\BaiduNetdiskDownload\Claude code 汉化mac桌面版\Claude-Deepseek\Claude-Deepseek.app\Contents\Resources\app.asar`,
+  path.resolve(projectRoot, "../../Claudex.app/Contents/Resources/app.asar"),
+  String.raw`D:\BaiduNetdiskDownload\Claude code 汉化mac桌面版\Claudex\Claudex.app\Contents\Resources\app.asar`,
 ].filter(Boolean);
 
 function parseArgs(argv) {

@@ -69,4 +69,60 @@ describe("SettingsStore dual-write / dual-read residual", () => {
       }),
     ).toBe(true);
   });
+
+  it("setMcpServersConfig dual-writes official mcpServers + reveal path is official file", () => {
+    const { shell, official, dir } = mkPaths();
+    const store = new SettingsStore(shell, official);
+    expect(store.getMcpConfigFile()).toBe(official);
+    expect(
+      store.setMcpServersConfig({
+        echo: { command: "node", args: ["-e", "1"], env: { A: "1" } },
+      }),
+    ).toBe(true);
+    expect(store.getMcpServersConfig()).toEqual({
+      echo: { command: "node", args: ["-e", "1"], env: { A: "1" } },
+    });
+    const officialRaw = JSON.parse(fs.readFileSync(official, "utf8")) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(officialRaw.mcpServers).toEqual({
+      echo: { command: "node", args: ["-e", "1"], env: { A: "1" } },
+    });
+    // Legacy mirror still written for diagnostics.
+    const mirror = path.join(dir, "mcp-servers.json");
+    expect(JSON.parse(fs.readFileSync(mirror, "utf8"))).toEqual({
+      echo: { command: "node", args: ["-e", "1"], env: { A: "1" } },
+    });
+  });
+
+  it("reads official mcpServers when shell empty; reload picks external edit", () => {
+    const { shell, official } = mkPaths();
+    fs.writeFileSync(
+      official,
+      JSON.stringify({
+        preferences: { sidebarMode: "task" },
+        mcpServers: { fromOfficial: { command: "echo" } },
+      }),
+    );
+    const store = new SettingsStore(shell, official);
+    expect(store.getMcpServersConfig()).toEqual({
+      fromOfficial: { command: "echo" },
+    });
+    // External edit
+    fs.writeFileSync(
+      official,
+      JSON.stringify({
+        preferences: { sidebarMode: "task" },
+        mcpServers: {
+          fromOfficial: { command: "echo" },
+          extra: { command: "node", args: ["a.js"] },
+        },
+      }),
+    );
+    const reloaded = store.reloadMcpServersConfigFromOfficial();
+    expect(reloaded).toEqual({
+      fromOfficial: { command: "echo" },
+      extra: { command: "node", args: ["a.js"] },
+    });
+  });
 });

@@ -6,10 +6,12 @@ import {
   OFFICIAL_APP_CONFIG_FILENAME,
   parseOfficialConfigFileContent,
   readOfficialAppConfigFile,
+  readOfficialMcpServersSegment,
   readOfficialPreferencesSegment,
   resolveOfficialAppConfigPath,
   writeOfficialAppConfigFile,
   writeOfficialGlobalShortcutSegment,
+  writeOfficialMcpServersSegment,
   writeOfficialPreferencesSegment,
 } from "./officialConfigJson";
 
@@ -149,5 +151,26 @@ describe("official claude_desktop_config.json residual", () => {
     };
     expect(onDisk.deploymentMode).toBe("3p");
     expect(onDisk.mcpServers).toEqual({ good: { command: "echo" } });
+  });
+
+  it("writeOfficialMcpServersSegment dual-writes without clobbering preferences", () => {
+    const dir = mkDir();
+    const file = resolveOfficialAppConfigPath(dir);
+    writeOfficialPreferencesSegment(file, { sidebarMode: "code" });
+    const result = writeOfficialMcpServersSegment(file, {
+      good: { command: "node", args: ["x.js"] },
+      bad: { notAServer: true },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.invalidMcpServers).toEqual(["bad"]);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as {
+      preferences: { sidebarMode: string };
+      mcpServers: Record<string, unknown>;
+    };
+    expect(raw.preferences.sidebarMode).toBe("code");
+    expect(raw.mcpServers).toEqual({ good: { command: "node", args: ["x.js"] } });
+    expect(readOfficialMcpServersSegment(file)).toEqual({
+      good: { command: "node", args: ["x.js"] },
+    });
   });
 });

@@ -17,6 +17,7 @@ import {
   getInvalidMcpServersCopy,
 } from "./desktopDialogI18n";
 import {
+  filterInvalidMcpServers,
   parseOfficialAppConfig,
   type OfficialAppConfig,
   type ParseOfficialConfigResult,
@@ -168,6 +169,63 @@ export function writeOfficialGlobalShortcutSegment(
   }
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, JSON.stringify(next, null, 2));
+}
+
+/**
+ * Official VWt/Xo residual: read `mcpServers` from claude_desktop_config.json.
+ * Uses schema+filter so invalid entries are dropped (same as full-file read).
+ */
+export function readOfficialMcpServersSegment(
+  configPath: string,
+  options: ReadOfficialConfigOptions = {},
+): Record<string, unknown> {
+  const cfg = readOfficialAppConfigFile(configPath, {
+    ...options,
+    validate: options.validate !== false,
+  });
+  const servers = cfg.mcpServers;
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+    return {};
+  }
+  return { ...(servers as Record<string, unknown>) };
+}
+
+/**
+ * Official F_("mcpServers", bag) dual-write residual:
+ * merge mcpServers into claude_desktop_config.json without clobbering preferences /
+ * other Xo keys. Runs $Wt filter so invalid BV entries are not persisted.
+ */
+export function writeOfficialMcpServersSegment(
+  configPath: string,
+  mcpServers: Record<string, unknown>,
+): { ok: boolean; invalidMcpServers: string[] } {
+  const existing = readOfficialAppConfigFileRaw(configPath);
+  const { filteredConfig, invalidServers } = filterInvalidMcpServers({
+    ...existing,
+    mcpServers: { ...mcpServers },
+  });
+  const filteredServers =
+    filteredConfig
+    && typeof filteredConfig === "object"
+    && !Array.isArray(filteredConfig)
+    && (filteredConfig as { mcpServers?: unknown }).mcpServers
+    && typeof (filteredConfig as { mcpServers: unknown }).mcpServers === "object"
+    && !Array.isArray((filteredConfig as { mcpServers: unknown }).mcpServers)
+      ? {
+          ...((filteredConfig as { mcpServers: Record<string, unknown> }).mcpServers),
+        }
+      : {};
+  const next: OfficialAppConfigFile = {
+    ...existing,
+    mcpServers: filteredServers,
+  };
+  try {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(next, null, 2));
+    return { ok: true, invalidMcpServers: invalidServers };
+  } catch {
+    return { ok: false, invalidMcpServers: invalidServers };
+  }
 }
 
 /**

@@ -68,7 +68,7 @@ function initializeParams() {
   return {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: {},
-    clientInfo: { name: "claude-deepseek-desktop", version: "1.0.0" },
+    clientInfo: { name: "claudex-desktop", version: "1.0.0" },
   };
 }
 

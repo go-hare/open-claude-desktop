@@ -1,6 +1,6 @@
-# Claude Deepseek Desktop Shell
+# Claudex Desktop Shell
 
-这是按原 `Claude-Deepseek.app/Contents/Resources/app.asar` 结构重建的 Electron 桌面壳项目。
+这是按原 Claude Desktop `app.asar` 结构重建的 Electron 桌面壳项目（产品名 **Claudex**）。
 
 当前口径已升级为：**壳功能面先与原包对齐，再逐项把 compiled JS 转正为 TypeScript 源码**。
 
@@ -82,14 +82,15 @@ packaged runtime native modules complete=true
 打包产物：
 
 ```txt
-out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app
+out/Claudex-darwin-arm64/Claudex.app
+out/Claudex-win32-x64/Claudex.exe
 ```
 
 packaged smoke 输出：
 
 ```txt
-[claude-deepseek-smoke] {"ok":true,"mainWindowVisible":true,"mainViewUrl":"app://localhost/task/new","findInPageVisible":false}
-[claude-deepseek-smoke-runner] ok packaged=true signal=SIGKILL
+[claudex-smoke] {"ok":true,"mainWindowVisible":true,"mainViewUrl":"app://localhost/task/new","findInPageVisible":false}
+[claudex-smoke-runner] ok packaged=true signal=SIGKILL
 ```
 
 说明：原 compiled preload 启动后会保留 Electron helper/renderer；smoke runner 在捕获 ok marker 后只清理本次启动的进程树，并以 0 退出。

@@ -11,13 +11,13 @@ const docsRoot = path.join(projectRoot, "docs");
 const originalAppCandidates = [
   process.env.CLAUDE_ORIGINAL_APP,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.dirname(process.env.CLAUDE_ORIGINAL_APP_CONTENTS) : undefined,
-  path.resolve(projectRoot, "../Claude-Deepseek.app"),
-  path.resolve(projectRoot, "../../Claude-Deepseek.app"),
-  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app",
-  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app",
+  path.resolve(projectRoot, "../Claudex.app"),
+  path.resolve(projectRoot, "../../Claudex.app"),
+  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claudex.app",
+  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claudex\\Claudex.app",
 ].filter(Boolean);
 const originalApp = originalAppCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAppCandidates[0];
-const packagedApp = path.join(projectRoot, "out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app");
+const packagedApp = path.join(projectRoot, "out/Claudex-darwin-arm64/Claudex.app");
 
 async function exists(filePath) {
   try {
@@ -96,11 +96,11 @@ const expectedUnpackedRuntimeEntries = [
   "node_modules/node-pty/build/Release/spawn-helper",
 ];
 
-const packagedWinRoot = path.join(projectRoot, `out/Claude-Deepseek-win32-${process.arch}`);
+const packagedWinRoot = path.join(projectRoot, `out/Claudex-win32-${process.arch}`);
 if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
   const winResources = path.join(packagedWinRoot, "resources");
   const winAsar = path.join(winResources, "app.asar");
-  const winExe = path.join(packagedWinRoot, "Claude-Deepseek.exe");
+  const winExe = path.join(packagedWinRoot, "Claudex.exe");
   const winRuntimeRoot = path.join(winResources, "original-runtime-node_modules", "node_modules");
   const winClaudeCodeBinary = path.join(winResources, "claude-code-bin", "claude.exe");
   const winClaudeCodeManifest = path.join(winResources, "claude-code-bin", "manifest.json");
@@ -217,7 +217,7 @@ const originalInfo = path.join(originalApp, "Contents/Info.plist");
 const packagedInfo = path.join(packagedApp, "Contents/Info.plist");
 const originalExecutable = path.join(originalApp, "Contents/MacOS/Claude");
 const packagedExecutable = path.join(packagedApp, "Contents/MacOS/Claude");
-const generatedExecutable = path.join(packagedApp, "Contents/MacOS/Claude-Deepseek");
+const generatedExecutable = path.join(packagedApp, "Contents/MacOS/Claudex");
 const packagedAsar = path.join(packagedApp, "Contents/Resources/app.asar");
 const originalAsar = path.join(originalApp, "Contents/Resources/app.asar");
 
@@ -231,8 +231,8 @@ const packagedElectronFrameworkSymlinks = await topLevelSymlinks(path.join(packa
 
 // Identity keys: product must DIFFER from official (Dock/TCC separation).
 // Residual keys: executable name / short version still track original shell.
-const PRODUCT_BUNDLE_ID = process.env.CLAUDE_PRODUCT_BUNDLE_ID ?? "com.local.claude-deepseek.desktop";
-const PRODUCT_NAME = process.env.CLAUDE_PRODUCT_NAME ?? "Claude-Deepseek";
+const PRODUCT_BUNDLE_ID = process.env.CLAUDE_PRODUCT_BUNDLE_ID ?? "com.local.claudex.desktop";
+const PRODUCT_NAME = process.env.CLAUDE_PRODUCT_NAME ?? "Claudex";
 const OFFICIAL_BUNDLE_ID = "com.anthropic.claudefordesktop";
 
 const residualInfoKeys = ["CFBundleExecutable", "CFBundleShortVersionString"];
@@ -368,7 +368,7 @@ const markdown = `# Electron packaged bundle 对齐审计\n\n` +
   `生成时间：${report.generated_at}\n\n` +
   `## 结论\n\n` +
   `- Claude 二进制 hash 对齐：${report.executable.original_sha256 === report.executable.packaged_sha256 ? "是" : "否"}\n` +
-  `- 生成的 Claude-Deepseek 二进制是否已移除：${!report.executable.generated_deepseek_executable_exists ? "是" : "否"}\n` +
+  `- 生成的 Claudex 二进制是否已移除：${!report.executable.generated_deepseek_executable_exists ? "是" : "否"}\n` +
   `- Info.plist 残差字段（Executable/Version）是否对齐原包：${residualInfoAligned ? "是" : "否"}\n` +
   `- 产品身份（Bundle ID / Name）是否独立于官方：${productIdentityOk ? "是" : "否"}\n` +
   `- codesign Identifier 是否为产品 ID：${codesignIdentityOk ? "是" : "否"}（${codesignId}）\n` +

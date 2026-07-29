@@ -194,7 +194,7 @@ export function registerOriginalPreloadFallbackHandlers(context: IpcHandlerConte
 
   if (process.env.CLAUDE_DESKTOP_DEBUG_IPC_FALLBACK) {
     console.log(
-      `[claude-deepseek-ipc-fallback] parsed=${channels.length} invoke=${invokeChannels.size} syncOrSend=${syncOrSendChannels.size}`,
+      `[claudex-ipc-fallback] parsed=${channels.length} invoke=${invokeChannels.size} syncOrSend=${syncOrSendChannels.size}`,
     );
   }
 }

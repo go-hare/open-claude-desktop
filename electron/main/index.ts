@@ -108,7 +108,7 @@ function applyUserDataOverride(): void {
  * naming and confuses TCC. Bundle ID is the real separator; name should match product.
  */
 function applyProductAppName(): void {
-  const productName = process.env.CLAUDE_PRODUCT_NAME ?? "Claude-Deepseek";
+  const productName = process.env.CLAUDE_PRODUCT_NAME ?? "Claudex";
   if (app.getName() !== productName) app.setName(productName);
 }
 
@@ -168,7 +168,7 @@ function maybeCompleteSmoke(runtime: DesktopAppRuntime): void {
     },
   };
 
-  fs.writeSync(1, `[claude-deepseek-smoke] ${JSON.stringify(payload)}\n`);
+  fs.writeSync(1, `[claudex-smoke] ${JSON.stringify(payload)}\n`);
 }
 
 export function createDesktopAppRuntime(options: DesktopAppOptions = {}): DesktopAppRuntime {

@@ -18,7 +18,7 @@ const userData =
   process.env.CLAUDE_VM_USERDATA
   || path.join(
     os.homedir(),
-    "Library/Application Support/Claude-Deepseek",
+    "Library/Application Support/Claudex",
   );
 const bundlePath = path.join(userData, "vm_bundles", "claudevm.bundle");
 const resourcesRoot =
@@ -328,7 +328,7 @@ async function run() {
           error: String(virtualization),
           hint:
             virtualization === "entitlement_missing"
-              ? "Use packaged out/.../Claude-Deepseek.app (has virtualization entitlement), not stock Electron"
+              ? "Use packaged out/.../Claudex.app (has virtualization entitlement), not stock Electron"
               : undefined,
         });
         app.exit(4);

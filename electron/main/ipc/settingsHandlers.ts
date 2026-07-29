@@ -1,5 +1,6 @@
 import { app, dialog, globalShortcut, net, shell } from "electron";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -200,25 +201,46 @@ export function dispatchQuickEntrySubmitPayload(
     console.warn("[settingsHandlers] IKA: mainView webContents unavailable; dropping payload");
     return;
   }
-  const send = () => {
-    // Official FSe/svi: bring main forward first so navigation is visible after Quick Entry dismiss.
+  /**
+   * Platform strengthen on official FSe/svi (show main before/after QE submit):
+   * session can start while main stays background after alwaysOnTop pill dismiss.
+   * showMainWindowFromTray already does steal-focus + win32 alwaysOnTop flash.
+   */
+  const frontMain = (reason: string) => {
     try {
-      if (process.platform === "win32") {
-        try {
-          app.focus();
-        } catch {
-          /* ignore */
-        }
-      }
       showMainWindowFromTray(() => context.windows.mainWindow);
-      if (!context.windows.mainWindow.isDestroyed()) {
-        context.windows.mainWindow.show();
-        context.windows.mainWindow.focus();
+      const main = context.windows.mainWindow;
+      if (!main || main.isDestroyed()) {
+        console.warn("[settingsHandlers] IKA frontMain: main missing", reason);
+        return;
       }
-      wc.focus();
+      try {
+        if (typeof main.getOpacity === "function" && main.getOpacity() < 0.99) {
+          main.setOpacity(1);
+        }
+      } catch {
+        /* ignore */
+      }
+      main.show();
+      main.focus();
+      try {
+        wc.focus();
+      } catch {
+        /* ignore */
+      }
+      console.info("[settingsHandlers] IKA frontMain", reason, {
+        visible: main.isVisible(),
+        minimized: main.isMinimized(),
+        focused: main.isFocused(),
+      });
     } catch (error) {
-      console.warn("[settingsHandlers] IKA: failed to show/focus main", error);
+      console.warn("[settingsHandlers] IKA: failed to show/focus main", reason, error);
     }
+  };
+
+  const send = () => {
+    // 1) Front main first (official FSe/svi order).
+    frontMain("before-dispatch");
     console.info("[settingsHandlers] IKA dispatchOnQuickEntrySubmit", {
       textLen: text.trim().length,
       images: images.length,
@@ -232,12 +254,15 @@ export function dispatchQuickEntrySubmitPayload(
       })(),
     });
     dispatchBridgeEvent(wc, "claude.web", "QuickEntry", "onQuickEntrySubmit", normalized);
-    // Late requestSkooch debounce / race: keep Quick Entry closed after main takes focus.
+    // 2) Close pill; re-front once so blur/hide cannot leave main in background.
     try {
       context.windows.secondaryWindows?.closeQuickWindow?.();
     } catch {
       /* ignore */
     }
+    frontMain("after-dismiss");
+    // One microtask re-front covers Windows focus handoff after alwaysOnTop pill.
+    setTimeout(() => frontMain("after-focus-handoff"), 0);
   };
   // Official FSe: if still loading, wait for navigation then dispatch.
   if (wc.isLoading()) {
@@ -447,6 +472,19 @@ function dispatchExtensionsChanged(context: IpcHandlerContext): void {
 
 function dispatchExtensionSettingsChanged(context: IpcHandlerContext, extensionId: string, settings: unknown): void {
   dispatchBridgeEvent(context.windows.mainView.webContents, "claude.settings", "Extensions", "extensionSettingsChanged", extensionId, settings);
+}
+
+/** Official MCP.mcpConfigChange residual — Developer list hot-reload. */
+function dispatchMcpConfigChange(context: IpcHandlerContext): void {
+  const wc = context.windows.mainView.webContents;
+  if (!wc || wc.isDestroyed()) return;
+  dispatchBridgeEvent(
+    wc,
+    "claude.settings",
+    "MCP",
+    "mcpConfigChange",
+    context.settings.getMcpServersConfig(),
+  );
 }
 
 function extensionUserDataDir(context: IpcHandlerContext): string {
@@ -711,14 +749,30 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       // Official InA residual — absent enterprise/features key defaults enabled.
       // Do not Boolean(undefined) (that forced the "IT admin disabled" banner).
       isLocalDevMcpEnabled: async () => settings.isLocalDevMcpEnabled(),
-      setMcpServerConfigs: async (_event, config) => settings.setMcpServersConfig(asObject(config)),
+      setMcpServerConfigs: async (_event, config) => {
+        const ok = settings.setMcpServersConfig(asObject(config));
+        // Official residual: after write, push mcpConfigChange so Developer UI
+        // (cadc35a07 onMcpConfigChange) hot-reloads without remount.
+        dispatchMcpConfigChange(context);
+        return ok;
+      },
       getMcpServersConfig: async () => settings.getMcpServersConfig(),
       getMcpServersConfigWithStatus: async () => {
         const config = settings.getMcpServersConfig();
         return Object.fromEntries(mcpConfigEntries(config).map(([name, value]) => [name, { config: value, ...describeMcpServer(name, value) }]));
       },
       revealConfig: async () => {
-        shell.showItemInFolder(settings.getMcpConfigFile());
+        // Official Edit Config: reveal claude_desktop_config.json (Fb residual).
+        const target = settings.getMcpConfigFile();
+        try {
+          // Ensure file exists so Explorer can select it (empty official bag ok).
+          if (!fsSync.existsSync(target)) {
+            settings.setMcpServersConfig(settings.getMcpServersConfig());
+          }
+        } catch {
+          /* best-effort */
+        }
+        shell.showItemInFolder(target);
         return true;
       },
       revealLogs: async () => {

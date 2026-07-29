@@ -33,10 +33,10 @@ const decompiledRoot = decompiledRootCandidates.find((candidate) => fsSync.exist
 const originalResourceCandidates = [
   process.env.CLAUDE_ORIGINAL_RESOURCES,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources") : undefined,
-  path.resolve(projectRoot, "../Claude-Deepseek.app/Contents/Resources"),
-  path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources"),
-  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app/Contents/Resources",
-  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app\\Contents\\Resources",
+  path.resolve(projectRoot, "../Claudex.app/Contents/Resources"),
+  path.resolve(projectRoot, "../../Claudex.app/Contents/Resources"),
+  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claudex.app/Contents/Resources",
+  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claudex\\Claudex.app\\Contents\\Resources",
 ].filter(Boolean);
 const originalAppResourcesRoot = originalResourceCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalResourceCandidates[0];
 const originalIonDistRoot = path.join(originalAppResourcesRoot, "ion-dist");
@@ -266,7 +266,7 @@ const packages = await collectPackageEvidence();
 const routes = await collectRouteComponentEvidence();
 const componentTokens = await collectComponentTokenEvidence();
 
-addFailure(failures, ionDist.exact, "resources/ion-dist must be byte-for-byte identical to original Claude-Deepseek.app ion-dist");
+addFailure(failures, ionDist.exact, "resources/ion-dist must be byte-for-byte identical to original Claudex.app ion-dist");
 addFailure(failures, shellVite.exact, ".vite shell resources must be byte-for-byte identical to original mirror");
 addFailure(failures, packages.unapproved_current_ui_libraries.length === 0, "Current package.json adds UI/component libraries not declared by original app package.json");
 addFailure(failures, packages.current_ui_version_mismatches.length === 0, "Current package.json UI/component library versions differ from original app package.json");
@@ -279,7 +279,7 @@ const report = {
   generated_at: new Date().toISOString(),
   policy: {
     standard: "original-first alignment: no guessed JS/CSS/font/component structure",
-    original_js_css_fonts: "resources/ion-dist must stay byte-for-byte identical to Claude-Deepseek.app/Contents/Resources/ion-dist",
+    original_js_css_fonts: "resources/ion-dist must stay byte-for-byte identical to Claudex.app/Contents/Resources/ion-dist",
     electron_shell_resources: "all original .vite build/renderer files must match byte-for-byte",
     component_library: "renderer components come from original compiled chunks; new source UI libraries are forbidden unless declared by original package.json with matching version",
     route_manifest: "optional evidence only; byte-for-byte .vite and ion-dist alignment are the hard gates",

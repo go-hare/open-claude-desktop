@@ -84,9 +84,9 @@ if (fs.existsSync(swiftLprojRoot)) {
 
 module.exports = {
   packagerConfig: {
-    name: "Claude-Deepseek",
-    executableName: "Claude-Deepseek",
-    appBundleId: "com.local.claude-deepseek.desktop",
+    name: "Claudex",
+    executableName: "Claudex",
+    appBundleId: "com.local.claudex.desktop",
     appCategoryType: "public.app-category.productivity",
     asar: true,
     ...(electronZipDir ? { electronZipDir } : {}),

@@ -5,7 +5,7 @@
  * Spawns Electron with scripts/smoke-cowork-vm-main.cjs as temporary main.
  * Prefers .smoke-cowork-vm-electron (ad-hoc signed with com.apple.security.virtualization
  * + smol-bin in Contents/Resources). Stock node_modules Electron → entitlement_missing.
- * Packaged Claude-Deepseek.app has entitlement but loads product asar (cannot use as smoke main).
+ * Packaged Claudex.app has entitlement but loads product asar (cannot use as smoke main).
  *
  * Does NOT invent host bash. Requires:
  *   - resources/smol-bin.<arch>.img
@@ -13,7 +13,7 @@
  *   - original-runtime @ant/claude-swift
  *
  * Env:
- *   CLAUDE_VM_USERDATA  — default Claude-Deepseek Application Support
+ *   CLAUDE_VM_USERDATA  — default Claudex Application Support
  *   CLAUDE_VM_SMOKE_TIMEOUT_MS — wall timeout (default 120000)
  *   CLAUDE_VM_SMOKE_SKIP_BASH=1 — only start/probe/stop, no guest bash
  *   CLAUDE_VM_SMOKE_SKIP_CLAUDE=1 — skip guest /usr/local/bin/claude --version probe

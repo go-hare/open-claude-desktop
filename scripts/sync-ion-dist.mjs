@@ -8,11 +8,11 @@ const sourceCandidates = [
   process.argv[2] ? path.resolve(process.argv[2]) : undefined,
   process.env.CLAUDE_ORIGINAL_ION_DIST,
   process.env.CLAUDE_ORIGINAL_RESOURCES ? path.join(process.env.CLAUDE_ORIGINAL_RESOURCES, "ion-dist") : undefined,
-  path.resolve(root, "../Claude-Deepseek.app/Contents/Resources/ion-dist"),
-  path.resolve(root, "../../Claude-Deepseek.app/Contents/Resources/ion-dist"),
-  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app/Contents/Resources/ion-dist",
-  String.raw`D:\BaiduNetdiskDownload\Claude code 汉化mac桌面版\Claude-Deepseek\Claude-Deepseek.app\Contents\Resources\ion-dist`,
-  String.raw`D:\work\py\claude\claude-ion-react-workbench\claude-deepseek-desktop\resources\ion-dist`,
+  path.resolve(root, "../Claudex.app/Contents/Resources/ion-dist"),
+  path.resolve(root, "../../Claudex.app/Contents/Resources/ion-dist"),
+  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claudex.app/Contents/Resources/ion-dist",
+  String.raw`D:\BaiduNetdiskDownload\Claude code 汉化mac桌面版\Claudex\Claudex.app\Contents\Resources\ion-dist`,
+  String.raw`D:\work\py\claude\claude-ion-react-workbench\claudex-desktop\resources\ion-dist`,
 ].filter(Boolean);
 const source = sourceCandidates.find((candidate) => {
   try {

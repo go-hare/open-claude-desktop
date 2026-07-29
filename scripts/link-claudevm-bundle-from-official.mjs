@@ -4,7 +4,7 @@
  * Prefers hardlinks for multi-GB rootfs.img when source and dest are on the same volume.
  *
  * Default source: ~/Library/Application Support/Claude-3p/vm_bundles/claudevm.bundle
- * Default dest:   ~/Library/Application Support/Claude-Deepseek/vm_bundles/claudevm.bundle
+ * Default dest:   ~/Library/Application Support/Claudex/vm_bundles/claudevm.bundle
  *
  * Env:
  *   CLAUDE_VM_BUNDLE_SOURCE
@@ -35,7 +35,7 @@ const dest =
       )
     : path.join(
         home,
-        "Library/Application Support/Claude-Deepseek/vm_bundles/claudevm.bundle",
+        "Library/Application Support/Claudex/vm_bundles/claudevm.bundle",
       ));
 
 function ensureLinkOrCopy(srcFile, destFile) {

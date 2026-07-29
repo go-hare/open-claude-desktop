@@ -17,7 +17,7 @@ const arch = process.arch === "arm64" ? "arm64" : "x64";
 
 const userData =
   process.env.CLAUDE_VM_USERDATA
-  || path.join(home, "Library/Application Support/Claude-Deepseek");
+  || path.join(home, "Library/Application Support/Claudex");
 const bundle = path.join(userData, "vm_bundles", "claudevm.bundle");
 const rootfs = path.join(bundle, "rootfs.img");
 const smol = path.join(root, "resources", `smol-bin.${arch}.img`);

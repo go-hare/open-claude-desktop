@@ -11,8 +11,8 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const originalResourceCandidates = [
   process.env.CLAUDE_ORIGINAL_RESOURCES,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources") : undefined,
-  path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources"),
-  String.raw`D:\BaiduNetdiskDownload\Claude code 汉化mac桌面版\Claude-Deepseek\Claude-Deepseek.app\Contents\Resources`,
+  path.resolve(projectRoot, "../../Claudex.app/Contents/Resources"),
+  String.raw`D:\BaiduNetdiskDownload\Claude code 汉化mac桌面版\Claudex\Claudex.app\Contents\Resources`,
 ].filter(Boolean);
 const originalResources = originalResourceCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalResourceCandidates[0];
 const originalAsar = path.join(originalResources, "app.asar");

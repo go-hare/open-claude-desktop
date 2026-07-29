@@ -1,6 +1,6 @@
 /**
  * Copy official smol-bin.<arch>.img into resources/ for Cowork dual-exec VM.
- * Source: Claude-Deepseek.app/Contents/Resources (or CLAUDE_ORIGINAL_RESOURCES).
+ * Source: Claudex.app/Contents/Resources (or CLAUDE_ORIGINAL_RESOURCES).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -12,8 +12,8 @@ const candidates = [
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS
     ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources")
     : null,
-  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app/Contents/Resources",
-  path.resolve(projectRoot, "../../Claude-Deepseek.app/Contents/Resources"),
+  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claudex.app/Contents/Resources",
+  path.resolve(projectRoot, "../../Claudex.app/Contents/Resources"),
 ].filter(Boolean);
 
 const originalResources = candidates.find((dir) => fs.existsSync(dir));

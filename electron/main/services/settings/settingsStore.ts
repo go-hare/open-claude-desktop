@@ -12,8 +12,10 @@ import {
 } from "./appPreferencesSchema";
 import {
   resolveOfficialAppConfigPath,
+  readOfficialMcpServersSegment,
   readOfficialPreferencesSegment,
   writeOfficialGlobalShortcutSegment,
+  writeOfficialMcpServersSegment,
   writeOfficialPreferencesSegment,
 } from "./officialConfigJson";
 import {
@@ -112,7 +114,17 @@ export class SettingsStore {
     return app.getPath("logs");
   }
 
+  /**
+   * Official Fb residual for Edit Config / revealConfig:
+   * userData/claude_desktop_config.json (mcpServers lives here under Hne/Xo).
+   * Legacy product mirror mcp-servers.json is still dual-written for diagnostics.
+   */
   getMcpConfigFile(): string {
+    return this.officialConfigPath;
+  }
+
+  /** Legacy product mirror path (pre-official dual-write). */
+  getLegacyMcpServersMirrorFile(): string {
     return path.join(this.getUserDataDir(), "mcp-servers.json");
   }
 
@@ -132,6 +144,20 @@ export class SettingsStore {
           : {};
       const combinedStored = { ...officialPrefs, ...shellPrefs, ...legacyMenuBar };
       const preferences = mergeAppPreferences(combinedStored);
+      // Official Xo residual: mcpServers from claude_desktop_config.json wins over shell bag.
+      // Fall back: shell mcpServersConfig → legacy mcp-servers.json mirror.
+      const officialMcp = readOfficialMcpServersSegment(this.officialConfigPath);
+      const shellMcp =
+        raw.mcpServersConfig && typeof raw.mcpServersConfig === "object"
+          ? (raw.mcpServersConfig as Record<string, unknown>)
+          : {};
+      const legacyMirror = this.readLegacyMcpServersMirror();
+      const mcpServersConfig =
+        Object.keys(officialMcp).length > 0
+          ? officialMcp
+          : Object.keys(shellMcp).length > 0
+            ? { ...base.mcpServersConfig, ...shellMcp }
+            : { ...base.mcpServersConfig, ...legacyMirror };
       return {
         ...base,
         ...raw,
@@ -141,26 +167,64 @@ export class SettingsStore {
             ? preferences.menuBarEnabled
             : (raw.menuBarEnabled ?? base.menuBarEnabled),
         appFeatures: { ...base.appFeatures, ...(raw.appFeatures ?? {}) },
-        mcpServersConfig: { ...base.mcpServersConfig, ...(raw.mcpServersConfig ?? {}) },
+        mcpServersConfig,
         custom3pConfigs: { ...base.custom3pConfigs, ...(raw.custom3pConfigs ?? {}) },
       };
     } catch {
-      // Shell missing: still try official config preferences (honest dual-read).
+      // Shell missing: still try official config preferences + mcpServers (honest dual-read).
       const officialPrefs = readOfficialPreferencesSegment(this.officialConfigPath);
-      if (officialPrefs) {
+      const officialMcp = readOfficialMcpServersSegment(this.officialConfigPath);
+      const legacyMirror = this.readLegacyMcpServersMirror();
+      const mcpServersConfig =
+        Object.keys(officialMcp).length > 0
+          ? officialMcp
+          : legacyMirror;
+      if (officialPrefs || Object.keys(mcpServersConfig).length > 0) {
         return {
           ...defaultState(),
-          preferences: mergeAppPreferences(officialPrefs),
+          ...(officialPrefs
+            ? { preferences: mergeAppPreferences(officialPrefs) }
+            : {}),
+          mcpServersConfig,
         };
       }
       return defaultState();
     }
   }
 
+  private readLegacyMcpServersMirror(): Record<string, unknown> {
+    try {
+      const mirror = this.getLegacyMcpServersMirrorFile();
+      if (!fs.existsSync(mirror)) return {};
+      const raw = JSON.parse(fs.readFileSync(mirror, "utf8")) as unknown;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+      // Mirror may be flat map or { mcpServers: ... }.
+      const rec = raw as Record<string, unknown>;
+      if (
+        rec.mcpServers
+        && typeof rec.mcpServers === "object"
+        && !Array.isArray(rec.mcpServers)
+      ) {
+        return { ...(rec.mcpServers as Record<string, unknown>) };
+      }
+      return { ...rec };
+    } catch {
+      return {};
+    }
+  }
+
   private save(): void {
     fs.mkdirSync(path.dirname(this.settingsFile), { recursive: true });
     fs.writeFileSync(this.settingsFile, JSON.stringify(this.state, null, 2));
-    fs.writeFileSync(this.getMcpConfigFile(), JSON.stringify(this.state.mcpServersConfig, null, 2));
+    // Legacy mirror for diagnostics / older tooling (not the Edit Config target).
+    try {
+      fs.writeFileSync(
+        this.getLegacyMcpServersMirrorFile(),
+        JSON.stringify(this.state.mcpServersConfig, null, 2),
+      );
+    } catch {
+      /* best-effort */
+    }
     // Official F_("preferences", i) dual-write residual — does not invent other Xo keys.
     try {
       writeOfficialPreferencesSegment(
@@ -169,6 +233,15 @@ export class SettingsStore {
       );
     } catch {
       /* dual-write best-effort; shell file remains source of truth for product */
+    }
+    // Official F_("mcpServers", bag) dual-write residual.
+    try {
+      writeOfficialMcpServersSegment(
+        this.officialConfigPath,
+        this.state.mcpServersConfig,
+      );
+    } catch {
+      /* best-effort */
     }
   }
 
@@ -186,7 +259,7 @@ export class SettingsStore {
     }
     return {
       is3p: true,
-      desktopShell: "claude-deepseek-desktop",
+      desktopShell: "claudex-desktop",
       appVersion,
       // Official Xo residual: feature flags live under `features`, not flat.
       features: { ...this.state.appFeatures },
@@ -341,10 +414,46 @@ export class SettingsStore {
     return { ...this.state.mcpServersConfig };
   }
 
+  /**
+   * Write MCP server map (Developer settings / setMcpServerConfigs residual).
+   * Persists shell bag + legacy mirror + official claude_desktop_config.json#mcpServers.
+   */
   setMcpServersConfig(config: Record<string, unknown>): boolean {
-    this.state.mcpServersConfig = config;
+    this.state.mcpServersConfig =
+      config && typeof config === "object" && !Array.isArray(config) ? { ...config } : {};
     this.save();
     return true;
+  }
+
+  /**
+   * Re-read official mcpServers from disk (Developer menu "Reload MCP config" residual).
+   * Useful when user edits claude_desktop_config.json externally.
+   */
+  reloadMcpServersConfigFromOfficial(): Record<string, unknown> {
+    const officialMcp = readOfficialMcpServersSegment(this.officialConfigPath);
+    this.state.mcpServersConfig = { ...officialMcp };
+    // Keep mirrors in sync without re-filtering already-validated official bag.
+    try {
+      fs.writeFileSync(
+        this.getLegacyMcpServersMirrorFile(),
+        JSON.stringify(this.state.mcpServersConfig, null, 2),
+      );
+    } catch {
+      /* best-effort */
+    }
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.settingsFile, "utf8")) as PersistedSettings;
+      raw.mcpServersConfig = this.state.mcpServersConfig;
+      fs.writeFileSync(this.settingsFile, JSON.stringify(raw, null, 2));
+    } catch {
+      /* shell may be absent; save() path still dual-writes on next set */
+      try {
+        this.save();
+      } catch {
+        /* ignore */
+      }
+    }
+    return this.getMcpServersConfig();
   }
 
   /**

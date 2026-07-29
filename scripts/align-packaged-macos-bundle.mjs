@@ -10,20 +10,20 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const originalAppCandidates = [
   process.env.CLAUDE_ORIGINAL_APP,
   process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.dirname(process.env.CLAUDE_ORIGINAL_APP_CONTENTS) : undefined,
-  path.resolve(projectRoot, "../Claude-Deepseek.app"),
-  path.resolve(projectRoot, "../../Claude-Deepseek.app"),
-  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app",
-  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app",
+  path.resolve(projectRoot, "../Claudex.app"),
+  path.resolve(projectRoot, "../../Claudex.app"),
+  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claudex.app",
+  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claudex\\Claudex.app",
 ].filter(Boolean);
 const originalApp = originalAppCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAppCandidates[0];
-const packagedApp = path.join(projectRoot, "out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app");
+const packagedApp = path.join(projectRoot, "out/Claudex-darwin-arm64/Claudex.app");
 
 // Product identity — must stay distinct from official Claude Desktop so Dock /
 // TCC / Login Items do not merge this package with com.anthropic.claudefordesktop.
 // align still copies official MacOS/Frameworks/Helpers/Resources for native
 // residual fidelity, but re-stamps Info.plist identity after that copy.
-const PRODUCT_BUNDLE_ID = process.env.CLAUDE_PRODUCT_BUNDLE_ID ?? "com.local.claude-deepseek.desktop";
-const PRODUCT_NAME = process.env.CLAUDE_PRODUCT_NAME ?? "Claude-Deepseek";
+const PRODUCT_BUNDLE_ID = process.env.CLAUDE_PRODUCT_BUNDLE_ID ?? "com.local.claudex.desktop";
+const PRODUCT_NAME = process.env.CLAUDE_PRODUCT_NAME ?? "Claudex";
 const PRODUCT_DISPLAY_NAME = process.env.CLAUDE_PRODUCT_DISPLAY_NAME ?? PRODUCT_NAME;
 const OFFICIAL_BUNDLE_ID = "com.anthropic.claudefordesktop";
 
@@ -93,8 +93,8 @@ function reStampProductIdentity(infoPlist) {
   plutilReplaceString(infoPlist, "CFBundleIdentifier", PRODUCT_BUNDLE_ID);
   // CFBundleName MUST stay residual "Claude" so Electron finds
   // Frameworks/Claude Helper*.app (electron_main_delegate_mac helper lookup).
-  // Renaming to Claude-Deepseek → FATAL "Unable to find helper app".
-  // Official residual already uses CFBundleName=Claude + DisplayName=Claude-Deepseek.
+  // Renaming to Claudex → FATAL "Unable to find helper app".
+  // Official residual already uses CFBundleName=Claude + DisplayName=Claudex.
   plutilReplaceString(infoPlist, "CFBundleName", "Claude");
   // Display name may already exist (copied from official / forge); replace, else insert.
   try {

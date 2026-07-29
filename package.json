@@ -1,8 +1,8 @@
 {
-  "name": "claude-deepseek-desktop",
-  "productName": "Claude-Deepseek",
-  "version": "1.6608.2-deepseek.0",
-  "description": "Electron desktop shell reconstructed from Claude Desktop app.asar resources",
+  "name": "claudex-desktop",
+  "productName": "Claudex",
+  "version": "1.6608.2-claudex.0",
+  "description": "Electron desktop shell reconstructed from Claude Desktop app.asar resources (Claudex)",
   "author": "local reconstruction",
   "private": true,
   "main": ".vite/build/index.pre.js",

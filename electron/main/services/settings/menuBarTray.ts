@@ -131,8 +131,13 @@ function darkColors(): boolean {
 /**
  * Official Qst residual (Show App menu item):
  *   visible ? (minimized ? restore : focus) : show
- * Product residual: also steal focus on macOS so menu-bar click can front the app
- * when another app is active (Electron app.focus({ steal: true })).
+ *
+ * Platform strengthen (not inventing alternate product flow):
+ *   - macOS: app.focus({ steal: true }) + dock so tray/QE can front when inactive
+ *   - Windows: same steal focus; brief alwaysOnTop flash so main can rise above
+ *     Quick Entry (alwaysOnTop "pop-up-menu") after IKA dismiss — otherwise the
+ *     session starts while main stays background ("主窗口没进行")
+ *   - opacity:0 boot residual → force opaque when showing
  */
 export function showMainWindowFromTray(
   getMainWindow: (() => BrowserWindow | null | undefined) | undefined = deps?.getMainWindow,
@@ -140,17 +145,16 @@ export function showMainWindowFromTray(
   const win = getMainWindow?.();
   if (!win || win.isDestroyed()) return false;
   try {
-    // macOS: without steal, focus often no-ops when Claude is not the active app.
-    if (process.platform === "darwin") {
+    try {
+      app.focus({ steal: true });
+    } catch {
       try {
-        app.focus({ steal: true });
+        app.focus();
       } catch {
-        try {
-          app.focus();
-        } catch {
-          /* ignore */
-        }
+        /* ignore */
       }
+    }
+    if (process.platform === "darwin") {
       try {
         if (app.dock && !app.dock.isVisible()) app.dock.show();
       } catch {
@@ -166,9 +170,28 @@ export function showMainWindowFromTray(
     win.show();
   }
   try {
+    if (typeof win.getOpacity === "function" && win.getOpacity() < 0.99) {
+      win.setOpacity(1);
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
     win.show();
-    win.moveTop();
-    win.focus();
+    if (process.platform === "win32") {
+      try {
+        win.setAlwaysOnTop(true);
+        win.moveTop();
+        win.focus();
+        win.setAlwaysOnTop(false);
+      } catch {
+        win.moveTop();
+        win.focus();
+      }
+    } else {
+      win.moveTop();
+      win.focus();
+    }
   } catch {
     try {
       win.show();
@@ -273,7 +296,7 @@ export function syncMenuBarTray(): void {
       return;
     }
     tray = new Tray(image);
-    tray.setToolTip("Claude");
+    tray.setToolTip("Claudex");
     // Official: qB.on("click", () => void Lst()) — Lst tries quick entry then main.
     tray.on("click", () => {
       void activateFromMenuBarTray();

@@ -342,7 +342,7 @@ function githubRequest(apiPath: string): Promise<{ ok: boolean; status: number; 
   const options = {
     headers: {
       Accept: "application/vnd.github+json",
-      "User-Agent": "claude-deepseek-desktop",
+      "User-Agent": "claudex-desktop",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
   };
@@ -1474,8 +1474,8 @@ function createSessionHandlers(
       } catch {
         // ignore — fall through
       }
-      // Probe failed: null levels → UI shows single current stop until retry succeeds.
-      // Never substitute a hardcoded Anthropic 5-stop here.
+      // Probe failed: null levels. Web 5f75ff4 keeps full residual ladder openable;
+      // do not invent a second ladder in main — pass null through honestly.
       return { effort: null, effortLevels: null, ultracodeOfferable: null };
     },
     getEffort: async (_event, id) => {
@@ -1483,31 +1483,40 @@ function createSessionHandlers(
       if (!sessionId) return { effort: "medium", effortLevels: null, ultracodeOfferable: null };
       // Official get_settings → applied is the runtime truth. CLI always includes
       // effortLevels when the control call succeeds; product must not invent levels.
+      const current = store.getSession(sessionId);
+      let effort: string | null = current?.effort ?? "medium";
+      let effortLevels: string[] | null = null;
+      let ultracodeOfferable: boolean | null = null;
       try {
         const applied = await sessionRunner.getAppliedEffort(sessionId);
         // Accept bag even when effort string is missing — levels still authoritative.
         if (applied && (applied.effort || applied.effortLevels)) {
-          const current = store.getSession(sessionId);
           if (applied.effort && current && current.effort !== applied.effort) {
             const session = store.update(sessionId, { effort: applied.effort });
             if (session) dispatchSessionEvent("session_updated", sessionId, session);
           }
-          return {
-            effort: applied.effort ?? current?.effort ?? "medium",
-            effortLevels: applied.effortLevels,
-            ultracodeOfferable: applied.ultracodeOfferable,
-          };
+          effort = applied.effort ?? current?.effort ?? "medium";
+          effortLevels = applied.effortLevels;
+          ultracodeOfferable = applied.ultracodeOfferable;
         }
       } catch {
-        // ignore — fall through to host store
+        // ignore — fall through
       }
-      // Store only keeps the selected effort string — no catalog. Returning null
-      // levels is honest (UI: single-stop until CLI reports); do not fake 5 stops.
-      return {
-        effort: store.getSession(sessionId)?.effort ?? "medium",
-        effortLevels: null,
-        ultracodeOfferable: null,
-      };
+      // Cold existing sessions: resume get_settings often yields effort only.
+      // Same bare catalog probe as getEffortCatalogDefaults / new-chat composer
+      // so the Effort slider can open (still CLI-sourced; never invent ladder).
+      if (!effortLevels || effortLevels.length === 0) {
+        try {
+          const catalog = await sessionRunner.probeCatalogEffortDefaults(current?.model);
+          if (catalog?.effortLevels && catalog.effortLevels.length > 0) {
+            effortLevels = catalog.effortLevels;
+            if (ultracodeOfferable == null) ultracodeOfferable = catalog.ultracodeOfferable;
+          }
+        } catch {
+          // leave null — web full residual ladder (5f75ff4) until retry
+        }
+      }
+      return { effort, effortLevels, ultracodeOfferable };
     },
     setEffort: async (_event, id, effort) => {
       const sessionId = asString(id);
