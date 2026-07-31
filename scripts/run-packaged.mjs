@@ -4,9 +4,9 @@
  * darwin:  out/Claudex-darwin-<arch>/Claudex.app  (Contents/MacOS/Claude after align)
  * win32:   out/Claudex-win32-<arch>/Claudex.exe
  *
- * Default: open the app via OS launcher (mac `open`, win start/spawn).
- * CLAUDE_PACKAGE_ISOLATED=1 / --isolated → spawn binary with isolated userData so it
- * does not fight npm run dev (same productName single-instance / Claudex userData).
+ * Default: isolated userData so package:open does not fight npm run dev
+ * (same productName single-instance / Claudex userData).
+ *   CLAUDE_PACKAGE_ISOLATED=0 / --no-isolated → share default userData via OS open.
  *
  * Never sets CLAUDE_DESKTOP_MAIN_VIEW_URL — packaged must load app:// product web.
  */
@@ -14,10 +14,18 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readIonBuildId, resolvePackagedTargets } from "./packagePaths.mjs";
+import {
+  inspectPackagedDualRoot,
+  readIonBuildId,
+  resolvePackagedTargets,
+} from "./packagePaths.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const isolated = process.env.CLAUDE_PACKAGE_ISOLATED === "1" || process.argv.includes("--isolated");
+// Default isolated — package:open used to share userData and collide with dev.
+const isolated =
+  process.env.CLAUDE_PACKAGE_ISOLATED === "0" || process.argv.includes("--no-isolated")
+    ? false
+    : true;
 const killDev = process.env.CLAUDE_PACKAGE_KILL_DEV === "1" || process.argv.includes("--kill-dev");
 
 const targets = resolvePackagedTargets({ root });
@@ -27,7 +35,6 @@ const binary =
   platform === "darwin" && !fs.existsSync(targets.binary) && targets.binaryFallback
     ? targets.binaryFallback
     : targets.binary;
-const ionIndex = targets.ionIndex;
 
 if (!fs.existsSync(packagedRoot)) {
   throw new Error(`packaged app missing — run npm run package first:\n  ${packagedRoot}`);
@@ -40,12 +47,18 @@ if (!fs.existsSync(binary)) {
   );
 }
 
-const buildId = readIonBuildId(ionIndex);
-if (buildId) {
-  console.log(`[package:open] ion-dist data-build-id=${buildId} (expect product, not spa-dev)`);
-  if (buildId === "spa-dev") {
-    console.warn("[package:open] WARNING: residual spa still in ion-dist — re-run npm run package");
-  }
+const dualRoot = inspectPackagedDualRoot(targets);
+const productBuildId =
+  dualRoot.productBuildId ?? readIonBuildId(targets.productWebIndex);
+const residualBuildId =
+  dualRoot.residualBuildId ?? readIonBuildId(targets.residualIonIndex ?? targets.ionIndex);
+console.log(
+  `[package:open] dual-root product-web=${productBuildId ?? "missing"} residual-ion=${residualBuildId ?? "missing"}`,
+);
+if (!dualRoot.ok) {
+  console.warn(
+    `[package:open] WARNING: dual-root check failed: ${dualRoot.reason ?? "unknown"} — re-run npm run package`,
+  );
 }
 
 if (killDev) {
@@ -68,8 +81,10 @@ if (killDev) {
 }
 
 if (!isolated) {
-  console.log(`[package:open] open ${packagedRoot}`);
-  console.log("[package:open] load route: app://localhost (product web in Resources/ion-dist)");
+  console.log(`[package:open] open ${packagedRoot} (shared userData; may fight npm run dev)`);
+  console.log(
+    "[package:open] load route: app://localhost → product-web (setup residual → ion-dist)",
+  );
   if (platform === "darwin") {
     spawnSync("open", [packagedRoot], { stdio: "inherit" });
   } else {
@@ -88,7 +103,9 @@ const userData = path.join(root, ".package-user-data");
 fs.mkdirSync(userData, { recursive: true });
 console.log(`[package:open] isolated userData: ${userData}`);
 console.log(`[package:open] binary: ${binary}`);
-console.log("[package:open] load route: app://localhost");
+console.log(
+  "[package:open] load route: app://localhost → product-web (setup residual → ion-dist)",
+);
 
 const child = spawn(binary, [], {
   cwd: platform === "win32" ? path.dirname(binary) : root,

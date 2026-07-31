@@ -19,6 +19,11 @@ import {
   type SidebarMode,
 } from "./windows";
 import {
+  installAnthropicClientRequestHeaders,
+  installAnthropicDesktopUserAgent,
+} from "./services/network/anthropicClientHeaders";
+import {
+  claimClaudeProtocolClients,
   createWindowStateKeeper,
   dispatchLaunchTarget,
   extractLaunchTarget,
@@ -26,6 +31,7 @@ import {
   installQuitState,
   installSingleInstanceGuard,
   installWindowStateEventDispatch,
+  takePendingClaudeOpenUrl,
   type LaunchTarget,
 } from "./lifecycle";
 import {
@@ -134,21 +140,29 @@ function getInitialMainViewUrlOverride(options: DesktopAppOptions): string {
     options.initialMainViewUrl ?? process.env.CLAUDE_DESKTOP_MAIN_VIEW_URL;
 
   let mode: "1p" | "3p" | "dotClaude" = "1p";
+  let persistedDeploymentMode: "1p" | "3p" | "dotClaude" | undefined;
   try {
     const telemetryMode = options.desktopTelemetryConfig?.deploymentMode;
     if (telemetryMode === "3p" || telemetryMode === "1p" || telemetryMode === "dotClaude") {
       mode = telemetryMode;
+      // Telemetry override is an explicit shell mode (treat as persisted chooser).
+      persistedDeploymentMode = telemetryMode;
     } else {
-      mode = resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
+      const snap = resolveDeploymentModeFromUserData(app.getPath("userData"));
+      mode = snap.resolution.mode;
+      persistedDeploymentMode = snap.persistedDeploymentMode;
     }
   } catch {
     mode = "1p";
+    persistedDeploymentMode = undefined;
   }
 
   // product dotClaude maps to 3p shell for load URL / synthetic account residual.
   const deploymentMode = mode === "dotClaude" ? "3p" : mode;
   return resolveMainWindowLoadUrl({
     deploymentMode,
+    // Official hai: only jsA("1p") → mN claude.ai. Void 1p (no bag) stays product LoginDesktop.
+    persistedDeploymentMode,
     baseUrl,
     productMainViewUrl,
     sidebarMode: options.sidebarMode,
@@ -229,6 +243,11 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
     registerDesktopIpc(context);
     installApplicationMenu(context);
     await windows.loadAll();
+    // Official Qj flush residual — open-url arrived before mainView existed.
+    const pendingOpenUrl = takePendingClaudeOpenUrl();
+    if (pendingOpenUrl) {
+      handleLaunchTarget({ deepLink: pendingOpenUrl, filePaths: [] });
+    }
     return windows;
   };
 
@@ -242,6 +261,9 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
     app,
     getWindows: () => windows,
     createAndLoadWindow,
+    onOpenUrlDeepLink: (rawUrl) => {
+      handleLaunchTarget({ deepLink: rawUrl, filePaths: [] });
+    },
     onNativeThemeUpdated: () => {
       if (!windows || windows.mainWindow.isDestroyed()) return;
       windows.mainWindow.setBackgroundColor(getOriginalWindowBackgroundColor());
@@ -274,6 +296,15 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   const initialTarget = extractLaunchTarget(process.argv);
 
   await app.whenReady();
+  // Live SPA residual requires UA token "claude/" + claudeAppBindings (see jI).
+  // Product display name is Claudex — inject Claude/<ver> without renaming the app.
+  installAnthropicDesktopUserAgent();
+  // Official Frr residual (before vst/loadAll): inject anthropic-client-* headers so
+  // claude.ai/task/new serves desktop product shell, not public marketing landing.
+  installAnthropicClientRequestHeaders();
+  // Official Urr / DJn residual: claim claude:// so login magic-link does not open a
+  // stale Launch Services handler (Finder "找不到该文件").
+  claimClaudeProtocolClients(app);
   // Official CFBundleIconFile electron.icns — packaged via forge; dev Electron.app
   // otherwise shows default Atom Dock icon. Bitmap matches official residual.
   applyOfficialAppIcon(paths.resourcesRoot);

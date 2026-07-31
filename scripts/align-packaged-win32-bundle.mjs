@@ -7,8 +7,10 @@
  *   resources/app.asar
  *   resources/* extraResource (ion-dist residual, product-web, claude-code-bin, …)
  *
- * Official shell hardcodes app:// static root as resources/ion-dist
- * (Hot()+"ion-dist"). Product open-claude-web must land there — same as mac align.
+ * Dual-root residual (must match electronShellPaths + staticIonDist):
+ *   primary SPA  → resources/product-web  (open-claude-web)
+ *   residual SPA → resources/ion-dist     (official spa-dev for setup-desktop-3p)
+ * Do NOT overwrite ion-dist with product-web and do NOT delete product-web.
  *
  * Critical: forge asar allowlist no longer packs node_modules. Product runtime
  * (node-pty / @ant/*) must be injected into app.asar here. We also keep
@@ -27,6 +29,7 @@ const packagedRoot = targets.packagedRoot;
 const packagedExe = targets.binary;
 const packagedResources = targets.resourcesRoot;
 const productWebSource = path.join(projectRoot, "resources/product-web");
+const residualIonSource = path.join(projectRoot, "resources/ion-dist");
 const claudeCodeBinSource = path.join(projectRoot, "resources/claude-code-bin");
 const originalRuntimeSource = path.join(projectRoot, "resources/original-runtime-node_modules");
 
@@ -75,15 +78,17 @@ if (!existsSync(path.join(productWebSource, "index.html"))) {
     `product-web missing: build with npm run build:product-web first (${productWebSource}/index.html)`,
   );
 }
-
-const ionDistTarget = path.join(packagedResources, "ion-dist");
-await copyTree(productWebSource, ionDistTarget);
-
-// Drop forge leftover product-web tree — ion-dist is the load root.
-const leftoverProductWeb = path.join(packagedResources, "product-web");
-if (existsSync(leftoverProductWeb)) {
-  await fsPromises.rm(leftoverProductWeb, { recursive: true, force: true });
+if (!existsSync(path.join(residualIonSource, "index.html"))) {
+  throw new Error(
+    `residual ion-dist missing: run npm run sync:residual / keep resources/ion-dist for setup-desktop-3p (${residualIonSource}/index.html)`,
+  );
 }
+
+// Keep both trees: product primary + residual ion-dist (never collapse).
+const productWebTarget = path.join(packagedResources, "product-web");
+const ionDistTarget = path.join(packagedResources, "ion-dist");
+await copyTree(productWebSource, productWebTarget);
+await copyTree(residualIonSource, ionDistTarget);
 
 let claudeCodeBinInjected = false;
 if (existsSync(claudeCodeBinSource)) {
@@ -109,10 +114,16 @@ const asarInject = await injectPackagedAsarRuntime({
   keepExtraResourceRuntime: true,
 });
 
-const buildId = readIonBuildId(path.join(ionDistTarget, "index.html")) ?? "unknown";
-if (buildId === "spa-dev") {
+const productBuildId = readIonBuildId(path.join(productWebTarget, "index.html")) ?? "unknown";
+const residualBuildId = readIonBuildId(path.join(ionDistTarget, "index.html")) ?? "unknown";
+if (productBuildId === "spa-dev" || productBuildId === "unknown") {
   throw new Error(
-    "packaged ion-dist still residual spa-dev after inject — product-web build wrong",
+    `packaged product-web is not product SPA (data-build-id=${productBuildId}) — re-run build:product-web`,
+  );
+}
+if (residualBuildId === productBuildId) {
+  throw new Error(
+    `packaged residual ion-dist collides with product build id (${productBuildId}); keep official spa residual in resources/ion-dist`,
   );
 }
 
@@ -132,11 +143,13 @@ console.log(
       packagedRoot: path.relative(projectRoot, packagedRoot),
       executable: "Claudex.exe",
       productWebInjected: true,
-      ionDistBuildId: buildId,
+      productBuildId,
+      residualIonBuildId: residualBuildId,
+      dualRoot: "product-web primary + ion-dist residual",
       claudeCodeBinInjected,
       claudeExeExists,
       asarRuntimeInjected: asarInject.ok,
-      load: "app://localhost → resources/ion-dist",
+      load: "app://localhost → resources/product-web (setup residual → ion-dist)",
     },
     null,
     2,

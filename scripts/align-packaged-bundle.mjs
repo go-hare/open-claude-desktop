@@ -2,9 +2,9 @@
  * Platform dispatcher for packaged bundle align.
  *
  *   darwin → align-packaged-macos-bundle.mjs
- *            residual MacOS/Frameworks + product-web → ion-dist + codesign
+ *            residual MacOS/Frameworks + dual-root product-web + ion-dist + codesign
  *   win32  → align-packaged-win32-bundle.mjs
- *            product-web → resources/ion-dist + claude-code-bin inject
+ *            dual-root product-web + residual ion-dist + claude-code-bin inject
  *
  * Cross-host: packaging is host-native (build win package on Windows, mac on macOS).
  * If only the other platform's out/ tree exists, the platform script may skip.

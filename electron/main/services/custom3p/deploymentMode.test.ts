@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 import {
   deploymentModeIs3p,
+  deploymentModeToPersistAfterApply,
   detectDotClaudeCliConfig,
   hasThirdPartyActivationKeys,
   hasUsableThirdPartyCredentials,
@@ -83,6 +84,50 @@ it("N1e: gateway with api key → 3p active", () => {
   });
   expect(r.mode).toBe("3p");
   expect(r.degraded).toBe(false);
+});
+
+it("Setup apply residual: activated bag + void chooser → persist 3p", () => {
+  expect(
+    deploymentModeToPersistAfterApply({
+      appliedBag: {
+        inferenceProvider: "gateway",
+        inferenceGatewayBaseUrl: "http://example/",
+        inferenceGatewayApiKey: "sk",
+      },
+      currentPersistedMode: undefined,
+    }),
+  ).toBe("3p");
+});
+
+it("Setup apply residual: empty bag does not invent 3p mode", () => {
+  expect(
+    deploymentModeToPersistAfterApply({
+      appliedBag: {},
+      currentPersistedMode: undefined,
+    }),
+  ).toBeNull();
+});
+
+it("Setup apply residual: does not clobber explicit 1p or dotClaude", () => {
+  const bag = { inferenceProvider: "gateway" };
+  expect(
+    deploymentModeToPersistAfterApply({
+      appliedBag: bag,
+      currentPersistedMode: "1p",
+    }),
+  ).toBeNull();
+  expect(
+    deploymentModeToPersistAfterApply({
+      appliedBag: bag,
+      currentPersistedMode: "dotClaude",
+    }),
+  ).toBeNull();
+  expect(
+    deploymentModeToPersistAfterApply({
+      appliedBag: bag,
+      currentPersistedMode: "3p",
+    }),
+  ).toBeNull();
 });
 
 it("N1e: openai/gemini/grok credentials gate degraded", () => {

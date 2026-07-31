@@ -58,11 +58,12 @@ function resolveResourcesRoot(appRoot: string, resourcesRoot: string): string {
 }
 
 /**
- * Static root for app://localhost.
+ * Static root for app://localhost primary SPA.
  *
- * Two product routes (do not collapse):
- * - Packaged / local app:// → prefer resources/product-web (open-claude-web build).
- * - Residual ion-dist remains for audit / official asset comparison.
+ * Dual-root residual (do not collapse — align must ship both trees):
+ * - Primary: resources/product-web (open-claude-web build, react-shell)
+ * - Residual: resources/ion-dist (official spa-dev for setup-desktop-3p /
+ *   device-code-verify via residualIonDistRoot + staticIonDist)
  * - Dev test still overrides main view with CLAUDE_DESKTOP_MAIN_VIEW_URL=http://…
  *
  * CLAUDE_DESKTOP_ION_DIST_ROOT forces an explicit static root when set.
@@ -77,7 +78,10 @@ function resolveAppStaticRoot(resourcesRoot: string): string {
   return path.join(resourcesRoot, "ion-dist");
 }
 
-/** Official residual ion-dist directory (not product-web). */
+/**
+ * Official residual ion-dist directory (not product-web).
+ * Packaged align must keep this as official spa residual — never overwrite with product-web.
+ */
 function resolveResidualIonDistRoot(resourcesRoot: string): string {
   const envResidual = process.env.CLAUDE_DESKTOP_RESIDUAL_ION_DIST_ROOT?.trim();
   if (envResidual) return envResidual;

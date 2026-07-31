@@ -250,20 +250,55 @@ try {
     await fs.copyFile(path.join(originalApp, "Contents/embedded.provisionprofile"), path.join(packagedApp, "Contents/embedded.provisionprofile"));
   }
 
-  // Official shell residual hardcodes app:// static root as Resources/ion-dist
-  // (prr(join(Hot(),"ion-dist"))). Product packaged web is open-claude-web —
-  // overwrite packaged ion-dist with resources/product-web after residual copy.
-  // Project resources/ion-dist remains residual for audit:original only.
+  // Dual-root residual (must match electronShellPaths + staticIonDist):
+  //   primary SPA  → Resources/product-web  (open-claude-web, react-shell)
+  //   residual SPA → Resources/ion-dist     (official spa-dev from original
+  //                  Contents/Resources copy above — setup-desktop-3p /
+  //                  device-code-verify). NEVER overwrite ion-dist with product.
+  // Official prr(Hot()+"ion-dist") is residual-only for those routes; product
+  // main prefers product-web when present (resolveAppStaticRoot).
   const productWebSource = path.join(projectRoot, "resources/product-web");
+  const residualIonIndex = path.join(packagedResources, "ion-dist/index.html");
   let productWebInjected = false;
   if (await exists(path.join(productWebSource, "index.html"))) {
-    const ionDistTarget = path.join(packagedResources, "ion-dist");
-    await fs.rm(ionDistTarget, { recursive: true, force: true });
-    await copyPath(productWebSource, ionDistTarget);
+    const productWebTarget = path.join(packagedResources, "product-web");
+    await fs.rm(productWebTarget, { recursive: true, force: true });
+    await copyPath(productWebSource, productWebTarget);
     productWebInjected = true;
   } else {
     throw new Error(
       `packaged app:// web missing: build product web first (npm run build:product-web). Expected ${productWebSource}/index.html`,
+    );
+  }
+  if (!(await exists(residualIonIndex))) {
+    throw new Error(
+      `packaged residual ion-dist missing after official Resources copy: ${residualIonIndex} (setup-desktop-3p dual-root)`,
+    );
+  }
+  const residualBuildId = (() => {
+    try {
+      return fsSync.readFileSync(residualIonIndex, "utf8").match(/data-build-id="([^"]+)"/)?.[1] ?? "unknown";
+    } catch {
+      return "unknown";
+    }
+  })();
+  const productBuildId = (() => {
+    try {
+      return fsSync
+        .readFileSync(path.join(packagedResources, "product-web/index.html"), "utf8")
+        .match(/data-build-id="([^"]+)"/)?.[1] ?? "unknown";
+    } catch {
+      return "unknown";
+    }
+  })();
+  if (productBuildId === "spa-dev" || productBuildId === "unknown") {
+    throw new Error(
+      `packaged product-web is not product SPA (data-build-id=${productBuildId}); re-run build:product-web`,
+    );
+  }
+  if (residualBuildId === productBuildId) {
+    throw new Error(
+      `packaged residual ion-dist collides with product build id (${productBuildId}); ion-dist must stay official spa residual`,
     );
   }
   // Keep product CLI bundle if present under project resources (official residual may lack it).
@@ -327,6 +362,9 @@ try {
     asarHeaderHash: headerHash,
     codesignIdentity,
     productWebInjected,
+    productBuildId,
+    residualIonBuildId: residualBuildId,
+    dualRoot: "product-web primary + ion-dist residual",
     claudeCodeBinInjected,
     electronAppIconPngInjected,
   }, null, 2));

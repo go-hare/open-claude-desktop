@@ -4,22 +4,25 @@
 
 | 场景 | 命令 | 主视图 URL | Web 来源 |
 |------|------|------------|----------|
-| **打包** | `npm run package` → `npm run package:open` | `app://localhost` | 打包树内 `ion-dist`（open-claude-web 构建产物） |
+| **打包** | `npm run package` → `npm run package:open` | `app://localhost` | dual-root：`product-web` 主 SPA + residual `ion-dist`（setup-desktop-3p） |
 | **测试 / 开发** | `npm run dev` | `http://localhost:5176` | open-claude-web Vite（`CLAUDE_DESKTOP_MAIN_VIEW_URL`） |
 
 - 打包**不得**默认打开 `https://claude.ai`（官方 1p mN residual 仅 debug：`CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW=1`）。
 - 测试**不要**用打包的 `app://` 热更；改 web 用 Vite。
-- Residual 官方 SPA（`data-build-id=spa-dev`）只用于 `resources/ion-dist` 审计对照，**不得**作为产品主 UI 交付。
+- Residual 官方 SPA（`data-build-id=spa-dev`）保留在 `resources/ion-dist`：审计对照 + `/setup-desktop-3p` / `/device-code-verify`；**不得**作为产品主 UI 交付（主 UI 是 `product-web`）。
 - **Host-native**：在 mac 打 mac 包，在 Windows 打 win 包（native modules / forge 与主机一致）。不要指望在 mac 上直接产出可用的 win32 可运行包。
 
 ## 平台产物路径
 
 | 平台 | 产物 | 可执行文件 | 产品 web（app:// 根） |
 |------|------|------------|----------------------|
-| **macOS** | `out/Claudex-darwin-<arch>/Claudex.app`（如 arm64） | `Contents/MacOS/Claude`（align 后 residual 名） | `Contents/Resources/ion-dist` |
-| **Windows** | `out/Claudex-win32-<arch>/`（如 `x64` / `arm64`） | `Claudex.exe` | `resources/ion-dist` |
+| **macOS** | `out/Claudex-darwin-<arch>/Claudex.app`（如 arm64） | `Contents/MacOS/Claude`（align 后 residual 名） | `Contents/Resources/product-web` + residual `ion-dist` |
+| **Windows** | `out/Claudex-win32-<arch>/`（如 `x64` / `arm64`） | `Claudex.exe` | `resources/product-web` + residual `ion-dist` |
 
-官方 shell 写死 `Hot()+"ion-dist"` 作为 `app://` 静态根；产品 web 必须注入**打包后**的 `ion-dist`，不能只留在 `resources/product-web/`。
+产品 runtime dual-root（`electronShellPaths` + `staticIonDist`）：
+- **主 SPA**：`resources/product-web`（open-claude-web / `react-shell`）
+- **Residual SPA**：`resources/ion-dist`（官方 `spa-dev`，仅 `/setup-desktop-3p`、`/device-code-verify`）
+禁止把 product-web 覆盖进 ion-dist；禁止删掉 product-web 只留 ion-dist。
 
 ## 打包流水线（`npm run package`）
 
@@ -37,13 +40,13 @@
 4. `prepare:electron-zip` + `electron-forge package`（主机平台）
 5. `align:bundle`  
    - **macOS**（`align-packaged-macos-bundle.mjs`）：  
-     拷官方 MacOS / Frameworks / Resources residual → **product-web 覆盖** `Contents/Resources/ion-dist` → 注入 `claude-code-bin` → 产品 bundle id / ad-hoc codesign  
+     拷官方 MacOS / Frameworks / Resources residual（保留 residual `ion-dist`）→ **注入** `Contents/Resources/product-web`（不覆盖 ion-dist）→ 注入 `claude-code-bin` → 产品 bundle id / ad-hoc codesign  
    - **Windows**（`align-packaged-win32-bundle.mjs`）：  
-     **product-web 覆盖** `resources/ion-dist` → 注入 `claude-code-bin` → 去掉多余的 `resources/product-web` 目录（加载只认 ion-dist）  
+     保持 dual-root：`resources/product-web` + residual `resources/ion-dist` → 注入 `claude-code-bin`  
      （无 mac 式 residual .app Frameworks 叠加；exe 名保持 forge `Claudex.exe`）
 6. `audit:bundle`  
-   - mac：residual 外层 + 产品身份 + asar integrity + **产品 main 指纹** + asar 无工作区污染  
-   - win：`Claudex.exe` / app.asar / **ion-dist 非 spa-dev** / 产品 main / runtime 必选 / `claude-code-bin/claude.exe`
+   - mac：residual 外层 + 产品身份 + asar integrity + **产品 main 指纹** + **dual-root** + asar 无工作区污染  
+   - win：`Claudex.exe` / app.asar / **product-web 非 spa-dev** + residual ion-dist / 产品 main / runtime 必选 / `claude-code-bin/claude.exe`
 
 **asar 内容 allowlist**（`forge.config.cjs`）：只打 `package.json` + `.vite/**`。  
 - **禁止** workspace 根 `index.js`（常是 ~12MB 官方 residual dump，不是产品 main）。  
@@ -58,14 +61,16 @@
 ```text
 out/Claudex-darwin-<arch>/Claudex.app
   Contents/MacOS/Claude
-  Contents/Resources/ion-dist/   ← 产品 web（data-build-id=react-shell）
+  Contents/Resources/product-web/ ← 产品 web（data-build-id=react-shell）
+  Contents/Resources/ion-dist/    ← residual 官方 SPA（setup-desktop-3p / spa-dev）
   Contents/Resources/app.asar    ← 产品 main（chunks 指纹）+ 官方 preload/renderer shell
   Contents/Resources/claude-code-bin/
 ```
 
 打包后强制检查（`package-product` + `audit:bundle`）：
 
-- `ion-dist` `data-build-id` ≠ `spa-dev`
+- `product-web` `data-build-id` ≠ `spa-dev`（主 SPA）
+- residual `ion-dist` 存在且与 product-web 不同（setup-desktop-3p）
 - asar 产品 main 指纹（`chunks/` 或小入口 + product markers；禁止官方 ~12MB monolith）
 - mac：`CFBundleIdentifier` + codesign Identifier = `com.local.claudex.desktop`
 - win：`resources/claude-code-bin/claude.exe` 存在
@@ -77,7 +82,8 @@ out/Claudex-win32-x64/           # 或 win32-arm64
   Claudex.exe
   resources/
     app.asar
-    ion-dist/                    ← 产品 web（align 注入，非 spa-dev）
+    product-web/                 ← 产品 web（align 注入，非 spa-dev）
+    ion-dist/                    ← residual 官方 SPA（setup-desktop-3p）
     claude-code-bin/
       claude.exe
       manifest.json
@@ -101,8 +107,8 @@ cd open-claude-desktop && npm run dev  # CLAUDE_DESKTOP_MAIN_VIEW_URL=http://loc
 ## 打开打包结果
 
 ```bash
-npm run package:open                 # 启动打包产物（mac open .app / win spawn exe）
-npm run package:open -- --isolated   # 独立 .package-user-data
+npm run package:open                 # 默认 isolated userData（.package-user-data）
+npm run package:open -- --no-isolated # 共享默认 userData（可能与 dev 抢单实例）
 npm run package:open -- --kill-dev   # 先尝试结束本仓库 dev Electron
 ```
 
@@ -162,13 +168,13 @@ Windows 打包**不**依赖 mac residual 的 MacOS/Frameworks 拷贝；仍需要
 | 现象 | 原因 | 处理 |
 |------|------|------|
 | 窗口是 Google / email 登录 claude.ai | 装了官方 shell main，或旧包 | `npm run package`（含 restore:product-main） |
-| 包是 spa-dev 官方 SPA | align 未注入 product-web | 确认 `build:product-web` + align 日志 `productWebInjected: true` / `ionDistBuildId` |
-| 打包秒退 | dev Electron 占单实例 | 退出 dev，或 `package:open -- --isolated` / `--kill-dev` |
+| 包是 spa-dev 官方 SPA 当主 UI | product-web 缺失 / dual-root 失败 | 确认 `build:product-web` + align 日志 `productWebInjected` + `productBuildId` / `residualIonBuildId` |
+| 打包秒退 | dev Electron 占单实例 | 默认 isolated；或 `--kill-dev` / 退出 dev；`--no-isolated` 才共享 userData |
 | forge `fonts` 冲突 | electron dist 被 residual 污染 | `prepare:electron-zip` 会清 symlink；必要时删 `.electron-cache/local/*.zip` 重建 |
 | asar 体积几百 MB / 含 user-data | forge ignore 过松打进工作区垃圾 | `forge.config.cjs` allowlist；audit 查 pollutionHits |
 | `make` 无 package 后置指纹 | make 不跑 package-product 的 post-check | 产品交付优先 `npm run package`；或 make 后再 `node -e` 指纹 / audit |
 | win smoke 报 claude.exe 缺失 | 未在 win 上 copy CLI 或 align 未注入 | 在 Windows 跑 `npm run copy:claude-code-binary` 后重 `package` |
 | 在 mac 上找 win 产物 | host-native 未跨编 | 到 Windows 机器执行 `npm run package` |
-| win 仍见 `resources/product-web` | 旧包 | 重跑 align（会删 leftover product-web，只保留 ion-dist） |
+| win 缺 `resources/product-web` 或 residual ion-dist | 旧 align 把 dual-root 压扁 | 重跑 package / align（必须同时保留两棵树） |
 | `ERR_FAILED (-2) loading 'app://localhost'` | 协议 handler 装得太晚 / 首屏 race | 确认 `installAppProtocolHandler` 在 whenReady 后立刻调用；load 有一次 retry |
 | `[appIcon] electron.icns empty` | Chromium 解不了 residual icns | 提供 `resources/electron-app-icon.png`（从 icns `iconutil` 抽出）；align 注入 |

@@ -2,7 +2,8 @@
  * Canonical product package pipeline (darwin + win32).
  *
  * Two load routes (do not collapse):
- *   package → app://localhost → packaged Resources/ion-dist  (open-claude-web)
+ *   package → app://localhost → packaged Resources dual-root:
+ *             product-web (primary SPA) + ion-dist (residual setup SPA)
  *   test/dev → http://localhost:5176                        (vite open-claude-web)
  *
  * Steps:
@@ -13,9 +14,9 @@
  *   3) product-web    — vite-build open-claude-web → resources/product-web
  *   4) electron-zip   — clean polluted dist fonts symlink if needed
  *   5) forge package  — host-native out/ tree
- *   6) align:bundle   — platform inject product-web → ion-dist (+ mac residual)
- *   7) audit:bundle   — product identity / layout checks
- *   8) post-checks    — ion-dist product web + product main asar fingerprint
+ *   6) align:bundle   — keep dual-root (product-web + residual ion-dist; mac residual overlay)
+ *   7) audit:bundle   — product identity / dual-root / layout checks
+ *   8) post-checks    — product-web + residual ion-dist + product main asar fingerprint
  *
  * Host-native only:
  *   macOS  → out/Claudex-darwin-<arch>/Claudex.app  (Contents/MacOS/Claude)
@@ -29,6 +30,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   inspectPackagedAsarMain,
+  inspectPackagedDualRoot,
   PRODUCT_BUNDLE_ID,
   readIonBuildId,
   resolvePackagedTargets,
@@ -112,16 +114,16 @@ const binary =
     ? targets.binaryFallback
     : targets.binary;
 
-// Post-checks: product web in ion-dist + packaged binary + product main asar
-if (!fs.existsSync(targets.ionIndex)) {
-  throw new Error(`packaged ion-dist/index.html missing: ${targets.ionIndex}`);
-}
-const buildId = readIonBuildId(targets.ionIndex) ?? "unknown";
-if (buildId === "spa-dev") {
+// Post-checks: dual-root product-web + residual ion-dist + binary + product main asar
+const dualRoot = inspectPackagedDualRoot(targets);
+if (!dualRoot.ok) {
   throw new Error(
-    "packaged ion-dist still residual spa-dev — product-web inject failed (expected react-shell / open-claude-web)",
+    `packaged dual-root failed: ${dualRoot.reason ?? "unknown"} ` +
+      `(product=${dualRoot.productBuildId ?? "null"} residual=${dualRoot.residualBuildId ?? "null"}). ` +
+      `Align must keep product-web primary and residual ion-dist (spa-dev) for setup-desktop-3p.`,
   );
 }
+const buildId = dualRoot.productBuildId ?? readIonBuildId(targets.productWebIndex) ?? "unknown";
 if (!fs.existsSync(binary)) {
   throw new Error(`packaged binary missing: ${binary}`);
 }
@@ -168,13 +170,15 @@ Claudex package ready (${targets.platform}/${targets.arch})
 
   root:    ${targets.packagedRoot}
   binary:  ${binary}
-  web:     ${targets.webLabel}  (data-build-id=${buildId})
+  web:     ${targets.webLabel}
+           product-web data-build-id=${buildId}
+           residual ion-dist data-build-id=${dualRoot.residualBuildId ?? "unknown"}
   asar:    product main ok (index=${asarMain.indexSize}B chunks=${asarMain.hasChunks})
-  load:    app://localhost
+  load:    app://localhost → product-web (setup residual → ion-dist)
   identity:${targets.platform === "darwin" ? ` ${PRODUCT_BUNDLE_ID}` : " Claudex.exe (win32)"}
 
 Routes:
-  package  → app://localhost  (this build)
+  package  → app://localhost  (this build; dual-root)
   test/dev → http://localhost:5176
              npm run dev
              (requires open-claude-web vite on 5176)
@@ -184,12 +188,12 @@ Open:
 
 Do not run packaged app while npm run dev holds the same
 userData single-instance lock (Claudex product name).
-package:open uses isolated userData with --isolated / CLAUDE_PACKAGE_ISOLATED=1.
+package:open defaults to isolated userData; use --no-isolated to share.
 
 Windows notes:
   - Package on a Windows host (host-native forge + native modules).
   - Exe is Claudex.exe under out/Claudex-win32-<arch>/.
-  - align injects product-web → resources/ion-dist (same app:// rule as mac).
+  - align keeps dual-root product-web + residual ion-dist (same as mac).
   - smoke:packaged expects resources/claude-code-bin/claude.exe.
 ────────────────────────────────────────
 `);

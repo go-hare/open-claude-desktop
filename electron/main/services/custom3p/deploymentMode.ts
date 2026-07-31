@@ -119,6 +119,32 @@ export function hasThirdPartyActivationKeys(
   return false;
 }
 
+/**
+ * Product residual after Setup `commitApply` → `setAppliedConfig` → `relaunchApp`
+ * (ion-dist c71860c77: O = setAppliedConfig only; A = commitApply then relaunchApp).
+ *
+ * Official LoginRoute still needs NQt("3p") / pot jsA for krA account synthesis.
+ * Product eMA (custom3pApi createThirdPartyBootstrap) synthesizes account **only**
+ * when `persistedDeploymentMode === "3p" | "dotClaude"`. Bag alone → SM 3p shell
+ * with account null → App login gate → dual chooser after relaunch (user sees
+ * "saved but did not open main page").
+ *
+ * Apply is an explicit "use this third-party bag" action → persist chooser mode
+ * `"3p"` so relaunch lands past /login. Do not clobber explicit `"1p"` or
+ * `"dotClaude"`. Empty bag (no Hzt keys) → null (stay chooser / 1p residual).
+ */
+export function deploymentModeToPersistAfterApply(input: {
+  appliedBag: unknown;
+  currentPersistedMode?: DesktopDeploymentMode | undefined;
+}): "3p" | null {
+  const current = input.currentPersistedMode;
+  if (current === "1p" || current === DOT_CLAUDE_DEPLOYMENT_MODE) return null;
+  if (current === "3p") return null;
+  const enterprise = enterpriseActivationFromUnknown(input.appliedBag);
+  if (!hasThirdPartyActivationKeys(enterprise)) return null;
+  return "3p";
+}
+
 /** Official IHe residual. */
 export function isDeploymentModeChooserDisabled(
   enterprise: EnterpriseActivationBag | null | undefined,

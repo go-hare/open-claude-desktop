@@ -7,6 +7,7 @@ import path from "node:path";
 import { getProjectRoot, resolveOriginalApp } from "./originalAppPaths.mjs";
 import {
   inspectPackagedAsarMain,
+  inspectPackagedDualRoot,
   OFFICIAL_BUNDLE_ID,
   PRODUCT_BUNDLE_ID,
   PRODUCT_NAME,
@@ -105,15 +106,9 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
   const winRuntimeRoot = path.join(winResources, "original-runtime-node_modules", "node_modules");
   const winClaudeCodeBinary = winTargets.claudeCodeBinary;
   const winClaudeCodeManifest = path.join(winResources, "claude-code-bin", "manifest.json");
-  const winIonIndex = winTargets.ionIndex;
-  let winIonBuildId = null;
-  let winProductWebOk = false;
-  if (await exists(winIonIndex)) {
-    const ionHtml = fsSync.readFileSync(winIonIndex, "utf8");
-    winIonBuildId = ionHtml.match(/data-build-id="([^"]+)"/)?.[1] ?? "unknown";
-    // Product open-claude-web (not residual spa-dev). react-shell is current product id.
-    winProductWebOk = winIonBuildId !== "spa-dev" && winIonBuildId !== "unknown";
-  }
+  const winDualRoot = inspectPackagedDualRoot(winTargets);
+  const winProductBuildId = winDualRoot.productBuildId;
+  const winResidualBuildId = winDualRoot.residualBuildId;
   // Required on Windows hosts. Darwin-only native bits (swift_addon / computer_use)
   // are optional — may be JS shims only depending on copy:original-runtime.
   const winRuntimeRequired = [
@@ -168,9 +163,12 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
     },
     resources: {
       app_asar_exists: await exists(winAsar),
+      product_web_exists: await exists(path.join(winResources, "product-web/index.html")),
+      product_web_build_id: winProductBuildId,
       ion_dist_exists: await exists(path.join(winResources, "ion-dist")),
-      ion_dist_build_id: winIonBuildId,
-      product_web_in_ion_dist: winProductWebOk,
+      residual_ion_dist_build_id: winResidualBuildId,
+      dual_root: winDualRoot,
+      dual_root_ok: winDualRoot.ok,
       original_runtime_exists: await exists(path.join(winResources, "original-runtime-node_modules")),
       claude_code_binary_exists: await exists(winClaudeCodeBinary),
       claude_code_binary_size: (await exists(winClaudeCodeBinary)) ? fsSync.statSync(winClaudeCodeBinary).size : 0,
@@ -191,8 +189,9 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
   report.ok =
     report.executable.exists &&
     report.resources.app_asar_exists &&
+    report.resources.product_web_exists &&
     report.resources.ion_dist_exists &&
-    report.resources.product_web_in_ion_dist &&
+    report.resources.dual_root_ok &&
     report.resources.original_runtime_exists &&
     report.resources.claude_code_binary_exists &&
     report.resources.claude_code_binary_size > 0 &&
@@ -212,9 +211,11 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
     `## Windows packaged 结论\n\n` +
     `- exe 存在：${report.executable.exists ? "是" : "否"}\n` +
     `- app.asar 存在：${report.resources.app_asar_exists ? "是" : "否"}\n` +
-    `- ion-dist 资源存在：${report.resources.ion_dist_exists ? "是" : "否"}\n` +
-    `- ion-dist data-build-id：${report.resources.ion_dist_build_id ?? "missing"}（禁止 spa-dev）\n` +
-    `- 产品 web 已注入 ion-dist：${report.resources.product_web_in_ion_dist ? "是" : "否"}\n` +
+    `- product-web 存在：${report.resources.product_web_exists ? "是" : "否"}\n` +
+    `- product-web data-build-id：${report.resources.product_web_build_id ?? "missing"}（禁止 spa-dev）\n` +
+    `- residual ion-dist 存在：${report.resources.ion_dist_exists ? "是" : "否"}\n` +
+    `- residual ion-dist data-build-id：${report.resources.residual_ion_dist_build_id ?? "missing"}\n` +
+    `- dual-root 通过：${report.resources.dual_root_ok ? "是" : "否"}（${report.resources.dual_root?.reason ?? "ok"}）\n` +
     `- 产品 main 指纹：${report.asar.product_main.ok ? "是" : "否"}（${report.asar.product_main.reason ?? "ok"}）\n` +
     `- original-runtime-node_modules 存在：${report.resources.original_runtime_exists ? "是" : "否"}\n` +
     `- Claude Code binary 存在：${report.resources.claude_code_binary_exists ? "是" : "否"}\n` +
@@ -226,7 +227,7 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
     `- app.asar 含 preload：${report.asar.contains_vite_preload ? "是" : "否"}\n` +
     `- app.asar 是否误打入 smoke user data：${report.asar.contains_smoke_user_data ? "是" : "否"}\n` +
     `- 是否通过：${report.ok ? "是" : "否"}\n\n` +
-    `说明：Windows package 在 win32 主机生成；加载 \`app://\` → \`resources/ion-dist\`（product-web 注入，与 mac 同规则）。macOS 外层 residual 对齐仅在 darwin .app 产物存在时审计。\n`;
+    `说明：Windows package 在 win32 主机生成；加载 \`app://\` dual-root → \`resources/product-web\` 主 SPA + \`resources/ion-dist\` residual（setup-desktop-3p）。macOS 外层 residual 对齐仅在 darwin .app 产物存在时审计。\n`;
   const markdownPath = path.join(docsRoot, "electron-packaged-bundle-alignment.md");
   await fs.writeFile(markdownPath, markdown);
   console.log(path.relative(projectRoot, jsonPath));
@@ -234,8 +235,9 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
   console.log(JSON.stringify({
     ok: report.ok,
     platform: report.platform,
-    ion_dist_build_id: report.resources.ion_dist_build_id,
-    product_web_in_ion_dist: report.resources.product_web_in_ion_dist,
+    product_web_build_id: report.resources.product_web_build_id,
+    residual_ion_dist_build_id: report.resources.residual_ion_dist_build_id,
+    dual_root_ok: report.resources.dual_root_ok,
     product_main_ok: report.asar.product_main.ok,
     runtime_missing: report.resources.missing_original_runtime_entries.length,
     runtime_optional_missing: report.resources.missing_optional_runtime_entries.length,
@@ -316,15 +318,19 @@ const report = {
     packaged_top_level_count: packagedResources.length,
     missing_original_resource_entries_except_app_asar: diffMissing(originalResources.filter((entry) => entry !== "app.asar"), packagedResources),
     // Product-only trees re-injected after residual Resources copy.
-    // open-claude-web is written into ion-dist (official shell Hot()+ion-dist residual).
-    allowed_product_resource_entries: ["claude-code-bin"],
+    // Dual-root: product-web (primary SPA) + residual ion-dist (official spa for setup).
+    allowed_product_resource_entries: ["claude-code-bin", "product-web", "electron-app-icon.png"],
     extra_packaged_resource_entries: packagedResources.filter((entry) => {
       if (new Set(originalResources).has(entry)) return false;
-      return entry !== "claude-code-bin";
+      return !["claude-code-bin", "product-web", "electron-app-icon.png"].includes(entry);
     }),
-    product_web_in_ion_dist: await exists(
+    product_web_exists: await exists(
+      path.join(packagedApp, "Contents/Resources/product-web/index.html"),
+    ),
+    residual_ion_dist_exists: await exists(
       path.join(packagedApp, "Contents/Resources/ion-dist/index.html"),
     ),
+    dual_root: inspectPackagedDualRoot(darwinTargets),
   },
   frameworks: {
     missing: diffMissing(originalFrameworks, packagedFrameworks),
@@ -390,11 +396,17 @@ const executableOk =
 report.executable.hash_aligned = executableHashAligned;
 report.executable.hash_ok_after_product_codesign = executableOk;
 
+const dualRootOk = Boolean(report.resources.dual_root?.ok);
+report.resources.dual_root_ok = dualRootOk;
+
 report.ok =
   executableOk &&
   residualInfoAligned &&
   productIdentityOk &&
   codesignIdentityOk &&
+  dualRootOk &&
+  report.resources.product_web_exists &&
+  report.resources.residual_ion_dist_exists &&
   report.resources.missing_original_resource_entries_except_app_asar.length === 0 &&
   report.resources.extra_packaged_resource_entries.length === 0 &&
   report.frameworks.missing.length === 0 && report.frameworks.extra.length === 0 &&
@@ -428,8 +440,11 @@ const markdown = `# Electron packaged bundle 对齐审计\n\n` +
   `- app.asar runtime node_modules 缺失数：${report.asar.missing_runtime_node_modules_entries.length}\n` +
   `- app.asar.unpacked runtime 缺失数：${report.asar.missing_unpacked_runtime_entries.length}\n` +
   `- app.asar 是否误打入 smoke user data：${report.asar.contains_smoke_user_data ? "是" : "否"}\n` +
+  `- product-web 存在：${report.resources.product_web_exists ? "是" : "否"}（build-id=${report.resources.dual_root?.productBuildId ?? "null"}）\n` +
+  `- residual ion-dist 存在：${report.resources.residual_ion_dist_exists ? "是" : "否"}（build-id=${report.resources.dual_root?.residualBuildId ?? "null"}）\n` +
+  `- dual-root 通过：${dualRootOk ? "是" : "否"}（${report.resources.dual_root?.reason ?? "ok"}）\n` +
   `- 是否通过：${report.ok ? "是" : "否"}\n\n` +
-  `说明：外层 macOS Frameworks/Helpers/二进制对齐原包；CFBundleIdentifier/Name 必须是独立产品身份（不能等于 com.anthropic.claudefordesktop），避免与官方 Dock/TCC 合并；app.asar 必须是产品 main（chunks / 产品指纹），禁止官方 12MB 单文件 monolith。\n`;
+  `说明：外层 macOS Frameworks/Helpers/二进制对齐原包；CFBundleIdentifier/Name 必须是独立产品身份（不能等于 com.anthropic.claudefordesktop），避免与官方 Dock/TCC 合并；app.asar 必须是产品 main（chunks / 产品指纹），禁止官方 12MB 单文件 monolith；Resources 必须 dual-root：product-web 主 SPA + residual ion-dist（setup-desktop-3p），禁止把 product 覆盖进 ion-dist。\n`;
 const markdownPath = path.join(docsRoot, "electron-packaged-bundle-alignment.md");
 await fs.writeFile(markdownPath, markdown);
 console.log(path.relative(projectRoot, jsonPath));
@@ -440,6 +455,9 @@ console.log(JSON.stringify({
   residual_info_aligned: residualInfoAligned,
   product_identity_ok: productIdentityOk,
   product_main_ok: report.asar.product_main.ok,
+  dual_root_ok: dualRootOk,
+  product_web_build_id: report.resources.dual_root?.productBuildId ?? null,
+  residual_ion_dist_build_id: report.resources.dual_root?.residualBuildId ?? null,
   codesign_identity_ok: codesignIdentityOk,
   codesign_identifier: codesignId,
   product_bundle_id: info.CFBundleIdentifier.packaged,

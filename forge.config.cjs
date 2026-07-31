@@ -28,7 +28,9 @@ const electronZipDir = (() => {
 if (fs.existsSync(ionDistRoot)) {
   extraResource.push(ionDistRoot);
 }
-// Product open-claude-web build for app:// (packaged). Residual ion-dist stays for audit/align.
+// Product open-claude-web build for app:// primary SPA (packaged dual-root).
+// Residual ion-dist (above) stays official spa for setup-desktop-3p; align must
+// keep both trees and must NOT overwrite ion-dist with product-web.
 const productWebRoot = path.join(resourcesDir, "product-web");
 if (fs.existsSync(path.join(productWebRoot, "index.html"))) {
   extraResource.push(productWebRoot);

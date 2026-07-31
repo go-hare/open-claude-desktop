@@ -71,22 +71,51 @@ function normalizeProductMainViewUrl(value: string): string {
  * Official residual (two layers — do not collapse them):
  *
  * 1) Window URL (hai/Cai getMainWindowUrl):
- *    - Official Anthropic binary 1p → mN https://claude.ai
+ *    - Official Anthropic binary **after NQt("1p")** → mN https://claude.ai
  *    - Official 3p → app://localhost
- *    - **Product shell** always hosts open-claude-web / app:// (independent product).
- *      Do NOT force navigate product mainView to claude.ai — that skips LoginDesktop.
+ *    - Unconfigured / void chooser is still product app:// LoginDesktop (M5t).
+ *      `resolution.mode === "1p"` alone is NOT enough (no bag also resolves 1p).
+ *      Only **persisted** `deploymentMode === "1p"` means the user chose Anthropic.
  *
  * 2) Login surface (ion-dist LoginDesktop residual, NOT a separate BrowserWindow):
- *    - sVt: fixed inset-0 bg-bg-100 centered shell (+ 36px drag bar)
- *    - M5t: "How do you want to use Claude?" / "Sign in to Anthropic" cards
- *    - T5t portal only when getLoginDesktop3pStatus is truthy
- *    - Verify sign-in code is the only small BrowserWindow (520×340)
+ *    - sVt + M5t dual cards while chooser mode is void / 3p bag present
+ *    - Sign in to Anthropic → NQt("1p") → jsA + relaunch → mN claude.ai (real OAuth host)
+ *    - Product must not loop product SPA /login after that write (prior bug: 1p card
+ *      looked dead — relaunch reloaded app:// chooser with mode still painting M5t).
  *
- * CLAUDE_DESKTOP_MAIN_VIEW_URL / app:// remain product main load.
- * CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW=1 opts into official mN host (rare).
+ * CLAUDE_DESKTOP_MAIN_VIEW_URL remains product main for 3p / void / dev.
+ * CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW=1 forces mN even without persisted 1p.
+ * CLAUDE_FORCE_PRODUCT_MAIN_VIEW=1 keeps product SPA even when persisted 1p (tests).
  */
+/**
+ * Official loadAll residual (app.asar vst / Frr era):
+ *   Q = new URL(or())  // or() = hai.getMainWindowUrl() = mN() https://claude.ai
+ *   sidebar task → Q.pathname = "/task/new"; Q.searchParams.set("coldLaunch","1")
+ *   sidebar code → Q.pathname = "/epitaxy"
+ * Bare `https://claude.ai/` is the public marketing landing ("Question what's next" /
+ * Download desktop app). Desktop 1p must load the product path, not the marketing root.
+ */
+export function resolveAnthropicMainWindowUrl(sidebarMode?: SidebarMode): string {
+  const url = new URL(`${anthropicOriginUrl()}/`);
+  const mode = normalizeSidebarMode(sidebarMode);
+  if (mode === "epitaxy") {
+    url.pathname = "/epitaxy";
+  } else {
+    // chat / task residual — same as official loadAll when hasRendererConfig/task
+    url.pathname = "/task/new";
+    // Official cold launch marker on first mainView load of Anthropic host.
+    url.searchParams.set("coldLaunch", "1");
+  }
+  return url.toString();
+}
+
 export function resolveMainWindowLoadUrl(input: {
   deploymentMode: DesktopDeploymentMode;
+  /**
+   * Official jsA residual — only `"1p"` after chooser means load mN.
+   * Undefined/clear keeps product LoginDesktop even when N1e mode is 1p.
+   */
+  persistedDeploymentMode?: DesktopDeploymentMode | undefined;
   baseUrl?: string;
   productMainViewUrl?: string;
   forceAnthropicMainView?: boolean;
@@ -96,9 +125,12 @@ export function resolveMainWindowLoadUrl(input: {
   const forceAnthropic =
     input.forceAnthropicMainView
     ?? process.env.CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW === "1";
+  const forceProduct = process.env.CLAUDE_FORCE_PRODUCT_MAIN_VIEW === "1";
+  const choseAnthropic1p = input.persistedDeploymentMode === "1p" || forceAnthropic;
 
-  if (input.deploymentMode === "1p" && forceAnthropic) {
-    return `${anthropicOriginUrl()}/`;
+  // Official hai + loadAll: mN origin + /task/new (not marketing `/`).
+  if (choseAnthropic1p && !forceProduct) {
+    return resolveAnthropicMainWindowUrl(input.sidebarMode);
   }
 
   if (input.productMainViewUrl) {

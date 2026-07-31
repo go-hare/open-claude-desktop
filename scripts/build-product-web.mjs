@@ -58,9 +58,13 @@ if (!skipBuild) {
       });
     }
   } catch (error) {
-    if (fsSync.existsSync(path.join(distRoot, "index.html"))) {
+    // Default: fail closed so package cannot silently ship stale dist.
+    // Escape hatch for local iteration only:
+    //   CLAUDE_PRODUCT_WEB_ALLOW_STALE_DIST=1
+    const allowStale = process.env.CLAUDE_PRODUCT_WEB_ALLOW_STALE_DIST === "1";
+    if (allowStale && fsSync.existsSync(path.join(distRoot, "index.html"))) {
       console.warn(
-        "[build-product-web] vite/tsc build failed; reusing existing dist:",
+        "[build-product-web] vite/tsc build failed; reusing existing dist (CLAUDE_PRODUCT_WEB_ALLOW_STALE_DIST=1):",
         distRoot,
       );
       console.warn(String(error));

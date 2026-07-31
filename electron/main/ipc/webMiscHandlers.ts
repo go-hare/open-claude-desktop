@@ -4,6 +4,7 @@ import path from "node:path";
 import type { IpcHandlerContext } from "./context";
 import { createFileSystemHandlers } from "./fileSystemHandlers";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
+import { doAuthInBrowserResidual } from "../services/auth/doAuthInBrowserResidual";
 import { applyRecentChatsFromWeb } from "../services/settings/quickEntryNative";
 
 const SEARCH_FILE_LIMIT = 500;
@@ -154,11 +155,25 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
       },
     },
     Auth: {
+      /**
+       * Official residual: ASWebAuthenticationSession via @ant/claude-native AuthRequest
+       * for /login/* (rewritten to claude.com/cai), then claudeURLHandler on callback.
+       * Fallback: shell.openExternal(rewritten). Never invent OAuth tokens here.
+       */
       doAuthInBrowser: async (_event, url) => {
         const target = asString(url) ?? asString(asObject(url).url);
         if (!target) return false;
-        await shell.openExternal(target);
-        return true;
+        const { mainWindow, mainView } = context.windows;
+        return doAuthInBrowserResidual(target, {
+          ownerWindow: mainWindow,
+          webContents: mainView?.webContents,
+          // Official foA residual (Toast.showToast) for ASWeb cancel/fail.
+          showAuthErrorToast: (message, toastType, opts) => {
+            const wc = mainView?.webContents;
+            if (!wc || wc.isDestroyed()) return;
+            dispatchBridgeEvent(wc, "claude.web", "Toast", "showToast", message, toastType, opts ?? null);
+          },
+        });
       },
     },
     AutoUpdater: {

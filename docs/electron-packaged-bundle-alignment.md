@@ -1,6 +1,6 @@
 # Electron packaged bundle 对齐审计
 
-生成时间：2026-07-30T05:07:57.399Z
+生成时间：2026-07-31T05:25:40.094Z
 
 ## 结论
 
@@ -20,6 +20,9 @@
 - app.asar runtime node_modules 缺失数：0
 - app.asar.unpacked runtime 缺失数：0
 - app.asar 是否误打入 smoke user data：否
+- product-web 存在：是（build-id=react-shell）
+- residual ion-dist 存在：是（build-id=spa-dev）
+- dual-root 通过：是（ok）
 - 是否通过：是
 
-说明：外层 macOS Frameworks/Helpers/二进制对齐原包；CFBundleIdentifier/Name 必须是独立产品身份（不能等于 com.anthropic.claudefordesktop），避免与官方 Dock/TCC 合并；app.asar 必须是产品 main（chunks / 产品指纹），禁止官方 12MB 单文件 monolith。
+说明：外层 macOS Frameworks/Helpers/二进制对齐原包；CFBundleIdentifier/Name 必须是独立产品身份（不能等于 com.anthropic.claudefordesktop），避免与官方 Dock/TCC 合并；app.asar 必须是产品 main（chunks / 产品指纹），禁止官方 12MB 单文件 monolith；Resources 必须 dual-root：product-web 主 SPA + residual ion-dist（setup-desktop-3p），禁止把 product 覆盖进 ion-dist。

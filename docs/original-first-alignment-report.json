@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-30T05:07:42.507Z",
+  "generated_at": "2026-07-31T05:25:25.486Z",
   "policy": {
     "standard": "original-first alignment: no guessed JS/CSS/font/component structure",
     "original_js_css_fonts": "resources/ion-dist must stay byte-for-byte identical to Claudex.app/Contents/Resources/ion-dist",

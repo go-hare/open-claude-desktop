@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-30T05:07:57.399Z",
+  "generated_at": "2026-07-31T05:25:40.094Z",
   "project_root": "/Users/apple/work-py/hare-code/open-claude-desktop",
   "original_app": "/Users/apple/work-py/hare-code/open-claude-desktop/resources/original-claude.app",
   "packaged_app": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app",
@@ -8,7 +8,7 @@
     "packaged_exists": true,
     "generated_deepseek_executable_exists": false,
     "original_sha256": "4a53a36e6b113b881433c4576adb1120d34670b49521abbc4660d597c33ce478",
-    "packaged_sha256": "2e71189693b0b0ff21509b5688acfb4a59ccff6546747f057b9065e5e06d7c53",
+    "packaged_sha256": "bca50338139022c038f7bfec79ade57ccafc0d4df812fc1917b2ac181a7a6eb4",
     "hash_aligned": false,
     "hash_ok_after_product_codesign": true
   },
@@ -32,13 +32,27 @@
   },
   "resources": {
     "original_top_level_count": 96,
-    "packaged_top_level_count": 97,
+    "packaged_top_level_count": 99,
     "missing_original_resource_entries_except_app_asar": [],
     "allowed_product_resource_entries": [
-      "claude-code-bin"
+      "claude-code-bin",
+      "product-web",
+      "electron-app-icon.png"
     ],
     "extra_packaged_resource_entries": [],
-    "product_web_in_ion_dist": true
+    "product_web_exists": true,
+    "residual_ion_dist_exists": true,
+    "dual_root": {
+      "ok": true,
+      "reason": null,
+      "productBuildId": "react-shell",
+      "residualBuildId": "spa-dev",
+      "productOk": true,
+      "residualOk": true,
+      "rootsDistinct": true,
+      "residualIsNotProduct": true
+    },
+    "dual_root_ok": true
   },
   "frameworks": {
     "missing": [],
@@ -71,10 +85,10 @@
   },
   "asar": {
     "original_sha256": "a7f105ee5e073c37bb27b3a2129614074dd00a557c86e1ea39b9c390de75edc3",
-    "packaged_sha256": "7f71f165c56ac4a2c4272129e4095c7b8c4e35b9a4d4aea0c4911f6657e888f0",
+    "packaged_sha256": "d9db62dd8bba9fead59fb545a8ddfc3ccb8e95a134d5d7111310494e8eae273f",
     "intentionally_rebuilt": true,
-    "packaged_header_sha256": "c0c43322e5a7ad9fbf79f3ff6f233e4e6f236ce0b683bf8319c3a331d6ed63d2",
-    "plist_integrity_hash": "c0c43322e5a7ad9fbf79f3ff6f233e4e6f236ce0b683bf8319c3a331d6ed63d2",
+    "packaged_header_sha256": "fec2340ad1f198d6fcf144f1761ca8f1105add6e57f35089c40ec8b7fbf9304a",
+    "plist_integrity_hash": "fec2340ad1f198d6fcf144f1761ca8f1105add6e57f35089c40ec8b7fbf9304a",
     "plist_integrity_matches_packaged_asar": true,
     "contains_smoke_user_data": false,
     "missing_runtime_node_modules_entries": [],

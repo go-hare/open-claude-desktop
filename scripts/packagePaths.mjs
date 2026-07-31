@@ -35,16 +35,22 @@ export function resolvePackagedTargets(opts = {}) {
 
   if (platform === "win32") {
     const packagedRoot = path.join(root, `out/Claudex-win32-${arch}`);
+    const resourcesRoot = path.join(packagedRoot, "resources");
     return {
       platform: "win32",
       arch,
       packagedRoot,
       binary: path.join(packagedRoot, "Claudex.exe"),
-      resourcesRoot: path.join(packagedRoot, "resources"),
-      ionIndex: path.join(packagedRoot, "resources/ion-dist/index.html"),
-      appAsar: path.join(packagedRoot, "resources/app.asar"),
-      claudeCodeBinary: path.join(packagedRoot, "resources/claude-code-bin/claude.exe"),
-      webLabel: "resources/ion-dist",
+      resourcesRoot,
+      // Product dual-root residual (electronShellPaths):
+      //   primary app:// SPA → resources/product-web
+      //   residual setup SPA → resources/ion-dist (spa-dev / official)
+      productWebIndex: path.join(resourcesRoot, "product-web/index.html"),
+      ionIndex: path.join(resourcesRoot, "ion-dist/index.html"),
+      residualIonIndex: path.join(resourcesRoot, "ion-dist/index.html"),
+      appAsar: path.join(resourcesRoot, "app.asar"),
+      claudeCodeBinary: path.join(resourcesRoot, "claude-code-bin/claude.exe"),
+      webLabel: "resources/product-web + resources/ion-dist residual",
     };
   }
 
@@ -57,6 +63,7 @@ export function resolvePackagedTargets(opts = {}) {
       : arch !== "arm64" && fs.existsSync(legacyArm64)
         ? legacyArm64
         : preferred;
+  const resourcesRoot = path.join(packagedRoot, "Contents/Resources");
 
   return {
     platform: "darwin",
@@ -64,12 +71,14 @@ export function resolvePackagedTargets(opts = {}) {
     packagedRoot,
     binary: path.join(packagedRoot, "Contents/MacOS/Claude"),
     binaryFallback: path.join(packagedRoot, "Contents/MacOS/Claudex"),
-    resourcesRoot: path.join(packagedRoot, "Contents/Resources"),
-    ionIndex: path.join(packagedRoot, "Contents/Resources/ion-dist/index.html"),
-    appAsar: path.join(packagedRoot, "Contents/Resources/app.asar"),
+    resourcesRoot,
+    productWebIndex: path.join(resourcesRoot, "product-web/index.html"),
+    ionIndex: path.join(resourcesRoot, "ion-dist/index.html"),
+    residualIonIndex: path.join(resourcesRoot, "ion-dist/index.html"),
+    appAsar: path.join(resourcesRoot, "app.asar"),
     infoPlist: path.join(packagedRoot, "Contents/Info.plist"),
-    claudeCodeBinary: path.join(packagedRoot, "Contents/Resources/claude-code-bin/claude"),
-    webLabel: "Contents/Resources/ion-dist",
+    claudeCodeBinary: path.join(resourcesRoot, "claude-code-bin/claude"),
+    webLabel: "Contents/Resources/product-web + ion-dist residual",
   };
 }
 
@@ -220,4 +229,55 @@ export function readIonBuildId(ionIndexPath) {
   if (!fs.existsSync(ionIndexPath)) return null;
   const html = fs.readFileSync(ionIndexPath, "utf8");
   return html.match(/data-build-id="([^"]+)"/)?.[1] ?? "unknown";
+}
+
+/**
+ * Packaged dual-root residual check.
+ * Product main prefers product-web; residual ion-dist keeps setup-desktop-3p SPA.
+ * @param {{ productWebIndex: string, residualIonIndex?: string, ionIndex?: string }} targets
+ */
+export function inspectPackagedDualRoot(targets) {
+  const productWebIndex = targets.productWebIndex;
+  const residualIonIndex = targets.residualIonIndex ?? targets.ionIndex;
+  const productBuildId = readIonBuildId(productWebIndex);
+  const residualBuildId = readIonBuildId(residualIonIndex);
+  const productOk =
+    Boolean(productWebIndex && fs.existsSync(productWebIndex)) &&
+    productBuildId != null &&
+    productBuildId !== "spa-dev" &&
+    productBuildId !== "unknown";
+  const residualOk =
+    Boolean(residualIonIndex && fs.existsSync(residualIonIndex));
+  // Roots must be distinct directories so residual setup routes are not the product SPA.
+  const productRoot = productWebIndex ? path.dirname(productWebIndex) : null;
+  const residualRoot = residualIonIndex ? path.dirname(residualIonIndex) : null;
+  const rootsDistinct =
+    Boolean(productRoot && residualRoot) &&
+    path.resolve(productRoot) !== path.resolve(residualRoot);
+  // Residual should stay official spa (or at least not equal product build id).
+  const residualIsNotProduct =
+    residualOk &&
+    productOk &&
+    (residualBuildId === "spa-dev" || residualBuildId !== productBuildId);
+  const ok = productOk && residualOk && rootsDistinct && residualIsNotProduct;
+  let reason = null;
+  if (!productOk) {
+    reason = `product-web missing or still spa-dev (buildId=${productBuildId ?? "null"})`;
+  } else if (!residualOk) {
+    reason = "residual ion-dist/index.html missing (setup-desktop-3p needs official SPA)";
+  } else if (!rootsDistinct) {
+    reason = "product-web and residual ion-dist resolve to the same path";
+  } else if (!residualIsNotProduct) {
+    reason = `residual ion-dist looks like product (buildId=${residualBuildId}); keep official spa-dev for setup routes`;
+  }
+  return {
+    ok,
+    reason,
+    productBuildId,
+    residualBuildId,
+    productOk,
+    residualOk,
+    rootsDistinct,
+    residualIsNotProduct,
+  };
 }

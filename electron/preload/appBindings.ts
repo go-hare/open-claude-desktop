@@ -7,9 +7,18 @@ function assertBinding(name: string): void {
 }
 
 export const claudeAppBindings = {
+  /**
+   * Official residual (mainView preload): ipcRenderer.on(name, cb).
+   * Live SPA ju() prefers a returned unsubscribe function when present:
+   *   i = registerBinding(...); cleanup → i ? i() : unregisterBinding(name)
+   */
   registerBinding(name: string, callback: (...args: unknown[]) => void) {
     assertBinding(name);
-    ipcRenderer.on(name, callback as never);
+    const listener = callback as never;
+    ipcRenderer.on(name, listener);
+    return () => {
+      ipcRenderer.removeListener(name, listener);
+    };
   },
   unregisterBinding(name: string) {
     assertBinding(name);

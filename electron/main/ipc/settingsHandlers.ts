@@ -10,11 +10,16 @@ import {
   listCustom3pConfigLibrary,
   migrateLegacyShellCustom3pConfigsToLibrary,
   readCustom3pConfigLibrary,
+  readCustom3pConfigLibraryBag,
   renameCustom3pConfigLibraryEntry,
   revealCustom3pConfigLibraryPath,
   setAppliedCustom3pConfigLibraryId,
   writeCustom3pConfigLibrary,
 } from "../services/custom3p/custom3pConfigLibrary";
+import {
+  deploymentModeToPersistAfterApply,
+  normalizePersistedDeploymentMode,
+} from "../services/custom3p/deploymentMode";
 import {
   DOT_CLAUDE_SETUP_CONFIG_ID,
   DOT_CLAUDE_SETUP_CONFIG_NAME,
@@ -30,6 +35,7 @@ import {
   recheckConfigHealth as recheckCustom3pConfigHealth,
 } from "../services/custom3p/custom3pConfigHealth";
 import { custom3pBootstrapState, custom3pLoginDesktopStatus } from "../services/custom3p/custom3pStatus";
+import { resolveAnthropicMainWindowUrl } from "../windows/routeMode";
 import {
   deleteInstalledExtension,
   ensureExtensionFolders,
@@ -130,6 +136,12 @@ function settingsUserDataPath(context: IpcHandlerContext): string {
 /**
  * Official wrA residual: multi-config lives in userData/configLibrary.
  * One-shot migrate legacy desktop-shell-settings custom3pConfigs when library empty.
+ *
+ * Residual setup SPA (c71860c77): after listConfigs always readConfig(appliedId).
+ * Empty library returns appliedId:"" → readConfig("") fails → "Couldn't load
+ * configuration" / toast "Couldn't update saved configurations". Official first
+ * open effectively has a create path; product seeds one Default empty bag so
+ * Setup can render Connection form on fresh userData (package:open isolated).
  */
 function ensureCustom3pConfigLibrary(context: IpcHandlerContext): string {
   const userDataPath = settingsUserDataPath(context);
@@ -145,6 +157,15 @@ function ensureCustom3pConfigLibrary(context: IpcHandlerContext): string {
     });
   } catch {
     // Migration is best-effort; library APIs still work on empty dir.
+  }
+  try {
+    const listed = listCustom3pConfigLibrary(userDataPath);
+    if (listed.entries.length === 0) {
+      // Official Cgr: create starts with empty bag; first entry becomes appliedId.
+      createCustom3pConfigLibraryEntry(userDataPath, "Default", {});
+    }
+  } catch {
+    // Seed is best-effort; list/create handlers still return shapes residual can show.
   }
   return userDataPath;
 }
@@ -1052,10 +1073,32 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
           publishCustom3pBootstrapState(context);
           return isDotClaudeSetupConfigId(typeof id === "string" ? id : null);
         }
+        const userDataPath = ensureCustom3pConfigLibrary(context);
         const ok =
           typeof id === "string"
-            ? setAppliedCustom3pConfigLibraryId(ensureCustom3pConfigLibrary(context), id)
+            ? setAppliedCustom3pConfigLibraryId(userDataPath, id)
             : false;
+        // Product residual: Setup commitApply only calls setAppliedConfig + relaunchApp
+        // (c71860c77). Login eMA needs persisted deploymentMode "3p" for synthetic
+        // account — without it relaunch stays on /login dual chooser. Apply with an
+        // activated bag is the explicit 3p chooser write (see deploymentModeToPersistAfterApply).
+        if (ok && typeof id === "string") {
+          try {
+            const bag = readCustom3pConfigLibraryBag(userDataPath, id);
+            const current = normalizePersistedDeploymentMode(
+              settings.getPreferences()?.deploymentMode,
+            );
+            const next = deploymentModeToPersistAfterApply({
+              appliedBag: bag,
+              currentPersistedMode: current,
+            });
+            if (next) {
+              settings.setPreference("deploymentMode", next);
+            }
+          } catch {
+            // Mode write is best-effort; bag apply already succeeded.
+          }
+        }
         publishCustom3pBootstrapState(context);
         return ok;
       },
@@ -1119,8 +1162,27 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         //   - "clear": write only (renderer soft-leaves to /login after signed-out
         //     interstitial). Process kill here made countdown-end wait for full
         //     relaunch (~seconds) and flashed chooser mid-exit.
-        //   - "1p": still schedule relaunch (Anthropic host residual).
+        //   - "1p": official hai getMainWindowUrl → mN https://claude.ai (real Anthropic
+        //     login). Prior product only relaunched into product SPA → Sign in card
+        //     looked dead (chooser remount). Navigate mainView to mN first, then relaunch.
         if (mode === "1p") {
+          // Official loadAll: or() + pathname /task/new — not marketing https://claude.ai/
+          const sidebarMode = settings.getPreferences()?.sidebarMode;
+          const anthropicUrl = resolveAnthropicMainWindowUrl(
+            sidebarMode === "code" || sidebarMode === "epitaxy"
+              ? "epitaxy"
+              : sidebarMode === "task"
+                ? "task"
+                : "chat",
+          );
+          try {
+            const wc = context.windows.mainView?.webContents;
+            if (wc && !wc.isDestroyed()) {
+              void wc.loadURL(anthropicUrl);
+            }
+          } catch {
+            /* relaunch still reloads with persisted 1p → resolveMainWindowLoadUrl mN+path */
+          }
           setImmediate(() => {
             app.relaunch();
             app.exit(0);

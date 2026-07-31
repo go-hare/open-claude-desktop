@@ -1,6 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import {
   anthropicOriginUrl,
+  resolveAnthropicMainWindowUrl,
   resolveInitialMainViewUrl,
   resolveMainWindowLoadUrl,
 } from "./routeMode";
@@ -25,13 +26,28 @@ it("mN residual honors CLAUDE_AI_URL host", () => {
   expect(anthropicOriginUrl()).toBe("https://preview.claude.ai");
 });
 
-it("product 1p keeps product main view (LoginDesktop residual, not force claude.ai)", () => {
+it("void 1p (no jsA chooser) keeps product LoginDesktop — not force claude.ai", () => {
   delete process.env.CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW;
+  delete process.env.CLAUDE_FORCE_PRODUCT_MAIN_VIEW;
   const url = resolveMainWindowLoadUrl({
     deploymentMode: "1p",
+    persistedDeploymentMode: undefined,
     productMainViewUrl: "http://127.0.0.1:5176/login",
   });
   expect(url).toBe("http://localhost:5176/login");
+});
+
+it("persisted 1p after NQt loads official mN + /task/new?coldLaunch=1 (loadAll residual)", () => {
+  delete process.env.CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW;
+  delete process.env.CLAUDE_FORCE_PRODUCT_MAIN_VIEW;
+  const url = resolveMainWindowLoadUrl({
+    deploymentMode: "1p",
+    persistedDeploymentMode: "1p",
+    productMainViewUrl: "http://127.0.0.1:5176/login",
+  });
+  // Bare https://claude.ai/ is marketing landing — desktop uses product path + coldLaunch.
+  expect(url).toBe("https://claude.ai/task/new?coldLaunch=1");
+  expect(resolveAnthropicMainWindowUrl("epitaxy")).toBe("https://claude.ai/epitaxy");
 });
 
 it("3p main window uses product main view URL (localhost normalize)", () => {
@@ -53,13 +69,13 @@ it("3p without product override uses app:// task residual", () => {
   expect(url).toContain("/task/new");
 });
 
-it("force Anthropic main view opts into official mN host", () => {
+it("force Anthropic main view opts into official mN + task path", () => {
   const url = resolveMainWindowLoadUrl({
     deploymentMode: "1p",
     productMainViewUrl: "http://127.0.0.1:5176/",
     forceAnthropicMainView: true,
   });
-  expect(url).toBe("https://claude.ai/");
+  expect(url).toBe("https://claude.ai/task/new?coldLaunch=1");
 });
 
 it("resolveInitialMainViewUrl still maps task residual", () => {

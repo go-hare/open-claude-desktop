@@ -30,7 +30,7 @@ source main process
 
 | 场景 | 命令 | 主视图 | Web |
 |------|------|--------|-----|
-| **打包** | `npm run package` → `npm run package:open` | `app://localhost` | 打包树 `ion-dist`（open-claude-web） |
+| **打包** | `npm run package` → `npm run package:open` | `app://localhost` | dual-root：`product-web` + residual `ion-dist` |
 | **测试 / 开发** | `npm run dev` | `http://localhost:5176` | open-claude-web Vite |
 
 | 平台 | 产物 | 可执行 |
@@ -42,7 +42,7 @@ source main process
 
 ```bash
 # 打包（host-native：在对应 OS 上执行）
-# 产品 main + product-web → ion-dist；mac 另叠 residual MacOS/Claude
+# 产品 main + dual-root product-web/ion-dist；mac 另叠 residual MacOS/Claude
 npm run package
 npm run package:open                 # mac open .app / win 启动 Claudex.exe
 npm run package:open -- --isolated   # 独立 userData，避免与 dev 单实例锁冲突
@@ -103,13 +103,15 @@ packaged runtime native modules complete=true
 # macOS
 out/Claudex-darwin-<arch>/Claudex.app
   Contents/MacOS/Claude
-  Contents/Resources/ion-dist/     # product web
+  Contents/Resources/product-web/  # product SPA
+  Contents/Resources/ion-dist/     # residual setup SPA
   Contents/Resources/app.asar      # product main (chunks fingerprint)
 
 # Windows（在 Windows 主机 npm run package）
 out/Claudex-win32-<arch>/
   Claudex.exe
-  resources/ion-dist/              # product web（align 注入）
+  resources/product-web/           # product SPA
+  resources/ion-dist/              # residual setup SPA
   resources/claude-code-bin/claude.exe
 ```
 
