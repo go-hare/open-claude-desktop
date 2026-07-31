@@ -1,14 +1,14 @@
 {
-  "generated_at": "2026-07-23T17:03:05.329Z",
+  "generated_at": "2026-07-30T05:07:57.399Z",
   "project_root": "/Users/apple/work-py/hare-code/open-claude-desktop",
-  "original_app": "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app",
-  "packaged_app": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claude-Deepseek-darwin-arm64/Claude-Deepseek.app",
+  "original_app": "/Users/apple/work-py/hare-code/open-claude-desktop/resources/original-claude.app",
+  "packaged_app": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app",
   "executable": {
     "original_exists": true,
     "packaged_exists": true,
     "generated_deepseek_executable_exists": false,
     "original_sha256": "4a53a36e6b113b881433c4576adb1120d34670b49521abbc4660d597c33ce478",
-    "packaged_sha256": "dac6a2194d1eda21c657045862c0bb6d7d0262c39e322cd03bec8742314c6b34",
+    "packaged_sha256": "2e71189693b0b0ff21509b5688acfb4a59ccff6546747f057b9065e5e06d7c53",
     "hash_aligned": false,
     "hash_ok_after_product_codesign": true
   },
@@ -27,14 +27,18 @@
     },
     "CFBundleIdentifier": {
       "original": "com.anthropic.claudefordesktop",
-      "packaged": "com.local.claude-deepseek.desktop"
+      "packaged": "com.local.claudex.desktop"
     }
   },
   "resources": {
-    "original_top_level_count": 95,
-    "packaged_top_level_count": 95,
+    "original_top_level_count": 96,
+    "packaged_top_level_count": 97,
     "missing_original_resource_entries_except_app_asar": [],
-    "extra_packaged_resource_entries": []
+    "allowed_product_resource_entries": [
+      "claude-code-bin"
+    ],
+    "extra_packaged_resource_entries": [],
+    "product_web_in_ion_dist": true
   },
   "frameworks": {
     "missing": [],
@@ -67,22 +71,45 @@
   },
   "asar": {
     "original_sha256": "a7f105ee5e073c37bb27b3a2129614074dd00a557c86e1ea39b9c390de75edc3",
-    "packaged_sha256": "e5fc1a18c3fac54bd4dfac4688d37b2ce9a89179866cbcf9e97ca7dba91cc734",
+    "packaged_sha256": "7f71f165c56ac4a2c4272129e4095c7b8c4e35b9a4d4aea0c4911f6657e888f0",
     "intentionally_rebuilt": true,
-    "packaged_header_sha256": "36188e8e93f50475d606502b7996b057f3d2f0b99488d8bbb57320812133fc0d",
-    "plist_integrity_hash": "36188e8e93f50475d606502b7996b057f3d2f0b99488d8bbb57320812133fc0d",
+    "packaged_header_sha256": "c0c43322e5a7ad9fbf79f3ff6f233e4e6f236ce0b683bf8319c3a331d6ed63d2",
+    "plist_integrity_hash": "c0c43322e5a7ad9fbf79f3ff6f233e4e6f236ce0b683bf8319c3a331d6ed63d2",
     "plist_integrity_matches_packaged_asar": true,
     "contains_smoke_user_data": false,
     "missing_runtime_node_modules_entries": [],
-    "missing_unpacked_runtime_entries": []
+    "missing_unpacked_runtime_entries": [],
+    "product_main": {
+      "exists": true,
+      "entryCount": 263,
+      "hasViteIndex": true,
+      "hasVitePre": true,
+      "hasChunks": true,
+      "indexSize": 448,
+      "rootIndexSize": 0,
+      "hasStrayRootIndex": false,
+      "hasNodeModules": true,
+      "hasNodePty": true,
+      "productMarkerHits": [
+        "Claudex Desktop failed to launch",
+        "bootstrapDesktopApp",
+        "chunks\\/index-"
+      ],
+      "looksOfficialMonolith": false,
+      "looksProduct": true,
+      "pollutionHits": [],
+      "cleanAsar": true,
+      "ok": true,
+      "reason": null
+    }
   },
   "product_identity": {
-    "expected_bundle_id": "com.local.claude-deepseek.desktop",
-    "expected_name": "Claude-Deepseek",
+    "expected_bundle_id": "com.local.claudex.desktop",
+    "expected_name": "Claudex",
     "official_bundle_id": "com.anthropic.claudefordesktop",
     "residual_info_aligned": true,
     "product_identity_ok": true,
-    "codesign_identifier": "com.local.claude-deepseek.desktop",
+    "codesign_identifier": "com.local.claudex.desktop",
     "codesign_identity_ok": true
   },
   "ok": true

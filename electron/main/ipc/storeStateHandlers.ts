@@ -82,13 +82,22 @@ export function registerStoreStateHandlers(context: IpcHandlerContext): void {
     namespace: "claude.web",
     iface: "LocalAgentModeSessions",
     storeName: "sessionsBridgeStatus",
-    getState: () => ({ enabled: true, status: "ready" }),
+    // Residual-honest: 3p has no Anthropic remote sessions bridge poller.
+    // Pref may exist for UI round-trip, but never soft-true "ready".
+    getState: () => ({
+      enabled: false,
+      status: "unavailable",
+      conflict: false,
+      dispatchAgentName: null,
+      reason: "sessions_bridge_unavailable",
+    }),
   });
   registerStoreState({
     namespace: "claude.web",
     iface: "LocalAgentModeSessions",
+    // Official getInitialInteractiveAuthState: null | lcA bag. Product idle residual.
     storeName: "interactiveAuth",
-    getState: () => ({ status: "idle" }),
+    getState: () => null,
   });
   registerStoreState({
     namespace: "claude.web",

@@ -3,7 +3,13 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { installClaudeChromeExtension, isClaudeChromeExtensionInstalled, openChromeExtensionListing, restartChromeForExtension } from "../services/chrome/chromeExtension";
+import {
+  installClaudeChromeExtension,
+  isClaudeChromeExtensionInstalled,
+  openChromeExtensionListing,
+  restartChromeForExtension,
+  syncClaudeChromeNativeHost,
+} from "../services/chrome/chromeExtension";
 import {
   ensureExtensionFolders,
   installDxtArchive,
@@ -28,6 +34,17 @@ import {
   coworkAccountStorageDir,
   resolveCoworkAutoMemoryDir,
 } from "../services/coworkSessions/coworkAutoMemoryPaths";
+import {
+  deleteAccountMemory as deleteCoworkAccountMemory,
+  listAccountMemories as listCoworkAccountMemories,
+  migrateLegacyMemoriesMap,
+  readAccountMemory as readCoworkAccountMemory,
+  readGlobalMemory as readCoworkGlobalMemory,
+  resetMemories as resetCoworkMemories,
+  writeAccountMemory as writeCoworkAccountMemory,
+  writeGlobalMemory as writeCoworkGlobalMemory,
+  type CoworkMemoryStoreDeps,
+} from "../services/coworkSessions/coworkMemoryStore";
 import { getCoworkClaudeVmService } from "../services/coworkVm/coworkClaudeVm";
 import { getHardwareBuddyService } from "../services/buddy/hardwareBuddyService";
 import {
@@ -48,6 +65,19 @@ import {
   type LocalPluginsPathBag,
 } from "../services/plugins/localPluginsWriter";
 import { getComputerUseTccState, openTccSystemSettings, requestAccessibilityGrant, requestScreenRecordingGrant } from "../services/tcc/computerUseTcc";
+import { createCoworkHostLoopModeResolver } from "../services/coworkHostLoop/createCoworkHostLoopModeResolver";
+import { isCoworkHostLoopGrowthBookFeatureEnabled } from "../services/coworkHostLoop/coworkGrowthBookFeatures";
+import {
+  resolveCoworkRequireFullVmSandbox,
+} from "../services/coworkHostLoop/coworkHostLoopMode";
+import { isCoworkEnterpriseRequireFullVmSandbox } from "../services/coworkHostLoop/coworkEnterpriseConfig";
+import { restoreCoworkArtifactVersionLocal } from "../services/coworkRuntime/coworkArtifactLocalStore";
+import {
+  listOfficialArtifactsOnDisk,
+  normalizeCoworkArtifactRecord,
+  resolveCoworkArtifactHostDir,
+  resolveOfficialArtifactsRoot,
+} from "../windows/coworkArtifactViewManager";
 import type { IpcHandlerContext } from "./context";
 import { originalEventSurface } from "./originalEventSurface";
 import { dispatchBridgeEvent, registerInterfaceSyncHandlers, registerNamespaceHandlers } from "./registerIpc";
@@ -401,7 +431,8 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     });
   const spaces = featureState.loadMap<Record<string, unknown>>("spaces");
   const artifacts = featureState.loadMap<Record<string, unknown>>("artifacts");
-  const memories = featureState.loadMap<string>("memories");
+  // Legacy featureState memories map — migrate once into official on-disk residual.
+  const legacyMemories = featureState.loadMap<string>("memories");
   const orbitDeploys = featureState.loadMap<Record<string, unknown>>("orbitDeploys");
   // Legacy in-memory maps kept as fallback when account/org identity is absent.
   // Prefer official on-disk residual (TGi / known_marketplaces / installed_plugins).
@@ -426,8 +457,51 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       { spaceId },
     );
   };
+  /**
+   * Official CoworkMemory n() residual: accountUuid + orgUuid or null.
+   * Does not invent local-desktop fallback (official returns null without identity).
+   */
+  const resolveCoworkMemoryIdentity = async () => {
+    let identity = context.coworkAccount.getIdentity();
+    if (!identity?.accountUuid || !identity?.organizationUuid) {
+      identity = await context.coworkAccount.waitForIdentity(2_000);
+    }
+    if (!identity?.accountUuid || !identity?.organizationUuid) return null;
+    return {
+      accountId: identity.accountUuid,
+      orgId: identity.organizationUuid,
+    };
+  };
+  const coworkMemoryDeps = (): CoworkMemoryStoreDeps => ({
+    userDataPath: app.getPath("userData"),
+    resolveIdentity: resolveCoworkMemoryIdentity,
+    log: console,
+  });
+  let legacyMemoryMigration: Promise<void> | null = null;
+  const ensureLegacyMemoryMigrated = () => {
+    if (!legacyMemoryMigration) {
+      legacyMemoryMigration = migrateLegacyMemoriesMap(
+        coworkMemoryDeps(),
+        legacyMemories,
+      )
+        .then((result) => {
+          if (result.migratedGlobal || result.migratedAccount > 0) {
+            legacyMemories.clear();
+            featureState.saveMap("memories", legacyMemories);
+            console.info(
+              "[CoworkMemory] migrated legacy map global=%s account=%s",
+              result.migratedGlobal,
+              result.migratedAccount,
+            );
+          }
+        })
+        .catch((error) => {
+          console.warn("[CoworkMemory] legacy migrate failed", error);
+        });
+    }
+    return legacyMemoryMigration;
+  };
   const persistArtifacts = () => featureState.saveMap("artifacts", artifacts);
-  const persistMemories = () => featureState.saveMap("memories", memories);
   const persistOrbitDeploys = () => featureState.saveMap("orbitDeploys", orbitDeploys);
   const persistCustomMarketplaces = () => featureState.saveMap("customMarketplaces", customMarketplaces);
   const persistLocalPlugins = () => featureState.saveMap("localPlugins", localPlugins);
@@ -752,10 +826,21 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       isInstalled: async () => isClaudeChromeExtensionInstalled(),
       installExtension: async () => {
         const result = await installClaudeChromeExtension();
+        // Official residual: install path re-syncs native host (vrt) inside installClaudeChromeExtension.
         if (result.status === "error") await openChromeExtensionListing().catch(() => undefined);
         return result;
       },
-      restartChrome: async () => restartChromeForExtension(),
+      restartChrome: async () => {
+        // Re-sync manifests before relaunch so Chrome picks up host path.
+        try {
+          await syncClaudeChromeNativeHost();
+        } catch {
+          /* ignore */
+        }
+        // Official Nrt(skipped): if extension already present, skip prefs cleanup.
+        const alreadyInstalled = await isClaudeChromeExtensionInstalled().catch(() => false);
+        return restartChromeForExtension(alreadyInstalled);
+      },
     },
     ClaudeCode: {
       checkGitAvailable: async () => {
@@ -968,71 +1053,275 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
     },
     CoworkArtifacts: {
-      getAllArtifacts: async () => Array.from(artifacts.values()),
-      getArtifactMetadata: async (_event, artifactId) => artifacts.get(String(artifactId)) ?? null,
-      getArtifactIndexHtmlPath: async (_event, artifactId) => asString(artifacts.get(String(artifactId))?.indexHtmlPath) ?? null,
+      // Official yn.getAllWithDiskStatus residual (app.asar):
+      // return bag rows only; annotate ArtifactFolderMissing when dir gone.
+      // Do NOT re-import soft-deleted disk orphans into the bag (list soft-delete).
+      // MCP create_artifact writes bag via FeatureStateStore; reload file first.
+      getAllArtifacts: async () => {
+        const getDocs = () => app.getPath("documents");
+        featureState.reload();
+        const fresh = featureState.loadMap<Record<string, unknown>>("artifacts");
+        artifacts.clear();
+        for (const [id, row] of fresh) {
+          artifacts.set(id, row);
+        }
+
+        const onDiskById = new Map<string, Record<string, unknown>>();
+        for (const diskRow of await listOfficialArtifactsOnDisk(getDocs)) {
+          onDiskById.set(String(diskRow.id), diskRow);
+        }
+
+        const rows: Array<Record<string, unknown>> = [];
+        for (const row of artifacts.values()) {
+          const normalized = normalizeCoworkArtifactRecord(asObject(row));
+          if (!normalized?.id) continue;
+          const id = String(normalized.id);
+          const diskRow = onDiskById.get(id);
+          const bagVersions = Array.isArray(normalized.versions)
+            ? (normalized.versions as number[])
+            : [];
+          const diskVersions = Array.isArray(diskRow?.versions)
+            ? (diskRow!.versions as number[])
+            : [];
+          const versions = Array.from(
+            new Set(
+              [...bagVersions, ...diskVersions]
+                .map((v) => Number(v))
+                .filter((v) => Number.isFinite(v)),
+            ),
+          ).sort((a, b) => a - b);
+          const merged: Record<string, unknown> = {
+            ...normalized,
+            indexHtmlPath:
+              asString(normalized.indexHtmlPath) ??
+              asString(diskRow?.indexHtmlPath) ??
+              undefined,
+            ...(versions.length > 0 ? { versions } : {}),
+          };
+          if (!diskRow) {
+            merged.errors = [
+              ...(Array.isArray(merged.errors) ? merged.errors : []),
+              "artifactFolderMissing",
+            ];
+          }
+          rows.push(merged);
+        }
+
+        return rows.sort(
+          (a, b) =>
+            (typeof b.createdAt === "number" ? b.createdAt : 0) -
+            (typeof a.createdAt === "number" ? a.createdAt : 0),
+        );
+      },
+      getArtifactMetadata: async (_event, artifactId) => {
+        const raw = artifacts.get(String(artifactId));
+        return raw ? normalizeCoworkArtifactRecord(asObject(raw)) : null;
+      },
+      getArtifactIndexHtmlPath: async (_event, artifactId) => {
+        const key = String(artifactId);
+        const existing = asString(artifacts.get(key)?.indexHtmlPath);
+        if (existing) return existing;
+        const dir = await resolveCoworkArtifactHostDir(key, artifacts.get(key) as Record<string, unknown> | undefined, () =>
+          app.getPath("documents"),
+        );
+        return dir ? path.join(dir, "index.html") : null;
+      },
       getArtifactThumbnail: async (_event, artifactId) => {
         const artifact = artifacts.get(String(artifactId));
         const thumbnailPath = asString(artifact?.thumbnailPath);
         if (thumbnailPath) {
           const buffer = await fs.readFile(thumbnailPath).catch(() => null);
-          if (buffer) return `data:image/${path.extname(thumbnailPath).slice(1) || "png"};base64,${buffer.toString("base64")}`;
+          // Official readThumbnail returns raw base64; FE prefixes data:image/png.
+          if (buffer) return buffer.toString("base64");
         }
-        const indexPath = asString(artifact?.indexHtmlPath);
-        return indexPath ? captureUrlScreenshot(`file://${indexPath}`, { width: 640, height: 400 }) : null;
+        const officialThumb = path.join(
+          resolveOfficialArtifactsRoot(() => app.getPath("documents")),
+          String(artifactId),
+          "thumbnail.png",
+        );
+        const fromOfficial = await fs.readFile(officialThumb).catch(() => null);
+        if (fromOfficial) return fromOfficial.toString("base64");
+        const indexPath =
+          asString(artifact?.indexHtmlPath) ??
+          path.join(
+            resolveOfficialArtifactsRoot(() => app.getPath("documents")),
+            String(artifactId),
+            "index.html",
+          );
+        const shot = await captureUrlScreenshot(`file://${indexPath}`, { width: 640, height: 400 });
+        const raw = asString(shot);
+        if (!raw) return null;
+        return raw.startsWith("data:") ? raw.replace(/^data:[^;]+;base64,/, "") : raw;
       },
-      parkAndCaptureArtifact: async (_event, input) => {
-        const artifact = { id: id("artifact"), createdAt: new Date().toISOString(), ...asObject(input) };
-        artifacts.set(String(artifact.id), artifact);
+      // Official CXe: capture shown WebContentsView PNG base64 (not create/persist invent).
+      parkAndCaptureArtifact: async (_event, bounds) => {
+        const manager = context.windows.coworkArtifacts;
+        if (!manager) return null;
+        return manager.parkAndCaptureArtifact(bounds);
+      },
+      // Official import requires sharing residual — honest fail for 3p (no Anthropic share backend).
+      importArtifact: async () => ({ ok: false, error: "Sharing is not enabled." }),
+      // Official yn.delete(id, {removeFiles}) residual:
+      // deleteArtifact:(e,A)=>yn.delete(e,{removeFiles:A}); missing bag → false.
+      // List page omits A (soft-delete: bag only). Import-fail dialog passes true.
+      deleteArtifact: async (_event, artifactId, removeFiles) => {
+        const key = String(artifactId ?? "").trim();
+        if (!key) return false;
+        featureState.reload();
+        const fresh = featureState.loadMap<Record<string, unknown>>("artifacts");
+        artifacts.clear();
+        for (const [id, row] of fresh) artifacts.set(id, row);
+
+        const existing = artifacts.get(key);
+        if (!existing) return false;
+
+        artifacts.delete(key);
+        persistArtifacts();
+
+        if (removeFiles === true) {
+          const dir = await resolveCoworkArtifactHostDir(key, existing, () =>
+            app.getPath("documents"),
+          );
+          if (dir) {
+            await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+          }
+        }
+
+        context.windows.coworkArtifacts?.hideArtifact();
+        events.coworkArtifactsChanged();
+        return true;
+      },
+      // Official YD → boolean.
+      hideArtifact: async () => context.windows.coworkArtifacts?.hideArtifact() ?? false,
+      // Official IXe → number token.
+      reloadArtifactView: async () =>
+        (await context.windows.coworkArtifacts?.reloadArtifactView()) ?? 0,
+      refreshImportedArtifact: async () => ({ ok: false, error: "Sharing is not enabled." }),
+      // Official EXe → boolean: printToPDF of **shown artifact view** (not mainView invent).
+      printArtifactToPdf: async () => {
+        const manager = context.windows.coworkArtifacts;
+        if (!manager) return false;
+        try {
+          const pdf = await manager.printShownArtifactToPdf();
+          if (!pdf) return false;
+          const dir = path.join(app.getPath("userData"), "artifacts");
+          await fs.mkdir(dir, { recursive: true });
+          const id = manager.getShownArtifactId() ?? "artifact";
+          const filePath = path.join(dir, `${id}-${Date.now()}.pdf`);
+          await fs.writeFile(filePath, pdf);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      // Official share when sharing disabled: {ok:false,error}.
+      shareArtifact: async () => ({ ok: false, error: "Sharing is not enabled." }),
+      unshareArtifact: async () => false,
+      // Official yn.restoreVersion(id, version) → boolean.
+      restoreArtifactVersion: async (_event, artifactId, version) => {
+        const key = String(artifactId ?? "").trim();
+        const stamp = typeof version === "number" ? version : Number(version);
+        if (!key || !Number.isFinite(stamp)) return false;
+        // Bridge FeatureState API onto the handler-owned bag Map (same residual store).
+        const bagBridge = {
+          loadMap: <T extends Record<string, unknown>>() =>
+            new Map(artifacts) as Map<string, T>,
+          saveMap: <T extends Record<string, unknown>>(
+            _name: string,
+            map: Map<string, T>,
+          ) => {
+            artifacts.clear();
+            for (const [id, row] of map) {
+              artifacts.set(id, row as Record<string, unknown>);
+            }
+            persistArtifacts();
+          },
+        };
+        const ok = await restoreCoworkArtifactVersionLocal(key, stamp, {
+          featureState: bagBridge as never,
+          getDocumentsPath: () => app.getPath("documents"),
+        });
+        if (ok) {
+          events.coworkArtifactsChanged();
+          if (context.windows.coworkArtifacts?.getShownArtifactId?.() === key) {
+            await context.windows.coworkArtifacts.reloadArtifactView?.();
+          }
+        }
+        return ok;
+      },
+      /**
+       * Official yn.setMcpTools(artifactId, tools) → boolean:
+       * missing artifact → false; filter non-null tool names; write HTML frontmatter
+       * (product residual: bag + persist; no invent of full uZ/twA frontmatter rewriter);
+       * emit changed → true.
+       * Never soft-true when artifact missing.
+       */
+      setArtifactMcpTools: async (_event, artifactId, tools) => {
+        const key = asString(artifactId);
+        if (!key) return false;
+        const existing = artifacts.get(key);
+        if (!existing) return false;
+        const list = Array.isArray(tools)
+          ? tools.filter(
+              (item): item is string => typeof item === "string" && item.length > 0,
+            )
+          : [];
+        artifacts.set(key, { ...existing, mcpTools: list });
         persistArtifacts();
         events.coworkArtifactsChanged();
-        return artifact;
+        return true;
       },
-      importArtifact: async (_event, input) => {
-        const artifact = { id: id("artifact"), imported: true, createdAt: new Date().toISOString(), ...asObject(input) };
-        artifacts.set(String(artifact.id), artifact);
-        persistArtifacts();
-        events.coworkArtifactsChanged();
-        return artifact;
-      },
-      deleteArtifact: async (_event, artifactId) => {
-        const deleted = artifacts.delete(String(artifactId));
-        persistArtifacts();
-        if (deleted) events.coworkArtifactsChanged();
-        return deleted;
-      },
-      hideArtifact: async () => true,
-      reloadArtifactView: async () => true,
-      refreshImportedArtifact: async () => true,
-      printArtifactToPdf: async (_event, artifactId) => {
-        const pdf = await context.windows.mainView.webContents.printToPDF({});
-        const dir = path.join(app.getPath("userData"), "artifacts", String(artifactId));
-        await fs.mkdir(dir, { recursive: true });
-        const filePath = path.join(dir, "artifact.pdf");
-        await fs.writeFile(filePath, pdf);
-        return filePath;
-      },
-      shareArtifact: async (_event, artifactId) => {
-        const existing = artifacts.get(String(artifactId)) ?? { id: String(artifactId) };
-        const updated = { ...existing, shared: true, shareUrl: `cowork-artifact://${String(artifactId)}` };
-        artifacts.set(String(artifactId), updated);
-        persistArtifacts();
-        events.coworkArtifactsChanged();
-        return updated;
-      },
-      unshareArtifact: async () => true,
-      restoreArtifactVersion: async () => true,
-      setArtifactMcpTools: async () => true,
+      /**
+       * Official setArtifactStarred residual:
+       * missing bag + no on-disk folder → null (never invent ghost starred row);
+       * known id → persist isStarred + emit changed.
+       */
       setArtifactStarred: async (_event, artifactId, starred) => {
-        const existing = artifacts.get(String(artifactId)) ?? { id: String(artifactId) };
-        const updated = { ...existing, starred: Boolean(starred) };
-        artifacts.set(String(artifactId), updated);
+        const key = asString(artifactId);
+        if (!key) return null;
+        let existing = artifacts.get(key) as Record<string, unknown> | undefined;
+        if (!existing) {
+          const dir = await resolveCoworkArtifactHostDir(key, null, () =>
+            app.getPath("documents"),
+          );
+          if (!dir) return null;
+          existing = {
+            id: key,
+            name: key,
+            createdAt: Date.now(),
+            indexHtmlPath: path.join(dir, "index.html"),
+            schemaVersion: 1,
+          };
+        }
+        const updated = {
+          ...existing,
+          id: key,
+          isStarred: Boolean(starred),
+          starred: Boolean(starred),
+        };
+        artifacts.set(key, updated);
         persistArtifacts();
         events.coworkArtifactsChanged();
-        return updated;
+        return normalizeCoworkArtifactRecord(asObject(updated));
       },
-      isSharingEnabled: async () => true,
-      showArtifact: async () => true,
+      // Official lT() residual — product has no Anthropic share backend.
+      isSharingEnabled: async () => false,
+      // Official cXe(artifactId, bounds, version?) → number.
+      showArtifact: async (_event, artifactId, bounds, version) => {
+        const manager = context.windows.coworkArtifacts;
+        if (!manager) return 0;
+        const key = String(artifactId);
+        manager.setArtifactDirResolver(async (id) =>
+          resolveCoworkArtifactHostDir(
+            id,
+            artifacts.get(id) as Record<string, unknown> | undefined,
+            () => app.getPath("documents"),
+          ),
+        );
+        const ver =
+          typeof version === "number" && Number.isFinite(version) ? version : undefined;
+        return manager.showArtifact(key, bounds, ver);
+      },
     },
     CoworkFilePreview: {
       isEnabled: async () => context.windows.coworkFilePreview.isEnabled(),
@@ -1047,32 +1336,47 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         context.windows.coworkFilePreview.parkAndCapture(bounds),
     },
     CoworkMemory: {
-      readGlobalMemory: async () => memories.get("global") ?? "",
+      // Official rxt residual: on-disk CLAUDE.md + memory/memory/*.md under RB.
+      readGlobalMemory: async () => {
+        await ensureLegacyMemoryMigrated();
+        // Official lze returns null; product bridge treats null as empty string in UI.
+        return (await readCoworkGlobalMemory(coworkMemoryDeps())) ?? null;
+      },
       writeGlobalMemory: async (_event, value) => {
-        memories.set("global", String(value ?? ""));
-        persistMemories();
-        return true;
+        await ensureLegacyMemoryMigrated();
+        return writeCoworkGlobalMemory(coworkMemoryDeps(), String(value ?? ""));
       },
-      // Official ion-dist gt/xt residual: list items are { path, content } (cc989143e Yt uses file.path / file.content).
-      listAccountMemories: async () =>
-        Array.from(memories.entries())
-          .filter(([key]) => key !== "global")
-          .map(([path, content]) => ({ path, content })),
-      readAccountMemory: async (_event, path) => memories.get(String(path)) ?? "",
-      writeAccountMemory: async (_event, path, value) => {
-        memories.set(String(path), String(value ?? ""));
-        persistMemories();
-        return true;
+      // Official yLi / ion-dist gt/xt: list items { path, content } (cc989143e Yt).
+      listAccountMemories: async () => {
+        await ensureLegacyMemoryMigrated();
+        return listCoworkAccountMemories(coworkMemoryDeps());
       },
-      deleteAccountMemory: async (_event, path) => {
-        const deleted = memories.delete(String(path));
-        persistMemories();
-        return deleted;
+      readAccountMemory: async (_event, memoryPath) => {
+        await ensureLegacyMemoryMigrated();
+        const file = await readCoworkAccountMemory(
+          coworkMemoryDeps(),
+          String(memoryPath ?? ""),
+        );
+        return file?.content ?? null;
+      },
+      writeAccountMemory: async (_event, memoryPath, value) => {
+        await ensureLegacyMemoryMigrated();
+        return writeCoworkAccountMemory(
+          coworkMemoryDeps(),
+          String(memoryPath ?? ""),
+          String(value ?? ""),
+        );
+      },
+      deleteAccountMemory: async (_event, memoryPath) => {
+        await ensureLegacyMemoryMigrated();
+        return deleteCoworkAccountMemory(
+          coworkMemoryDeps(),
+          String(memoryPath ?? ""),
+        );
       },
       resetMemories: async () => {
-        memories.clear();
-        persistMemories();
-        return true;
+        await ensureLegacyMemoryMigrated();
+        return resetCoworkMemories(coworkMemoryDeps());
       },
     },
     CoworkRadar: {
@@ -1899,23 +2203,37 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     },
   });
 
+  // Official ClaudeVM.isHostLoopModeEnabled → v4():
+  //   uHA()||neA() ? false
+  //   : devUrlOverride && CLAUDE_FORCE_HOST_LOOP==="1" ? true
+  //   : mZe() // ft("1143815894")
+  // Product: same pure policy as CoworkSessionManager start (kni + env residual).
+  const resolveClaudeVmHostLoopMode = createCoworkHostLoopModeResolver({
+    getForceDisableHostLoop: () =>
+      featureState.getBoolean("vmForceDisableHostLoop", "global", false),
+    getHostLoopFeatureEnabled: () => isCoworkHostLoopGrowthBookFeatureEnabled(),
+    getRequireCoworkFullVmSandbox: () =>
+      resolveCoworkRequireFullVmSandbox({
+        enterpriseValue: isCoworkEnterpriseRequireFullVmSandbox({
+          getUserDataPath: () => app.getPath("userData"),
+        }),
+        preferenceValue: context.settings.getPreferences().requireCoworkFullVmSandbox,
+      }),
+  });
   registerInterfaceSyncHandlers("claude.web", "ClaudeVM", {
-    // Official v4() feature gate 1143815894 is not bridged yet; report disabled
-    // rather than hard-true. Dev force path remains env + override based.
-    isHostLoopModeEnabled: () => {
-      if (featureState.getBoolean("vmForceDisableHostLoop", "global", false)) return false;
-      const forced =
+    isHostLoopModeEnabled: () => resolveClaudeVmHostLoopMode(),
+    // Official dTi: force-disable active while host-loop feature would be on
+    // (not FORCE_HOST_LOOP). Product also surfaces FORCE_HOST_LOOP under
+    // developer override as an explicit on-override diagnostic.
+    isHostLoopDevOverrideActive: () => {
+      const forceHostOn =
         process.env.CLAUDE_FORCE_HOST_LOOP === "1"
         && (globalThis as { isDeveloperApprovedDevUrlOverrideEnabled?: boolean })
           .isDeveloperApprovedDevUrlOverrideEnabled === true;
-      if (forced) return true;
-      const feature = process.env.CLAUDE_HOST_LOOP_FEATURE ?? process.env.CLAUDE_HOST_LOOP_FLAG;
-      return feature === "1" || feature === "true";
+      if (forceHostOn) return true;
+      const forceDisable = featureState.getBoolean("vmForceDisableHostLoop", "global", false);
+      return forceDisable && isCoworkHostLoopGrowthBookFeatureEnabled();
     },
-    isHostLoopDevOverrideActive: () =>
-      process.env.CLAUDE_FORCE_HOST_LOOP === "1"
-      && (globalThis as { isDeveloperApprovedDevUrlOverrideEnabled?: boolean })
-        .isDeveloperApprovedDevUrlOverrideEnabled === true,
   }, "claude.web.ClaudeVM");
   /**
    * Official Launch residual (cadc35a07 P/k + app.asar MCP isEnabled):

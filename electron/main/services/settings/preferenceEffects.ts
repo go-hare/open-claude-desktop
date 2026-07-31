@@ -95,26 +95,15 @@ export type MicrophoneAccessDeps = {
 export async function checkMicrophoneAccessForDictation(
   deps: MicrophoneAccessDeps = {},
 ): Promise<boolean> {
+  // Official Fxe residual — no invent-granted on throw; status must come from OS.
   const getStatus =
     deps.getMediaAccessStatus
-    ?? ((media: "microphone") => {
-      try {
-        return systemPreferences.getMediaAccessStatus(media);
-      } catch {
-        return "granted";
-      }
-    });
+    ?? ((media: "microphone") => systemPreferences.getMediaAccessStatus(media));
   const ask =
     deps.askForMediaAccess
     ?? (async (media: "microphone") => {
-      try {
-        if (process.platform === "darwin") {
-          return await systemPreferences.askForMediaAccess(media);
-        }
-        return true;
-      } catch {
-        return false;
-      }
+      if (process.platform !== "darwin") return true;
+      return systemPreferences.askForMediaAccess(media);
     });
   const openSettings =
     deps.openSystemSettings
@@ -168,16 +157,34 @@ export async function checkMicrophoneAccessForDictation(
     });
 
   const status = getStatus("microphone");
+  // Official Fxe: S.info(`Checking microphone permissions state: ${t}`)
+  // Official has EXACTLY one askForMediaAccess("microphone") call site — here,
+  // only when status === "not-determined". eZt (BEFORE_USE) + uit (HOTKEY) call Fxe.
+  // granted/denied/restricted never re-prompt (no invent second ask path).
+  console.info(`Checking microphone permissions state: ${status}`);
   switch (status) {
     case "denied":
+      console.info(
+        `[Fxe] microphone denied (reason=${reason === DictationMicCheckReason.HOTKEY ? "HOTKEY" : "BEFORE_USE"}) → dialog, no askForMediaAccess`,
+      );
       showDenied();
       return false;
     case "restricted":
+      console.info("[Fxe] microphone restricted → false (no ask)");
       return false;
     case "not-determined":
+      // Official: return await gA.systemPreferences.askForMediaAccess("microphone")
+      // This is the ONLY system permission prompt residual for dictation mic.
+      // Dialog title/process name comes from app.setName + Info.plist CFBundle*.
+      console.info(
+        "[Fxe] microphone not-determined → askForMediaAccess(\"microphone\") (official sole ask site)",
+      );
       return await ask("microphone");
     default:
-      // granted / unknown → allow (official returns true)
+      // Official Fxe: granted / any other → return true (does NOT ask again)
+      console.info(
+        `[Fxe] microphone ${status} → allow without askForMediaAccess (official residual)`,
+      );
       return true;
   }
 }

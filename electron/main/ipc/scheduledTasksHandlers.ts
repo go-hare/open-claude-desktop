@@ -236,13 +236,36 @@ function createChannelScheduledHandlers(
       dispatchScheduledTaskEvent(context, { id: task.id, status: "created", task }, channel);
       return task;
     },
-    removeApprovedPermission: async (_event, id, toolName) =>
-      typeof id === "string" && typeof toolName === "string"
-        ? store.getScheduledTask(id, channel)
-          ? store.removeApprovedPermission(id, toolName)
-          : false
-        : false,
-    clearChromePermissions: async () => true,
+    // Residual jT.removeApprovedPermission(taskId, toolName) → boolean.
+    removeApprovedPermission: async (_event, id, toolName) => {
+      if (typeof id !== "string" || typeof toolName !== "string") return false;
+      if (!store.getScheduledTask(id, channel)) return false;
+      const result = store.removeApprovedPermission(id, toolName);
+      if (result) {
+        const task = store.getScheduledTask(id, channel);
+        dispatchScheduledTaskEvent(
+          context,
+          { id, status: "updated", task: task ?? undefined },
+          channel,
+        );
+      }
+      return result;
+    },
+    // Residual jT.clearChromePermissions(taskId) → boolean (false if already empty).
+    clearChromePermissions: async (_event, id) => {
+      if (typeof id !== "string") return false;
+      if (!store.getScheduledTask(id, channel)) return false;
+      const result = store.clearChromePermissions(id);
+      if (result) {
+        const task = store.getScheduledTask(id, channel);
+        dispatchScheduledTaskEvent(
+          context,
+          { id, status: "updated", task: task ?? undefined },
+          channel,
+        );
+      }
+      return result;
+    },
   };
 }
 

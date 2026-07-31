@@ -1,41 +1,25 @@
 {
-  "source": "@go-hare/claude-code@2.7.16",
+  "source": "@go-hare/claude-code@2.7.19",
   "package": "@go-hare/claude-code",
-  "version": "2.7.16",
+  "version": "2.7.19",
   "binary": "claude",
   "platform": "darwin",
   "arch": "arm64",
-  "size": 95287168,
-  "sha256": "841d9285a9f34844ddef35c3d07e647e8feaa313955ecc06d1701a0b6a5e4470",
-  "versionLabel": "2.7.16 (Claude Code)",
+  "size": 95369248,
+  "sha256": "4f0999ab22380c780a858a2a96e0f02a527476dd4334125c12a865a7e055d95b",
+  "versionLabel": "2.7.19 (Claude Code)",
   "topLevel": {
     "claude": {
       "from": "platforms/darwin-arm64/claude",
-      "size": 95287168,
-      "sha256": "841d9285a9f34844ddef35c3d07e647e8feaa313955ecc06d1701a0b6a5e4470",
-      "version": "2.7.16 (Claude Code)"
+      "size": 95369248,
+      "sha256": "4f0999ab22380c780a858a2a96e0f02a527476dd4334125c12a865a7e055d95b",
+      "version": "2.7.19 (Claude Code)"
     },
     "claude.exe": {
       "from": "platforms/win32-x64/claude.exe",
-      "size": 130763776,
-      "sha256": "938a0649f4a0f20d706b74d1323bc07cf7f89097b25e6e751da14791f150af53",
-      "version": "2.7.16 (Claude Code)"
-    }
-  },
-  "binaries": {
-    "darwin-arm64": {
-      "binary": "claude",
-      "path": "platforms/darwin-arm64/claude",
-      "size": 95826146,
-      "sha256": "790c1dcbcd86aa143887b5b83fb820251ff28d32644916c48a8dcfaa244c4d2d",
-      "version": "2.7.16 (Claude Code)"
-    },
-    "win32-x64": {
-      "binary": "claude.exe",
-      "path": "platforms/win32-x64/claude.exe",
-      "size": 130763776,
-      "sha256": "938a0649f4a0f20d706b74d1323bc07cf7f89097b25e6e751da14791f150af53",
-      "version": "2.7.16 (Claude Code)"
+      "size": 130833408,
+      "sha256": "022d0a1a8bd79f4e5401730b3a50105c95adc1ef8bbbb4a715d5cd21f3998fa4",
+      "version": "2.7.19 (Claude Code)"
     }
   },
   "vendor": {
@@ -44,6 +28,64 @@
       "path": "vendor/ripgrep/arm64-darwin/rg",
       "size": 4520320,
       "mode": "755"
+    }
+  },
+  "binaries": {
+    "darwin-arm64": {
+      "binary": "claude",
+      "path": "platforms/darwin-arm64/claude",
+      "size": 95908706,
+      "sha256": "52ca6a5781a64449cc18a92d72755eafc5b156e21a54d323d20ecfb2e183077d",
+      "version": "2.7.19 (Claude Code)"
+    },
+    "darwin-x64": {
+      "binary": "claude",
+      "path": "platforms/darwin-x64/claude",
+      "size": 101384272,
+      "sha256": "ee2cc0b4da6e03534e4e608940e24d02ea85107ef0d87694ad0947895f011edf",
+      "version": "2.7.19 (Claude Code)"
+    },
+    "linux-x64": {
+      "binary": "claude",
+      "path": "platforms/linux-x64/claude",
+      "size": 126933120,
+      "sha256": "5dd886a01ed32b1c80052d6e006b7a57f5593f5e2a56250a77996f1c2b991c5d",
+      "version": "2.7.19 (Claude Code)"
+    },
+    "linux-arm64": {
+      "binary": "claude",
+      "path": "platforms/linux-arm64/claude",
+      "size": 126003344,
+      "sha256": "ba5fc6fe7bce272d50b3190ac32ec190f65210d34bce06f59e0f95d001c7d72b",
+      "version": "2.7.19 (Claude Code)"
+    },
+    "linux-x64-musl": {
+      "binary": "claude",
+      "path": "platforms/linux-x64-musl/claude",
+      "size": 126933120,
+      "sha256": "4bbdde343a87e82ae0d0b3940179f1ec6144b609a678a824194272f06f608133",
+      "version": "2.7.19 (Claude Code)"
+    },
+    "linux-arm64-musl": {
+      "binary": "claude",
+      "path": "platforms/linux-arm64-musl/claude",
+      "size": 126003344,
+      "sha256": "de06141346d178614d7b8591ffd90ee442afe2f220ce52078c1919969057e5ab",
+      "version": "2.7.19 (Claude Code)"
+    },
+    "win32-x64": {
+      "binary": "claude.exe",
+      "path": "platforms/win32-x64/claude.exe",
+      "size": 130833408,
+      "sha256": "022d0a1a8bd79f4e5401730b3a50105c95adc1ef8bbbb4a715d5cd21f3998fa4",
+      "version": "2.7.19 (Claude Code)"
+    },
+    "win32-arm64": {
+      "binary": "claude.exe",
+      "path": "platforms/win32-arm64/claude.exe",
+      "size": 126937088,
+      "sha256": "8077d26a22baa278c430ebb532189351103784d04a48e91eaff8bcf5e038f877",
+      "version": "2.7.19 (Claude Code)"
     }
   }
 }

@@ -28,6 +28,11 @@ const electronZipDir = (() => {
 if (fs.existsSync(ionDistRoot)) {
   extraResource.push(ionDistRoot);
 }
+// Product open-claude-web build for app:// (packaged). Residual ion-dist stays for audit/align.
+const productWebRoot = path.join(resourcesDir, "product-web");
+if (fs.existsSync(path.join(productWebRoot, "index.html"))) {
+  extraResource.push(productWebRoot);
+}
 if (fs.existsSync(originalRuntimeRoot)) {
   extraResource.push(originalRuntimeRoot);
 }
@@ -69,6 +74,13 @@ for (const screenAsset of [
   if (fs.existsSync(screenPath)) extraResource.push(screenPath);
 }
 
+// Residual-extracted PNG for Electron dock.setIcon. Chromium nativeImage cannot
+// decode official electron.icns (ic07-only → empty); LaunchServices still uses icns.
+const electronAppIconPng = path.join(resourcesDir, "electron-app-icon.png");
+if (fs.existsSync(electronAppIconPng)) {
+  extraResource.push(electronAppIconPng);
+}
+
 // Official Swift Quick Entry i18n residual: Contents/Resources/*.lproj/Localizable.strings
 // Share/screenshot strip ("Quickly share content with Claude", "Send a screenshot of ", …).
 const swiftLprojRoot = path.join(resourcesDir, "swift-lproj");
@@ -88,30 +100,43 @@ module.exports = {
     executableName: "Claudex",
     appBundleId: "com.local.claudex.desktop",
     appCategoryType: "public.app-category.productivity",
+    // Official Claude Desktop Info.plist residual for voice dictation (Swift
+    // LiveSpeechRecognizer + ClaudeAiSpeechSession). Without speech key, macOS
+    // refuses SFSpeech authorization and dictation never opens the mic.
+    // CFBundleIconFile/Name: official residual electron.icns + name "Claude"
+    // (packager also sets icon from resources/electron via packagerConfig.icon).
+    extendInfo: {
+      CFBundleIconFile: "electron.icns",
+      CFBundleIconName: "Claude",
+      NSMicrophoneUsageDescription:
+        "Claude needs access to your microphone for voice dictation.",
+      NSSpeechRecognitionUsageDescription:
+        "Claude needs access to speech recognition for voice dictation.",
+      NSAudioCaptureUsageDescription: "This app needs access to audio capture",
+    },
     asar: true,
     ...(electronZipDir ? { electronZipDir } : {}),
     download: {
       cacheRoot: path.join(root, ".electron-cache"),
     },
-    ignore: [
-      /^\/\.electron-cache(?:\/|$)/,
-      /^\/\.gitignore$/,
-      /^\/\.npm-cache(?:\/|$)/,
-      /^\/\.smoke-user-data(?:[-\/]|$)/,
-      /^\/forge\.config\.cjs$/,
-      /^\/forge\.config\.cjs\.bak-/,
-      /^\/package\.json\.bak-/,
-      /^\/node_modules(?:\/|$)/,
-      /^\/out(?:\/|$)/,
-      /^\/resources(?:\/|$)/,
-      /^\/scripts(?:\/|$)/,
-      /^\/electron(?:\/|$)/,
-      /^\/shared(?:\/|$)/,
-      /^\/package-lock\.json$/,
-      /^\/tsconfig\.json$/,
-      /^\/vite\..*\.config\.ts$/,
-      /^\/README\.md$/,
-    ],
+    // Allowlist only — workspace pollution (.dev-user-data, smoke trees, docs,
+    // vendor, tmp-*.png, residual root index.js, …) must never enter app.asar.
+    // Product entry is package.json "main": ".vite/build/index.pre.js".
+    // Runtime natives are re-injected by align:bundle from
+    // resources/original-runtime-node_modules (mac: into asar; win: asar + keep
+    // extraResource tree for originalRuntimeModules candidates).
+    //
+    // electron-packager ignore(file): return true ⇒ exclude.
+    // file is relative to app dir with leading slash (POSIX even on win).
+    ignore: (file) => {
+      const rel = String(file || "").replace(/\\/g, "/");
+      if (rel === "" || rel === "/") return false;
+      if (rel === "/package.json") return false;
+      // Do NOT pack workspace root index.js — it is a ~12MB residual official
+      // shell dump (not product main). Product main lives under /.vite/build/.
+      if (rel === "/.vite" || rel.startsWith("/.vite/")) return false;
+      return true;
+    },
     icon: iconPath,
     extraResource,
   },
@@ -119,7 +144,7 @@ module.exports = {
   makers: [
     {
       name: "@electron-forge/maker-zip",
-      platforms: ["darwin"],
+      platforms: ["darwin", "win32"],
     },
   ],
 };

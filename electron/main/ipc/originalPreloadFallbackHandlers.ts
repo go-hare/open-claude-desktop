@@ -89,8 +89,9 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
         ccdPlugins: { status: "supported" },
         computerUse: { status: "unavailable" },
         coworkKappa: { status: "unavailable" },
-        coworkArtifacts: { status: "unavailable" },
-        markTaskComplete: { status: "unavailable" },
+        // Host residual wired (list + show/hide / mark_task_complete VUA).
+        coworkArtifacts: { status: "supported" },
+        markTaskComplete: { status: "supported" },
         framebufferPreview: { status: "unavailable" },
         iosSimulator: { status: "unavailable" },
         androidEmulator: { status: "unavailable" },

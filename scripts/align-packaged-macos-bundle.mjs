@@ -4,28 +4,23 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { getProjectRoot, resolveOriginalApp } from "./originalAppPaths.mjs";
+import {
+  OFFICIAL_BUNDLE_ID,
+  PRODUCT_BUNDLE_ID,
+  PRODUCT_NAME,
+  resolvePackagedTargets,
+} from "./packagePaths.mjs";
 
-const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const originalAppCandidates = [
-  process.env.CLAUDE_ORIGINAL_APP,
-  process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.dirname(process.env.CLAUDE_ORIGINAL_APP_CONTENTS) : undefined,
-  path.resolve(projectRoot, "../Claudex.app"),
-  path.resolve(projectRoot, "../../Claudex.app"),
-  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claudex.app",
-  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claudex\\Claudex.app",
-].filter(Boolean);
-const originalApp = originalAppCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAppCandidates[0];
-const packagedApp = path.join(projectRoot, "out/Claudex-darwin-arm64/Claudex.app");
+const projectRoot = getProjectRoot();
+const originalApp = resolveOriginalApp();
+const packagedApp = resolvePackagedTargets({ root: projectRoot, platform: "darwin" }).packagedRoot;
 
 // Product identity — must stay distinct from official Claude Desktop so Dock /
 // TCC / Login Items do not merge this package with com.anthropic.claudefordesktop.
 // align still copies official MacOS/Frameworks/Helpers/Resources for native
 // residual fidelity, but re-stamps Info.plist identity after that copy.
-const PRODUCT_BUNDLE_ID = process.env.CLAUDE_PRODUCT_BUNDLE_ID ?? "com.local.claudex.desktop";
-const PRODUCT_NAME = process.env.CLAUDE_PRODUCT_NAME ?? "Claudex";
 const PRODUCT_DISPLAY_NAME = process.env.CLAUDE_PRODUCT_DISPLAY_NAME ?? PRODUCT_NAME;
-const OFFICIAL_BUNDLE_ID = "com.anthropic.claudefordesktop";
 
 if (process.platform !== "darwin" && !fsSync.existsSync(packagedApp)) {
   console.log(JSON.stringify({
@@ -148,16 +143,59 @@ function reCodesignProductBundle(appPath, bundleId) {
     /* ignore */
   }
   // Outer only — keep Frameworks/Helpers residual signatures intact.
+  // Residual Desktop bag includes device.audio-input (dictation / menubar mic).
+  // Re-sign without --entitlements can drop the bag on some adhoc paths — pin it.
+  const entPath = path.join(projectRoot, ".vite", "packaged-dictation.entitlements");
+  try {
+    fsSync.mkdirSync(path.dirname(entPath), { recursive: true });
+    fsSync.writeFileSync(
+      entPath,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.device.bluetooth</key>
+	<true/>
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.device.print</key>
+	<true/>
+	<key>com.apple.security.device.usb</key>
+	<true/>
+	<key>com.apple.security.personal-information.location</key>
+	<true/>
+	<key>com.apple.security.personal-information.photos-library</key>
+	<true/>
+	<key>com.apple.security.virtualization</key>
+	<true/>
+</dict>
+</plist>
+`,
+      "utf8",
+    );
+  } catch {
+    /* soft — sign without ent file still attempts */
+  }
+  const signArgs = [
+    "--force",
+    "--sign",
+    "-",
+    "--identifier",
+    bundleId,
+  ];
+  if (fsSync.existsSync(entPath)) {
+    signArgs.push("--entitlements", entPath);
+  }
+  signArgs.push(appPath);
   const sign = spawnSync(
     "/usr/bin/codesign",
-    [
-      "--force",
-      "--sign",
-      "-",
-      "--identifier",
-      bundleId,
-      appPath,
-    ],
+    signArgs,
     { encoding: "utf8" },
   );
   if (sign.status !== 0) {
@@ -184,37 +222,18 @@ if (!(await exists(packagedApp))) throw new Error(`packaged app not found: ${pac
 const packagedResources = path.join(packagedApp, "Contents/Resources");
 const tempRoot = await fs.mkdtemp(path.join(projectRoot, ".bundle-align-"));
 const generatedAsar = path.join(tempRoot, "app.asar");
-const stagedAsarRoot = path.join(tempRoot, "asar-root");
-
-async function getRuntimeNodeModulesSource() {
-  const candidates = [
-    path.join(projectRoot, "resources/original-runtime-node_modules/node_modules"),
-    path.join(packagedResources, "original-runtime-node_modules/node_modules"),
-  ];
-  for (const candidate of candidates) {
-    if (await exists(path.join(candidate, "node-pty/package.json"))) return candidate;
-  }
-  throw new Error("missing original runtime node_modules source");
-}
 
 async function rebuildAppAsarWithOriginalRuntime(appAsar) {
-  const runtimeNodeModules = await getRuntimeNodeModulesSource();
-  await fs.rm(stagedAsarRoot, { recursive: true, force: true });
-  await fs.mkdir(stagedAsarRoot, { recursive: true });
-  asar.extractAll(generatedAsar, stagedAsarRoot);
-
-  const targetNodeModules = path.join(stagedAsarRoot, "node_modules");
-  await fs.rm(targetNodeModules, { recursive: true, force: true });
-  execFileSync("/usr/bin/ditto", [runtimeNodeModules, targetNodeModules], { stdio: "pipe" });
-  await fs.chmod(path.join(targetNodeModules, "node-pty/build/Release/spawn-helper"), 0o755);
-
-  await fs.rm(appAsar, { force: true });
-  await fs.rm(`${appAsar}.unpacked`, { recursive: true, force: true });
-  await asar.createPackageWithOptions(stagedAsarRoot, appAsar, {
-    // @electron/asar matches this glob against absolute filenames. Keep the
-    // pattern slash-free so minimatch's matchBase behavior catches native
-    // files regardless of this workspace's localized path.
-    unpack: "{*.node,spawn-helper}",
+  // Prefer the forge asar snapshot saved before residual Resources overwrite.
+  // injectPackagedAsarRuntime reads appAsar path; we first restore generatedAsar.
+  await fs.copyFile(generatedAsar, appAsar);
+  const { injectPackagedAsarRuntime } = await import("./inject-packaged-asar-runtime.mjs");
+  await injectPackagedAsarRuntime({
+    appAsar,
+    projectRoot,
+    packagedResources,
+    // mac: runtime lives inside asar; drop extraResource tree after inject.
+    keepExtraResourceRuntime: false,
   });
 }
 
@@ -231,14 +250,54 @@ try {
     await fs.copyFile(path.join(originalApp, "Contents/embedded.provisionprofile"), path.join(packagedApp, "Contents/embedded.provisionprofile"));
   }
 
+  // Official shell residual hardcodes app:// static root as Resources/ion-dist
+  // (prr(join(Hot(),"ion-dist"))). Product packaged web is open-claude-web —
+  // overwrite packaged ion-dist with resources/product-web after residual copy.
+  // Project resources/ion-dist remains residual for audit:original only.
+  const productWebSource = path.join(projectRoot, "resources/product-web");
+  let productWebInjected = false;
+  if (await exists(path.join(productWebSource, "index.html"))) {
+    const ionDistTarget = path.join(packagedResources, "ion-dist");
+    await fs.rm(ionDistTarget, { recursive: true, force: true });
+    await copyPath(productWebSource, ionDistTarget);
+    productWebInjected = true;
+  } else {
+    throw new Error(
+      `packaged app:// web missing: build product web first (npm run build:product-web). Expected ${productWebSource}/index.html`,
+    );
+  }
+  // Keep product CLI bundle if present under project resources (official residual may lack it).
+  const claudeCodeBinSource = path.join(projectRoot, "resources/claude-code-bin");
+  let claudeCodeBinInjected = false;
+  if (await exists(claudeCodeBinSource)) {
+    const claudeCodeBinTarget = path.join(packagedResources, "claude-code-bin");
+    await fs.rm(claudeCodeBinTarget, { recursive: true, force: true });
+    await copyPath(claudeCodeBinSource, claudeCodeBinTarget);
+    claudeCodeBinInjected = true;
+  }
+
+  // Residual electron.icns is LaunchServices icon; Electron nativeImage cannot decode
+  // this ic07-only file. Re-inject residual-extracted PNG for dock.setIcon after the
+  // official Resources overwrite wiped forge extraResource copies.
+  const electronAppIconPngSource = path.join(projectRoot, "resources/electron-app-icon.png");
+  let electronAppIconPngInjected = false;
+  if (await exists(electronAppIconPngSource)) {
+    await fs.copyFile(
+      electronAppIconPngSource,
+      path.join(packagedResources, "electron-app-icon.png"),
+    );
+    electronAppIconPngInjected = true;
+  }
+
   // The original signature no longer applies after replacing app.asar.
   await fs.rm(path.join(packagedApp, "Contents/_CodeSignature"), { recursive: true, force: true });
   await fs.rm(path.join(packagedApp, "Contents/CodeResources"), { force: true });
 
   const infoPlist = path.join(packagedApp, "Contents/Info.plist");
   const appAsar = path.join(packagedResources, "app.asar");
+  // injectPackagedAsarRuntime already removes original-runtime-node_modules when
+  // keepExtraResourceRuntime=false.
   await rebuildAppAsarWithOriginalRuntime(appAsar);
-  await fs.rm(path.join(packagedResources, "original-runtime-node_modules"), { recursive: true, force: true });
   const headerHash = asarHeaderSha256(appAsar);
   plistBuddy(infoPlist, `Set :ElectronAsarIntegrity:Resources/app.asar:hash ${headerHash}`);
 
@@ -267,6 +326,9 @@ try {
     productDisplayName: PRODUCT_DISPLAY_NAME,
     asarHeaderHash: headerHash,
     codesignIdentity,
+    productWebInjected,
+    claudeCodeBinInjected,
+    electronAppIconPngInjected,
   }, null, 2));
 } finally {
   await fs.rm(tempRoot, { recursive: true, force: true });

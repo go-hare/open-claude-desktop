@@ -6,6 +6,7 @@ import { layoutDesktopViews } from "./layoutChildViews";
 import { installNavigationGuards } from "./navigationPolicy";
 import { normalizeSidebarMode, resolveInitialMainViewUrl } from "./routeMode";
 import { createSecondaryWindowManager } from "./secondaryWindows";
+import { CoworkArtifactViewManager } from "./coworkArtifactViewManager";
 import { CoworkFilePreviewManager } from "./coworkFilePreviewManager";
 import type { DesktopWindowOptions, DesktopWindowParts } from "./types";
 
@@ -44,11 +45,13 @@ function installMainWindowEvents(
   mainView: WebContentsView,
   findInPageView: WebContentsView,
   coworkFilePreview: CoworkFilePreviewManager,
+  coworkArtifacts: CoworkArtifactViewManager,
   options: DesktopWindowOptions,
 ): void {
   const layout = () => {
     layoutDesktopViews(mainWindow, mainView, findInPageView);
     coworkFilePreview.relayout();
+    coworkArtifacts.relayout();
   };
 
   mainWindow.webContents.on("did-finish-load", () => {
@@ -64,14 +67,24 @@ function installMainWindowEvents(
 
   mainWindow.on("resize", layout);
   mainWindow.on("show", layout);
-  mainWindow.on("hide", () => coworkFilePreview.suspend());
-  mainWindow.on("minimize", () => coworkFilePreview.suspend());
-  mainWindow.on("closed", () => coworkFilePreview.destroy());
+  mainWindow.on("hide", () => {
+    coworkFilePreview.suspend();
+    coworkArtifacts.suspend();
+  });
+  mainWindow.on("minimize", () => {
+    coworkFilePreview.suspend();
+    coworkArtifacts.suspend();
+  });
+  mainWindow.on("closed", () => {
+    coworkFilePreview.destroy();
+    coworkArtifacts.destroy();
+  });
   mainWindow.on("focus", () => focusMainView(mainView, options));
   mainView.webContents.on("zoom-changed", () => {
     syncTrafficLightPosition(mainWindow, mainView);
     // Official jkA re-applies zoom-scaled bounds when the main view zoom changes.
     coworkFilePreview.relayout();
+    coworkArtifacts.relayout();
   });
   mainWindow.webContents.on("before-input-event", (event, input) => {
     if (input.meta && input.key.toLowerCase() === "r") {
@@ -88,14 +101,17 @@ export function createDesktopWindow(options: DesktopWindowOptions): DesktopWindo
   const mainView = createMainView(options);
   const findInPageView = createFindInPageView(options);
   const secondaryWindows = createSecondaryWindowManager(mainWindow, options.paths);
-  // Official Nnt(Zl, o6): parent window + main-view zoom provider for jkA bounds.
-  const coworkFilePreview = new CoworkFilePreviewManager(mainWindow, undefined, () => {
+  const zoomFromMainView = () => {
     try {
       return mainView.webContents.isDestroyed() ? 1 : mainView.webContents.getZoomFactor();
     } catch {
       return 1;
     }
-  });
+  };
+  // Official Nnt(Zl, o6): parent window + main-view zoom provider for jkA bounds.
+  const coworkFilePreview = new CoworkFilePreviewManager(mainWindow, undefined, zoomFromMainView);
+  // Official cXe/YD artifact host view residual (same parent + zoom as file preview).
+  const coworkArtifacts = new CoworkArtifactViewManager(mainWindow, undefined, zoomFromMainView);
 
   mainWindow.contentView.addChildView(mainView);
   mainWindow.contentView.addChildView(findInPageView);
@@ -103,6 +119,7 @@ export function createDesktopWindow(options: DesktopWindowOptions): DesktopWindo
   const layout = () => {
     layoutDesktopViews(mainWindow, mainView, findInPageView);
     coworkFilePreview.relayout();
+    coworkArtifacts.relayout();
   };
   layout();
   syncTrafficLightPosition(mainWindow, mainView);
@@ -112,13 +129,15 @@ export function createDesktopWindow(options: DesktopWindowOptions): DesktopWindo
     syncTrafficLightPosition(mainWindow, mainView);
     options.onMainViewDomReady?.(mainView);
   });
-  // Stream paint diagnosis: log Va commit lengths from the renderer every 500ms.
-  const streamDiagInterval = setInterval(() => {
-    if (mainView.webContents.isDestroyed()) {
-      clearInterval(streamDiagInterval);
-      return;
-    }
-    mainView.webContents.executeJavaScript(`
+  // Stream paint diagnosis is debug-only (not residual). Default off — 500ms
+  // executeJavaScript on every mainView is product noise and startup cost.
+  if (process.env.CLAUDE_DESKTOP_STREAM_DIAG === "1") {
+    const streamDiagInterval = setInterval(() => {
+      if (mainView.webContents.isDestroyed()) {
+        clearInterval(streamDiagInterval);
+        return;
+      }
+      mainView.webContents.executeJavaScript(`
       (() => {
         const d = window.__tileVaDiag;
         if (!d || d.length === 0) return null;
@@ -126,11 +145,19 @@ export function createDesktopWindow(options: DesktopWindowOptions): DesktopWindo
         return { count: d.length, lastChars: d[d.length - 1]?.chars ?? 0, times: d.slice(-8).map(x => Math.round(x.t - first)) };
       })()
     `, true).then((result: unknown) => {
-      if (result) console.log("[stream-diag]", JSON.stringify(result));
-    }).catch(() => {});
-  }, 500);
+        if (result) console.log("[stream-diag]", JSON.stringify(result));
+      }).catch(() => {});
+    }, 500);
+  }
   installNavigationGuards(mainView.webContents, mainWindow);
-  installMainWindowEvents(mainWindow, mainView, findInPageView, coworkFilePreview, options);
+  installMainWindowEvents(
+    mainWindow,
+    mainView,
+    findInPageView,
+    coworkFilePreview,
+    coworkArtifacts,
+    options,
+  );
 
   return {
     mainWindow,
@@ -138,12 +165,50 @@ export function createDesktopWindow(options: DesktopWindowOptions): DesktopWindo
     findInPageView,
     secondaryWindows,
     coworkFilePreview,
+    coworkArtifacts,
     layout,
     async loadAll() {
       await mainWindow.loadFile(options.paths.mainWindowHtml);
       const mode = normalizeSidebarMode(options.sidebarMode);
-      await mainView.webContents.loadURL(options.initialMainViewUrl ?? resolveInitialMainViewUrl(options.baseUrl, mode, options.hasRendererConfig));
+      const mainViewUrl =
+        options.initialMainViewUrl
+        ?? resolveInitialMainViewUrl(options.baseUrl, mode, options.hasRendererConfig);
+      // app:// first paint can race protocol.install if activate creates the window
+      // during bootstrap awaits. Retry once after a short delay (ERR_FAILED -2).
+      await loadMainViewUrlWithRetry(mainView.webContents, mainViewUrl);
       await findInPageView.webContents.loadFile(options.paths.findInPageHtml);
     },
   };
+}
+
+function isAppProtocolUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === "app:";
+  } catch {
+    return false;
+  }
+}
+
+function isTransientAppLoadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  // Electron: Error: ERR_FAILED (-2) loading 'app://localhost'
+  return /ERR_FAILED\s*\(-2\)/i.test(message) || /ERR_FAILED/i.test(message);
+}
+
+async function loadMainViewUrlWithRetry(
+  webContents: import("electron").WebContents,
+  url: string,
+): Promise<void> {
+  try {
+    await webContents.loadURL(url);
+    return;
+  } catch (error) {
+    if (!isAppProtocolUrl(url) || !isTransientAppLoadError(error)) throw error;
+    console.warn("[mainView] app:// load failed; retrying once", {
+      url,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await webContents.loadURL(url);
+  }
 }

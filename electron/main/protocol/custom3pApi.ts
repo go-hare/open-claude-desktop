@@ -11,6 +11,10 @@ import {
   resolveDeploymentMode,
   resolveDeploymentModeFromUserData,
 } from "../services/custom3p/deploymentMode";
+import {
+  accountSettingsFilePath,
+  readAccountSettingsFromUserData,
+} from "../services/settings/toolAccessMode";
 
 export type BootstrapPayload = Record<string, unknown> & {
   system_prompts?: unknown;
@@ -75,6 +79,28 @@ function custom3pUnavailable(): Response {
 const DEFAULT_CREATED_AT = "1970-01-01T00:00:00.000Z";
 const DEFAULT_ORG_UUID = "00000000-0000-4000-8000-000000000001";
 const DEFAULT_INSTALL_ID = "00000000-0000-4000-8000-000000000002";
+/** Product residual identity fallback (package.json productName / app.setName). */
+const DEFAULT_PRODUCT_DISPLAY_NAME = "Claudex";
+/**
+ * Prior product display strings that should re-default to Claudex when still
+ * sitting in __account_identity from older builds (not a user-chosen real name).
+ */
+const LEGACY_PRODUCT_DISPLAY_NAMES = new Set([
+  "claude-deepseek",
+  "claude deepseek",
+  "claude_deepseek",
+]);
+
+/** Map missing / legacy product identity → Claudex; keep real user names. */
+function resolveAccountIdentityName(value: unknown): string {
+  if (typeof value !== "string") return DEFAULT_PRODUCT_DISPLAY_NAME;
+  const trimmed = value.trim();
+  if (!trimmed) return DEFAULT_PRODUCT_DISPLAY_NAME;
+  if (LEGACY_PRODUCT_DISPLAY_NAMES.has(trimmed.toLowerCase())) {
+    return DEFAULT_PRODUCT_DISPLAY_NAME;
+  }
+  return trimmed;
+}
 
 const FEATURE_FLAGS: Record<string, unknown> = {
   574905726: { defaultValue: true },
@@ -95,18 +121,25 @@ const FEATURE_FLAGS: Record<string, unknown> = {
   1543157067: { defaultValue: true },
   "4108768567": { defaultValue: true },
   "3070110303": { defaultValue: true },
-  // Product residual named GrowthBook keys used by personal settings (c71860c77 / cc989143e).
-  // Official string keys — present so Discovery / Capabilities arms are usable without inventing Anthropic-only cloud arms.
-  chat_follow_up_chips_main: { defaultValue: true },
-  apps_use_turmeric: { defaultValue: true },
+  // Product residual named GrowthBook keys (c71860c77 Capabilities / cc989143e Claude Code).
+  // Honesty: only invent true for arms the product can honor. Cloud-only / missing residual
+  // arms stay omitted (missing → hide) — same family as notificationRowGates.
+  //
+  // Capabilities Fe:
+  // - tool access (we) → enable_tool_search true (desktop eager/defer wired)
+  // - skills (Ee) → claudeai_skills true (Customize/skills residual)
+  // - inline visualize (C) → flag true but UI still requires connected MCP toolKeys
+  // - Memory Te / CSV / Drive / turmeric → omit (no host memory API / CSV chips / Drive OAuth / turmeric)
   claudeai_skills: { defaultValue: true },
   claudeai_mcp_apps_visualize: { defaultValue: true },
-  claudeai_saffron: { defaultValue: true },
-  melange_enabled_for_chat: { defaultValue: true },
-  claudeai_customize_memory_tab_main: { defaultValue: true },
-  // Official Wt Discovery: only when true (missing → hide). Product residual: on for 3P local connectors.
-  cai_opt_in_connector_suggestions: { defaultValue: true },
-  // Official Claude Code _t / St (cc989143e): Qp missing → hide. Enable for 3P desktop residual.
+  // Official Wt Discovery (cc989143e): cai_opt_in_connector_suggestions true only.
+  // Missing → hide. Do NOT invent true — enabled_connector_suggestions is cloud MCP
+  // directory opt-in (claudeai.mcp.registry.opt_in.*); product has no directory feed consumer.
+  // Official Claude Code _t / St (cc989143e): Qp missing → hide.
+  // Autofix UI: createLocalPr seeds autoFixEnabled from ccr_autofix_on_pr_create.
+  // Auto-archive: CodeAutoArchiveEngine reads ccAutoArchiveOnPrClose.
+  // Auto-create PR on push is remote-only CCR — product has no consumer; UI hides
+  // the settings row (do not invent true for a push→PR pipeline we don't run).
   ccr_autofix_ui: { defaultValue: true },
   ccr_velvet_broom: { defaultValue: true },
   // Classify stays off unless product later opts in (official entitlement; counts toward plan usage).
@@ -311,8 +344,8 @@ function createThirdPartyBootstrap(
           tagged_id: `cowork_3p_${installId}`,
           uuid: installId,
           email_address: "cowork-3p@localhost",
-          full_name: typeof identity.full_name === "string" ? identity.full_name : "Claudex",
-          display_name: typeof identity.display_name === "string" ? identity.display_name : "Claudex",
+          full_name: resolveAccountIdentityName(identity.full_name),
+          display_name: resolveAccountIdentityName(identity.display_name),
           created_at: DEFAULT_CREATED_AT,
           updated_at: DEFAULT_CREATED_AT,
           accepted_clickwrap_versions: {},
@@ -520,6 +553,23 @@ function mcpConfigToDirectoryItems(config: Record<string, unknown>): Array<Recor
   });
 }
 
+/**
+ * Persist custom3p account.settings bag to userData so main-process consumers
+ * (tool_search_mode → MCP eager/defer) survive restarts without inventing cloud APIs.
+ */
+async function persistAccountSettingsToUserData(
+  userDataPath: string,
+  settings: Record<string, unknown>,
+): Promise<void> {
+  try {
+    const file = accountSettingsFilePath(userDataPath);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  } catch (error) {
+    console.warn("[custom3p] account-settings.json write failed", error);
+  }
+}
+
 /** Original `frr(ionDistPath, discoveredRendererConfig)` equivalent for the local third-party desktop mode. */
 export function createCustom3pApiHandler(options: Custom3pApiOptions) {
   const root = path.resolve(options.ionDistRoot);
@@ -528,13 +578,24 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
   /** Serialize account settings writes so concurrent PATCH cannot clobber each other. */
   let accountSettingsWriteChain: Promise<unknown> = Promise.resolve();
 
+  const diskAccountSettings = (): Record<string, unknown> => {
+    if (options.readAccountSettings) return {};
+    const userData = options.getUserDataPath?.();
+    return userData ? readAccountSettingsFromUserData(userData) : {};
+  };
+
   const readAccountSettings = async () => ({
+    ...diskAccountSettings(),
     ...(options.readAccountSettings ? await options.readAccountSettings() : {}),
     ...accountSettings,
   });
   const writeAccountSettings = async (updater: (current: Record<string, unknown>) => Record<string, unknown>) => {
     const run = accountSettingsWriteChain.then(async () => {
       accountSettings = updater(await readAccountSettings());
+      const userData = options.getUserDataPath?.();
+      if (userData) {
+        await persistAccountSettingsToUserData(userData, accountSettings);
+      }
       return accountSettings;
     });
     // Keep chain alive after errors so later writes still serialize.
@@ -544,7 +605,7 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
     );
     return run;
   };
-  const currentBootstrap = async () => getBootstrap(options, accountSettings);
+  const currentBootstrap = async () => getBootstrap(options, await readAccountSettings());
 
   return async function handleCustom3pApi(request: Request): Promise<Response | undefined> {
     const url = new URL(request.url);

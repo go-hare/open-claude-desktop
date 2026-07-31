@@ -29,9 +29,10 @@ const originalAsarCandidates = [
   "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claudex\\Claudex.app\\Contents\\Resources\\app.asar",
 ].filter(Boolean);
 const originalAsarPath = originalAsarCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalAsarCandidates[0];
-const packagedAsarPath = path.join(projectRoot, "out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/app.asar");
+const packagedDarwinArch = process.env.CLAUDE_PACKAGE_ARCH || process.arch;
+const packagedAsarPath = path.join(projectRoot, `out/Claudex-darwin-${packagedDarwinArch}/Claudex.app/Contents/Resources/app.asar`);
 const runtimeModulesRoot = path.join(projectRoot, "resources/original-runtime-node_modules/node_modules");
-const packagedRuntimeUnpackedRoot = path.join(projectRoot, "out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/app.asar.unpacked");
+const packagedRuntimeUnpackedRoot = path.join(projectRoot, `out/Claudex-darwin-${packagedDarwinArch}/Claudex.app/Contents/Resources/app.asar.unpacked`);
 
 const expectedBuildEntries = [
   "build/aboutWindow.js",

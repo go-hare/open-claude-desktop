@@ -46,19 +46,34 @@ describe("preferenceEffects eZt / xn residual", () => {
     expect(ok).toBe(false);
   });
 
-  it("dictation not-determined asks then follows result", async () => {
+  it("dictation not-determined asks then follows result (official sole ask site)", async () => {
+    const askYes = vi.fn(async () => true);
+    const askNo = vi.fn(async () => false);
     expect(
       await checkMicrophoneAccessForDictation({
         getMediaAccessStatus: () => "not-determined",
-        askForMediaAccess: async () => true,
+        askForMediaAccess: askYes,
       }),
     ).toBe(true);
+    expect(askYes).toHaveBeenCalledWith("microphone");
     expect(
       await checkMicrophoneAccessForDictation({
         getMediaAccessStatus: () => "not-determined",
-        askForMediaAccess: async () => false,
+        askForMediaAccess: askNo,
       }),
     ).toBe(false);
+    expect(askNo).toHaveBeenCalledWith("microphone");
+  });
+
+  it("dictation granted never re-asks (official Fxe default branch)", async () => {
+    const ask = vi.fn(async () => false);
+    expect(
+      await checkMicrophoneAccessForDictation({
+        getMediaAccessStatus: () => "granted",
+        askForMediaAccess: ask,
+      }),
+    ).toBe(true);
+    expect(ask).not.toHaveBeenCalled();
   });
 
   it("keepAwake post-write claims", async () => {

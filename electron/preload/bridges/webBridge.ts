@@ -5,7 +5,7 @@ const localSessionInvoke = [
 ];
 
 const localAgentModeSessionInvoke = [
-  "abandonBridgeEnvironment","addFolderToSession","addTrustedFolder","archive","authorizeDirectMcpServer","delete","deleteBridgeAgentMemory","deleteBridgeSession","deleteLocalSkill","disconnectDirectMcpServer","getAll","getBridgeConsent","getDirectMcpServerStatuses","getLocalSkillFiles","getSession","getSessionsBridgeEnabled","getSessionsForScheduledTask","getSupportedCommands","getTranscript","getTranscriptFeedback","getTrustedFolders","interactiveAuth_$store$_getState","isFolderTrusted","kickBridgePoll","listLocalSkills","mcpCallTool","mcpListResources","mcpReadResource","noteCuWindowMentions","openOutputsDir","removeTrustedFolder","replaceEnabledMcpTools","replaceRemoteMcpServers","requestFolderTccAccess","resetBridge","resetBridgeSession","respondBridgePermissionPreflight","respondDirectoryServers","respondPluginSearch","respondSlashMenuSkills","respondToToolPermission","revealLocalSkill","revokeInteractiveAuth","rewind","saveLocalSkill","searchSessions","sendMessage","sessionsBridgeStatus_$store$_getState","setChromePermissionMode","setDraftSessionFolders","setFocusedSession","setLocalSkillEnabled","setMcpServers","setModel","setPermissionMode","setSessionsBridgeEnabled","shareSession","start","stop","submitTranscriptFeedback","syncSkills","triggerInteractiveAuth","updateSession",
+  "abandonBridgeEnvironment","addFolderToSession","addTrustedFolder","archive","authorizeDirectMcpServer","cancelQueuedMessage","delete","deleteBridgeAgentMemory","deleteBridgeSession","deleteLocalSkill","disconnectDirectMcpServer","getAll","getBridgeConsent","getDirectMcpServerStatuses","getLocalSkillFiles","getSession","getSessionsBridgeEnabled","getSessionsForScheduledTask","getSupportedCommands","getTranscript","getTranscriptFeedback","getTrustedFolders","interactiveAuth_$store$_getState","isFolderTrusted","kickBridgePoll","listLocalSkills","mcpCallTool","mcpListResources","mcpReadResource","noteCuWindowMentions","openOutputsDir","removeTrustedFolder","replaceEnabledMcpTools","replaceRemoteMcpServers","requestFolderTccAccess","resetBridge","resetBridgeSession","respondBridgePermissionPreflight","respondDirectoryServers","respondPluginSearch","respondSlashMenuSkills","respondToToolPermission","revealLocalSkill","revokeInteractiveAuth","rewind","saveLocalSkill","searchSessions","sendMessage","sessionsBridgeStatus_$store$_getState","setChromePermissionMode","setDraftSessionFolders","setFocusedSession","setLocalSkillEnabled","setMcpServers","setModel","setPermissionMode","setSessionsBridgeEnabled","shareSession","start","stop","submitTranscriptFeedback","syncSkills","triggerInteractiveAuth","updateSession",
 ];
 
 export const webBridgeSpec: NamespaceBridgeSpec = {
@@ -33,18 +33,21 @@ export const webBridgeSpec: NamespaceBridgeSpec = {
   CCDScheduledTasks: {
     invoke: [
       "getAllScheduledTasks",
+      "getScheduledTask",
       "getScheduledTaskFileContent",
       "updateScheduledTaskFileContent",
       "updateScheduledTaskStatus",
       "updateScheduledTask",
       "createScheduledTask",
       "removeApprovedPermission",
+      "clearChromePermissions",
     ],
     events: ["onScheduledTaskEvent"],
   },
   CoworkScheduledTasks: {
     invoke: [
       "getAllScheduledTasks",
+      "getScheduledTask",
       "getScheduledTaskFileContent",
       "updateScheduledTaskFileContent",
       "updateScheduledTaskStatus",

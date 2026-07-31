@@ -32,6 +32,15 @@ import {
 
 const MAX_FILE_ATTACHMENT_BYTES = 30 * 1024 * 1024;
 const DEFAULT_BASE_URL = "https://claude.ai";
+/**
+ * Official 3p Iai residual (app.asar):
+ *   orgUuidOverride(){ return creds.organizationKey ?? Iai }
+ *   Iai = "00000000-0000-4000-8000-000000000001"
+ * dr() uses orgUuidOverride BEFORE lastActiveOrg cookie. 3p/dotClaude product
+ * bootstrap synthesizes the same DEFAULT_ORG_UUID in custom3pApi.
+ */
+export const OFFICIAL_3P_DEFAULT_ORG_UUID =
+  "00000000-0000-4000-8000-000000000001";
 /** Official d7 residual: org cookie value must look like a UUID. */
 const ORG_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -64,6 +73,13 @@ export type QuickEntryNativeDeps = {
    * When "double-tap-option" (default SSA), wire optionDoubleTapped.
    */
   getQuickEntryShortcut?: () => unknown;
+  /**
+   * Official Ii()/deployment mode residual for or():
+   *   3p Cai getMainWindowUrl → app://localhost
+   *   1p → https://claude.ai
+   * Product also maps dotClaude → 3p shell (same Jb base for PwA).
+   */
+  getDeploymentMode?: () => string | null | undefined;
 };
 
 let wired: ClaudeSwiftAddon | null = null;
@@ -195,15 +211,80 @@ export function applyRecentChatsFromWeb(
   return recentChatsStore;
 }
 
-function resolveBaseUrl(next: QuickEntryNativeDeps | null): string {
+/**
+ * Official or() residual: Ii().getMainWindowUrl().
+ *   3p Cai: always `app://localhost` (const Jb = `${KrA}://localhost`)
+ *   1p Hai: https://claude.ai (or real main window origin)
+ *
+ * Product must NOT use CLAUDE_DESKTOP_MAIN_VIEW_URL (http://localhost:5176) as
+ * dictation base — that is only the dev shell webview host. ClaudeAiSpeechSession
+ * builds `api/ws/speech_to_text/voice_stream` on dictationBaseURL; vite has no
+ * residual for that path. Official 3p PwA always passes app://localhost.
+ */
+export function isThirdPartyDeploymentMode(
+  next: QuickEntryNativeDeps | null = deps,
+): boolean {
+  const mode =
+    typeof next?.getDeploymentMode === "function"
+      ? next.getDeploymentMode()
+      : null;
+  if (mode === "3p" || mode === "dotClaude") return true;
+
+  // Fallback when deps omit mode: synthetic 3p/dotClaude identity.
+  if (!next?.account) return false;
   try {
-    const url = next?.getMainViewWebContents?.()?.getURL?.();
-    if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
-      return new URL(url).origin;
+    const id = next.account.getIdentity();
+    if (id?.organizationUuid === OFFICIAL_3P_DEFAULT_ORG_UUID) return true;
+    if (
+      typeof id?.accountUuid === "string"
+      && id.accountUuid.startsWith("cowork_3p_")
+    ) {
+      return true;
+    }
+    const details = next.account.getAccountDetails();
+    if (
+      details
+      && details.isLoggedOut !== true
+      && typeof details.accountUuid === "string"
+      && details.accountUuid.startsWith("cowork_3p_")
+    ) {
+      return true;
     }
   } catch {
     /* ignore */
   }
+  return false;
+}
+
+export function resolveBaseUrl(next: QuickEntryNativeDeps | null = deps): string {
+  // Official 3p Cai: getMainWindowUrl() → app://localhost (never vite host).
+  if (isThirdPartyDeploymentMode(next)) {
+    return "app://localhost";
+  }
+
+  try {
+    const url = next?.getMainViewWebContents?.()?.getURL?.();
+    if (
+      url
+      && (url.startsWith("http://")
+        || url.startsWith("https://")
+        || url.startsWith("app://"))
+    ) {
+      const origin = new URL(url).origin;
+      // Dev vite host is never official or() for speech credentials.
+      if (
+        origin.startsWith("http://localhost:")
+        || origin.startsWith("http://127.0.0.1:")
+      ) {
+        // 1p unpackaged still uses DEFAULT (claude.ai), not vite.
+      } else {
+        return origin;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
   return DEFAULT_BASE_URL;
 }
 
@@ -213,57 +294,192 @@ function decodeOrgUuid(value: unknown): string | null {
 }
 
 /**
- * Official PwA residual:
- *   org = await dr() (lastActiveOrg cookie, UUID)
- *   base = or() (main window URL)
- *   cookieHeader = session cookies path="/" serialized
+ * Official dr() residual (exact order):
+ *   1. cached ok
+ *   2. Ii().orgUuidOverride()  — 3p: creds.organizationKey ?? Iai
+ *   3. cookies lastActiveOrg on or() URL (d7 UUID decode)
+ *   4. else null
+ *
+ * Product: account identity / bootstrap = orgUuidOverride; cookie path same;
+ * when logged-in without cookie/identity yet, Iai (3p default) so PwA can run
+ * and ClaudeAiSpeechSession is not stuck on "Dictation not configured".
+ */
+export async function resolveDictationOrgUuid(
+  next: QuickEntryNativeDeps | null = deps,
+  baseUrl: string = resolveBaseUrl(next),
+): Promise<string | null> {
+  // (2) orgUuidOverride residual via account identity / bootstrap
+  if (next?.account) {
+    let identity = next.account.getIdentity();
+    if (!identity?.organizationUuid) {
+      try {
+        identity = await next.account.waitForIdentity(1_500);
+      } catch {
+        identity = null;
+      }
+    }
+    const fromIdentity = decodeOrgUuid(identity?.organizationUuid);
+    if (fromIdentity) return fromIdentity;
+  }
+
+  // (3) lastActiveOrg cookie on main-window origin
+  try {
+    const orgCookies = await session.defaultSession.cookies.get({
+      url: baseUrl,
+      name: "lastActiveOrg",
+    });
+    for (const cookie of orgCookies) {
+      const decoded = decodeOrgUuid(cookie.value);
+      if (decoded) return decoded;
+    }
+    // Also scan path="/" cookies in case name filter differs by Electron version
+    const all = await session.defaultSession.cookies.get({ url: baseUrl });
+    for (const cookie of all) {
+      if (cookie.name !== "lastActiveOrg") continue;
+      const decoded = decodeOrgUuid(cookie.value);
+      if (decoded) return decoded;
+    }
+  } catch {
+    /* ignore cookie read */
+  }
+
+  // Official 3p orgUuidOverride never returns null — falls through to Iai.
+  // 1p override is null and relies on cookie; only apply Iai when logged-in
+  // (hit()) so logged-out 1p does not invent org credentials.
+  if (next && isQuickEntryLoggedIn(next.account)) {
+    return OFFICIAL_3P_DEFAULT_ORG_UUID;
+  }
+  return null;
+}
+
+/**
+ * Official PwA residual (app.asar):
+ *   org = await dr() — if !org return
+ *   base = or() (main window URL origin)
+ *   cookieHeader = session.cookies.get({url: base}).filter(path==="/").serialize
  *   nr.api.setCredentials(base, cookieHeader, org)
  *
- * Does not invent credentials when org cookie / api surface missing.
+ * Does not invent multi-host cookie merges. Org resolution matches dr()
+ * (override / cookie / 3p Iai), not cookie-only.
  */
 export async function configureSwiftApiCredentials(
   next: QuickEntryNativeDeps | null = deps,
   nr: ClaudeSwiftAddon | null = getClaudeSwiftAddonCached(),
 ): Promise<boolean> {
-  if (!nr?.api || typeof nr.api.setCredentials !== "function") return false;
+  if (!nr?.api || typeof nr.api.setCredentials !== "function") {
+    console.info("[quickEntryNative] PwA skip: no nr.api.setCredentials");
+    return false;
+  }
   try {
     const baseUrl = resolveBaseUrl(next);
+    const orgUuid = await resolveDictationOrgUuid(next, baseUrl);
+    // Official: if (!e) return; — no org → no setCredentials → Dictation not configured
+    if (!orgUuid) {
+      console.info("[quickEntryNative] PwA skip: dr() org is null (no override/cookie/Iai)");
+      return false;
+    }
     const cookies = await session.defaultSession.cookies.get({ url: baseUrl });
-    const orgCookie = cookies.find((c) => c.name === "lastActiveOrg");
-    const orgUuid = decodeOrgUuid(orgCookie?.value);
-    if (!orgUuid) return false;
     // Official: path === "/" only
     const header = cookies
       .filter((c) => c.path === "/" || c.path === undefined || c.path === "")
       .map((c) => `${c.name}=${c.value}`)
       .join("; ");
     nr.api.setCredentials(baseUrl, header, orgUuid);
+    console.info("[quickEntryNative] PwA setCredentials", {
+      baseUrl,
+      orgUuid,
+      cookieHeaderLen: header.length,
+      cookieCount: cookies.filter((c) => c.path === "/" || !c.path).length,
+    });
     return true;
   } catch (error) {
-    console.warn("[quickEntryNative] setCredentials failed", error);
+    console.error("[quickEntryNative] Failed to configure API credentials:", error);
     return false;
   }
 }
 
 /**
- * Official dit residual: nr.quickAccess.dictation.setLanguage(mappedLocale).
- * Only runs when dictation surface exists — never invents dictation feature support.
+ * Official J9i residual — map app locale → dictation language code.
+ */
+export function mapDictationLanguageCode(locale: string): string {
+  const A = locale.toLowerCase();
+  const t: Record<string, string> = {
+    bg: "bg",
+    ca: "ca",
+    zh: "zh",
+    "zh-cn": "zh",
+    "zh-hans": "zh",
+    "zh-tw": "zh-TW",
+    "zh-hant": "zh-TW",
+    "zh-hk": "zh-HK",
+    cs: "cs",
+    da: "da",
+    "da-dk": "da",
+    nl: "nl",
+    "nl-be": "nl-BE",
+    en: "en",
+    "en-us": "en-US",
+    "en-au": "en-AU",
+    "en-gb": "en-GB",
+    "en-nz": "en-NZ",
+    "en-in": "en-IN",
+    et: "et",
+    fi: "fi",
+    fr: "fr",
+    "fr-ca": "fr",
+    de: "de",
+    "de-ch": "de-CH",
+    el: "el",
+    hi: "hi",
+    hu: "hu",
+    id: "id",
+    it: "it",
+    ja: "ja",
+    ko: "ko",
+    "ko-kr": "ko",
+    lv: "lv",
+    lt: "lt",
+    ms: "ms",
+    no: "no",
+    pl: "pl",
+    pt: "pt",
+    "pt-br": "pt",
+    "pt-pt": "pt",
+    ro: "ro",
+    ru: "ru",
+    sk: "sk",
+    es: "es",
+    "es-419": "es",
+    sv: "sv",
+    "sv-se": "sv",
+    th: "th",
+    "th-th": "th",
+    tr: "tr",
+    uk: "uk",
+    vi: "vi",
+  };
+  if (t[A]) return t[A];
+  const i = A.split("-")[0] ?? "";
+  return t[i] ? t[i] : "en";
+}
+
+/**
+ * Official dit residual:
+ *   if (nr) try { setLanguage(J9i(se().locale)) } catch log
  */
 export function configureSwiftDictationLanguage(
   next: QuickEntryNativeDeps | null = deps,
   nr: ClaudeSwiftAddon | null = getClaudeSwiftAddonCached(),
 ): void {
-  if (!nr?.quickAccess?.dictation || typeof nr.quickAccess.dictation.setLanguage !== "function") {
-    return;
-  }
+  if (!nr) return;
   try {
-    const locale = next?.getLocale?.() ?? null;
+    const setLanguage = nr.quickAccess?.dictation?.setLanguage;
+    if (typeof setLanguage !== "function") return;
+    const locale = next?.getLocale?.();
     if (!locale || typeof locale !== "string") return;
-    // Official J9i maps full tags → short codes; pass base language honestly.
-    const mapped = locale.toLowerCase().split("-")[0] || "en";
-    nr.quickAccess.dictation.setLanguage(mapped);
+    setLanguage.call(nr.quickAccess!.dictation, mapDictationLanguageCode(locale));
   } catch (error) {
-    console.warn("[quickEntryNative] dictation.setLanguage failed", error);
+    console.error("[quickEntryNative] Failed to configure dictation language:", error);
   }
 }
 

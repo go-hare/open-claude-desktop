@@ -176,6 +176,16 @@ export function hasUsableThirdPartyCredentials(
         stringField(enterprise.inferenceFoundryResource)
         || stringField(enterprise.inferenceFoundryApiKey),
       );
+    case "openai":
+      // Product multi-vendor residual (claude-code modelType openai).
+      return Boolean(
+        stringField(enterprise.inferenceOpenAIApiKey)
+        && stringField(enterprise.inferenceOpenAIBaseUrl),
+      );
+    case "gemini":
+      return Boolean(stringField(enterprise.inferenceGeminiApiKey));
+    case "grok":
+      return Boolean(stringField(enterprise.inferenceGrokApiKey));
     default:
       return false;
   }

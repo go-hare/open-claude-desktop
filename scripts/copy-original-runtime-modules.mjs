@@ -2,19 +2,13 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { getProjectRoot, resolveOriginalResources } from "./originalAppPaths.mjs";
 
 const require = createRequire(import.meta.url);
 const asar = require("@electron/asar");
 
-const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const originalResourceCandidates = [
-  process.env.CLAUDE_ORIGINAL_RESOURCES,
-  process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources") : undefined,
-  path.resolve(projectRoot, "../../Claudex.app/Contents/Resources"),
-  String.raw`D:\BaiduNetdiskDownload\Claude code 汉化mac桌面版\Claudex\Claudex.app\Contents\Resources`,
-].filter(Boolean);
-const originalResources = originalResourceCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalResourceCandidates[0];
+const projectRoot = getProjectRoot();
+const originalResources = resolveOriginalResources();
 const originalAsar = path.join(originalResources, "app.asar");
 const originalUnpackedNodeModules = path.join(originalResources, "app.asar.unpacked", "node_modules");
 const localNodeModules = path.join(projectRoot, "node_modules");

@@ -80,6 +80,17 @@ export function normalizeWindowState(
     height: persisted.height ?? fallback.height,
   };
 
+  // Drop LoginRoute jn 600×600 if it was wrongly persisted from a prior session.
+  if (
+    candidate.width === 600
+    && candidate.height === 600
+    && !candidate.isMaximized
+    && !candidate.isFullScreen
+  ) {
+    candidate.width = fallback.width;
+    candidate.height = fallback.height;
+  }
+
   if (hasValidWindowBounds(candidate) && displays.length > 0) {
     const insideAnyDisplay = displays.some((bounds) => isWindowInsideDisplay(candidate, bounds));
     if (!insideAnyDisplay && !candidate.isMaximized && !candidate.isFullScreen) return { ...fallback };
@@ -132,7 +143,26 @@ export function createWindowStateKeeper(options: WindowStateKeeperOptions = {}):
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const bounds = mainWindow.getBounds();
     if (canCaptureBounds(mainWindow)) {
-      state = { ...state, x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+      // LoginRoute jn residual resizes the *same* main window to 600×600.
+      // Do not persist that transient chooser size as the next cold-start shell
+      // (otherwise next launch opens at login size before SPA gate resolves).
+      // Keep position; keep last non-login width/height (or Cbe defaults).
+      const loginSized =
+        bounds.width === 600
+        && bounds.height === 600
+        && !mainWindow.isMaximized()
+        && !mainWindow.isFullScreen();
+      if (loginSized) {
+        state = {
+          ...state,
+          x: bounds.x,
+          y: bounds.y,
+          width: state.width >= 800 ? state.width : fallback.width,
+          height: state.height >= 600 && state.height !== 600 ? state.height : fallback.height,
+        };
+      } else {
+        state = { ...state, x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+      }
     }
     state = {
       ...state,

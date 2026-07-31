@@ -66,6 +66,8 @@ export type LocalSession = {
   trustedFolders?: string[];
   model?: string;
   effort?: string;
+  /** Official D.fastMode residual — per-session fast mode opt-in. */
+  fastMode?: boolean;
   permissionMode?: string;
   sourceBranch?: string;
   useWorktree?: boolean;
@@ -441,6 +443,21 @@ export class LocalSessionStore {
 
   getLiveEvents(id: string): unknown[] {
     return [...(this.liveBuffers.get(id) ?? [])];
+  }
+
+  /**
+   * Official LocalSessionManager.cancelQueuedMessage buffer splice residual:
+   * drop a live-tail user event by outer uuid when it has not been consumed.
+   */
+  removeLiveEventByUuid(id: string, uuid: string): boolean {
+    if (!uuid) return false;
+    const buffer = this.liveBuffers.get(id);
+    if (!buffer || buffer.length === 0) return false;
+    const index = buffer.findIndex((item) => outerEventUuid(item) === uuid);
+    if (index < 0) return false;
+    buffer.splice(index, 1);
+    if (buffer.length === 0) this.liveBuffers.delete(id);
+    return true;
   }
 
   clearLiveBuffer(id: string): void {

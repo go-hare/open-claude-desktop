@@ -60,6 +60,12 @@ export type CoworkApplyMcpServersDecision =
 /**
  * Official applyMcpServersIfIdle gate (pure decision).
  * Caller sets dirty on defer and invokes query.setMcpServers on apply.
+ *
+ * Product tool_search_mode residual (c71860c77 we / S7 sticky):
+ * - "on" (default): keep official Wl busy-defer — load when idle/warm.
+ * - "off" (tools already loaded): when query exists, apply even if busy so
+ *   connector tools land eagerly without waiting for idle grace.
+ * Do not invent cloud tool-search APIs — only gate local setMcpServers timing.
  */
 export function resolveCoworkApplyMcpServersIfIdle(input: {
   hasQuery: boolean;
@@ -67,9 +73,13 @@ export function resolveCoworkApplyMcpServersIfIdle(input: {
   servers: Record<string, unknown>;
   /** Official ft("2800354941") residual. */
   sortKeys?: boolean;
+  /**
+   * tool_search_mode === "off" → true. Eager apply when query is present.
+   */
+  eagerConnectorToolLoad?: boolean;
 }): CoworkApplyMcpServersDecision {
   const busy = isCoworkSessionBusyForMcpApply(input.lifecycleState);
-  if (!input.hasQuery || busy) {
+  if (!input.hasQuery) {
     if (busy) {
       return {
         action: "defer",
@@ -77,6 +87,12 @@ export function resolveCoworkApplyMcpServersIfIdle(input: {
       };
     }
     return { action: "skip_no_query" };
+  }
+  if (busy && !input.eagerConnectorToolLoad) {
+    return {
+      action: "defer",
+      lifecycleState: input.lifecycleState ?? "unknown",
+    };
   }
   return {
     action: "apply",

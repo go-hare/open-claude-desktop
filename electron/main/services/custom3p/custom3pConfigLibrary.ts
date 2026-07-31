@@ -154,6 +154,22 @@ export function custom3pLibraryEntryNoteFromConfig(
       return { provider, note: stringField(bag.inferenceGatewayBaseUrl) };
     case "foundry":
       return { provider, note: stringField(bag.inferenceFoundryResource) };
+    case "openai":
+      return { provider, note: stringField(bag.inferenceOpenAIBaseUrl) };
+    case "gemini":
+      return {
+        provider,
+        note:
+          stringField(bag.inferenceGeminiBaseUrl)
+          ?? (stringField(bag.inferenceGeminiApiKey) ? "Gemini" : undefined),
+      };
+    case "grok":
+      return {
+        provider,
+        note:
+          stringField(bag.inferenceGrokBaseUrl)
+          ?? (stringField(bag.inferenceGrokApiKey) ? "Grok" : undefined),
+      };
     default:
       return { provider, note: undefined };
   }

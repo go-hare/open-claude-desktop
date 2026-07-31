@@ -17,8 +17,16 @@
  *   }
  *   wvi: darwin → pvi; win32/other → null
  *
- * Product does **not** invent a native wake daemon. Without injected API:
- * status stays notFound, schedule/cancel return NO_API error code, install is skipped.
+ * Official boot residual (app.asar):
+ *   F9i().then(() => dvi(wvi(hkA)))
+ *   hkA() = (nr?.wakeScheduler) ?? null   // after Y9i loads @ant/claude-swift
+ *   wvi(hkA) = darwin pvi(getApi=hkA)
+ *   dvi(controller): wU=controller; reconcile(); Rh.on(wakeSchedulerEnabled)
+ *
+ * Product: JS pvi/reconcile residual already present. Native path aligns by
+ * binding `nr.wakeScheduler` into getApi after Swift load (hkA/dvi) — never
+ * invents a daemon when addon omits wakeScheduler or scheduleWake fails
+ * (Nest-only / unpackaged LaunchDaemons → kIOReturnUnsupported is native truth).
  */
 import {
   claimKeepAwake,
@@ -420,8 +428,9 @@ let activeController: WakeSchedulerController | null = null;
 let activeNativeApi: WakeSchedulerNativeApi | null = null;
 
 /**
- * Inject native API (official wU assignment residual). Default remains null.
- * Does not invent a real daemon.
+ * Official inject of native handle used by pvi.getApi.
+ * Product stores the hkA result; controller getApi re-reads this (+ optional live nr).
+ * Does not invent a daemon.
  */
 export function setWakeSchedulerNativeApi(
   api: WakeSchedulerNativeApi | null,
@@ -431,6 +440,93 @@ export function setWakeSchedulerNativeApi(
 
 export function getWakeSchedulerNativeApi(): WakeSchedulerNativeApi | null {
   return activeNativeApi;
+}
+
+/**
+ * Official hkA residual shape check:
+ *   function hkA(){ return (nr?.wakeScheduler) ?? null }
+ * Require `status` function — without it pvi cannot leave notFound honestly.
+ */
+export function resolveHkAWakeSchedulerApi(
+  nr: { wakeScheduler?: unknown } | null | undefined,
+): WakeSchedulerNativeApi | null {
+  const raw = nr?.wakeScheduler;
+  if (!raw || typeof raw !== "object") return null;
+  const candidate = raw as WakeSchedulerNativeApi;
+  if (typeof candidate.status !== "function") return null;
+  return candidate;
+}
+
+export type BindWakeSchedulerAfterSwiftResult = {
+  /** True when nr.wakeScheduler exposed a usable status() handle. */
+  bound: boolean;
+  /** Native/controller status after reconcile, if bound. */
+  status?: string;
+  error?: string;
+};
+
+/**
+ * Official F9i().then(() => dvi(wvi(hkA))) after Y9i / ensureNativeQuickEntry:
+ *   1) hkA → nr.wakeScheduler
+ *   2) set native getApi handle
+ *   3) pvi.reconcile() (install only when pref on + native allows — never invent)
+ *
+ * Unpackaged: official warns LaunchDaemons missing / scheduleWake may be
+ * kIOReturnUnsupported; we still bind so status is native truth not permanent notFound.
+ */
+export async function bindWakeSchedulerAfterSwiftLoad(
+  nr: { wakeScheduler?: unknown } | null | undefined,
+  options: {
+    isPackaged?: boolean;
+    log?: {
+      info?: (...args: unknown[]) => void;
+      warn?: (...args: unknown[]) => void;
+      error?: (...args: unknown[]) => void;
+    };
+  } = {},
+): Promise<BindWakeSchedulerAfterSwiftResult> {
+  const api = resolveHkAWakeSchedulerApi(nr);
+  setWakeSchedulerNativeApi(api);
+  if (!api) {
+    return { bound: false };
+  }
+
+  const log = options.log ?? console;
+  const isPackaged = options.isPackaged ?? false;
+  if (!isPackaged) {
+    log.warn?.(
+      "[wake-scheduler] DEV BUILD — daemon registration will fail. The dev Electron bundle has no Contents/Library/LaunchDaemons/ plist. Detector ticks and PreventSystemSleep assertions still work; XPC scheduleWake returns kIOReturnUnsupported. Use a packaged build (yarn make + personal cert) to test the full flow.",
+    );
+  }
+
+  const controller =
+    activeController
+    ?? ensureWakeSchedulerController({
+      getApi: () => activeNativeApi,
+    });
+  if (!controller) {
+    return { bound: true, error: "no controller (non-darwin)" };
+  }
+
+  try {
+    await controller.reconcile();
+  } catch (error) {
+    log.error?.("[wake-scheduler] initial reconcile failed:", error);
+    return {
+      bound: true,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  try {
+    const status = await controller.status();
+    return { bound: true, status: String(status) };
+  } catch (error) {
+    return {
+      bound: true,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export type EnsureWakeSchedulerOptions = WakeSchedulerControllerDeps & {

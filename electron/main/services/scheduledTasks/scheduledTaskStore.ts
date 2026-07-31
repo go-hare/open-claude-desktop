@@ -39,6 +39,9 @@ export type ScheduledTask = {
   createdAt: string;
   updatedAt: string;
   approvedPermissions?: Array<{ toolName: string }>;
+  /** Residual jT chrome always-allow (clearChromePermissions). */
+  chromeAllowedDomains?: string[];
+  chromePermissionMode?: string;
 };
 
 export function resolveScheduledTaskChannel(task: Pick<ScheduledTask, "channel" | "spaceId">): ScheduledTaskChannel {
@@ -172,6 +175,9 @@ export class ScheduledTaskStore {
       createdAt: timestamp,
       updatedAt: timestamp,
       approvedPermissions: input.approvedPermissions ?? [],
+      // Residual jT chrome always-allow fields (clearChromePermissions).
+      chromePermissionMode: input.chromePermissionMode,
+      chromeAllowedDomains: input.chromeAllowedDomains,
     };
     this.tasks.set(task.id, task);
     this.save();
@@ -251,7 +257,29 @@ export class ScheduledTaskStore {
   removeApprovedPermission(id: string, toolName: string): boolean {
     const task = this.tasks.get(id);
     if (!task) return false;
-    task.approvedPermissions = (task.approvedPermissions ?? []).filter((permission) => permission.toolName !== toolName);
+    const before = task.approvedPermissions ?? [];
+    const next = before.filter((permission) => permission.toolName !== toolName);
+    // Residual: no matching approval → false (do not soft-true on no-op filter).
+    if (next.length === before.length) return false;
+    task.approvedPermissions = next;
+    task.updatedAt = nowIso();
+    this.save();
+    return true;
+  }
+
+  /**
+   * Official clearChromePermissions residual:
+   *   already empty → false
+   *   else chromePermissionMode/chromeAllowedDomains = undefined → persist + true
+   */
+  clearChromePermissions(id: string): boolean {
+    const task = this.tasks.get(id);
+    if (!task) return false;
+    if (task.chromePermissionMode === undefined && task.chromeAllowedDomains === undefined) {
+      return false;
+    }
+    task.chromePermissionMode = undefined;
+    task.chromeAllowedDomains = undefined;
     task.updatedAt = nowIso();
     this.save();
     return true;

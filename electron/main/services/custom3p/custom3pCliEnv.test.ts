@@ -163,6 +163,88 @@ describe("custom3pCliEnv residual", () => {
     });
   });
 
+  it("maps openai / gemini / grok modelType providers without ANTHROPIC_BASE_URL", () => {
+    const openai = buildDesktopCustom3pCliEnv({
+      inferenceProvider: "openai",
+      inferenceOpenAIBaseUrl: "https://api.openai.com/v1",
+      inferenceOpenAIApiKey: "sk-openai",
+      inferenceModels: [{ name: "gpt-4.1" }],
+    });
+    expect(openai).toMatchObject({
+      CLAUDE_CODE_ENTRYPOINT: "claude-desktop-3p",
+      CLAUDE_CODE_USE_OPENAI: "1",
+      OPENAI_BASE_URL: "https://api.openai.com/v1",
+      OPENAI_API_KEY: "sk-openai",
+      OPENAI_MODEL: "gpt-4.1",
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_AUTH_TOKEN: "",
+    });
+    expect(openai).not.toHaveProperty("ANTHROPIC_BASE_URL");
+    expect(openai).not.toHaveProperty("ANTHROPIC_MODEL");
+
+    const gemini = buildDesktopCustom3pCliEnv({
+      inferenceProvider: "gemini",
+      inferenceGeminiApiKey: "gem-key",
+      inferenceGeminiBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      inferenceModels: [{ name: "gemini-2.0-flash" }],
+    });
+    expect(gemini).toMatchObject({
+      CLAUDE_CODE_USE_GEMINI: "1",
+      GEMINI_API_KEY: "gem-key",
+      GEMINI_BASE_URL: "https://generativelanguage.googleapis.com/v1beta",
+      GEMINI_MODEL: "gemini-2.0-flash",
+    });
+    expect(gemini).not.toHaveProperty("ANTHROPIC_BASE_URL");
+
+    const grok = buildDesktopCustom3pCliEnv({
+      inferenceProvider: "grok",
+      inferenceGrokApiKey: "xai-key",
+      inferenceModels: [{ name: "grok-4" }],
+    });
+    expect(grok).toMatchObject({
+      CLAUDE_CODE_USE_GROK: "1",
+      GROK_API_KEY: "xai-key",
+      GROK_MODEL: "grok-4",
+    });
+    expect(grok).not.toHaveProperty("GROK_BASE_URL");
+    expect(grok).not.toHaveProperty("ANTHROPIC_BASE_URL");
+  });
+
+  it("normalizes openai bag fields from configLibrary shape", () => {
+    const enterprise = custom3pEnterpriseConfigFromUnknown({
+      inferenceProvider: "openai",
+      inferenceOpenAIBaseUrl: "https://openrouter.ai/api/v1",
+      inferenceOpenAIApiKey: "sk-or",
+      inferenceModels: [{ name: "openai/gpt-4o" }],
+    });
+    expect(enterprise).toMatchObject({
+      inferenceProvider: "openai",
+      inferenceOpenAIBaseUrl: "https://openrouter.ai/api/v1",
+      inferenceOpenAIApiKey: "sk-or",
+    });
+    expect(enterprise?.inferenceModels?.[0]?.name).toBe("openai/gpt-4o");
+  });
+
+  it("clears stale CLAUDE_CODE_USE_OPENAI before applying gateway bag", () => {
+    const spawnEnv = buildClaudeCliSpawnEnv({
+      processEnv: {
+        PATH: "/usr/bin",
+        CLAUDE_CODE_USE_OPENAI: "1",
+        OPENAI_API_KEY: "stale",
+        OPENAI_BASE_URL: "https://stale.openai",
+      },
+      appliedEnterpriseConfig: {
+        inferenceProvider: "gateway",
+        inferenceGatewayBaseUrl: "https://gw.example",
+        inferenceGatewayApiKey: "sk-gw",
+        inferenceGatewayAuthScheme: "bearer",
+      },
+    });
+    expect(spawnEnv.CLAUDE_CODE_USE_OPENAI).toBeUndefined();
+    expect(spawnEnv.ANTHROPIC_BASE_URL).toBe("https://gw.example");
+    expect(spawnEnv.ANTHROPIC_AUTH_TOKEN).toBe("sk-gw");
+  });
+
   it("serializes custom headers with official SPe shape", () => {
     expect(serializeAnthropicCustomHeaders({ A: "1", B: "2" })).toBe("A: 1|B: 2");
     expect(serializeAnthropicCustomHeaders(undefined)).toBe("");

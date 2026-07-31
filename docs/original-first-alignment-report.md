@@ -1,6 +1,6 @@
 # 原版优先对齐报告
 
-生成时间：2026-07-08T09:27:59.805Z
+生成时间：2026-07-30T05:07:42.507Z
 
 ## 硬标准
 
@@ -12,11 +12,11 @@
 ## 当前检查结论
 
 - ion-dist 字节级一致：是（原版 1555 / 当前 1555）
-- .vite 壳资源一致：是（允许源码入口差异：build/index.js, build/index.pre.js）
+- .vite 壳资源一致：是（允许源码入口差异：无）
 - 字体文件数：72
 - CSS 文件数：21
-- route chunks 有资源：152/152
-- route chunks 有 decompiled 证据：152/152
+- route chunks 有资源：0/0
+- route chunks 有 decompiled 证据：0/0
 - 未授权 UI 依赖：0
 - UI 依赖版本不一致：0
 - 结论：通过
@@ -25,9 +25,7 @@
 
 | route | 原版 chunk | chunk 存在 | decompiled 文件 | decompiled 存在 |
 |---|---|---|---|---|
-| desktop_landing | assets/v1/c71860c77-o4uW2kNW.js | 是 | claude-ion-react-workbench\decompiled\c71860c77-o4uW2kNW\deobfuscated.js | 是 |
-| setup-desktop-3p | assets/v1/c71860c77-BOaDa5w5.js | 是 | claude-ion-react-workbench\decompiled\c71860c77-BOaDa5w5\deobfuscated.js | 是 |
-| device-code-verify | assets/v1/c2ab4f27a-BT9l0ItR.js | 是 | claude-ion-react-workbench\decompiled\c2ab4f27a-BT9l0ItR\deobfuscated.js | 是 |
+
 
 ## 组件库/样式证据
 

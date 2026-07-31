@@ -1,7 +1,9 @@
+import { app } from "electron";
 import { existsSync, mkdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
+import { isCoworkMemoryEnabledFromUserData } from "../settings/toolAccessMode";
 import type { CoworkPermissionBroker } from "./coworkPermissionBroker";
 import { CoworkFileSystemWatcher } from "./coworkFileSystemWatcher";
 import { createCoworkManagerPermissionBroker } from "./coworkSessionManagerFactories";
@@ -72,6 +74,12 @@ import {
   resolveCoworkSetModelChange,
   type CoworkModelConfig,
 } from "./coworkSessionModel";
+import {
+  createCoworkMcpServerResidual,
+  createCoworkRemoteMcpServersResidual,
+  createDefaultRegisterRootsProvider,
+  createDefaultUnregisterRootsProvider,
+} from "./coworkMcpCoordinatorResidual";
 import {
   resolveCoworkReplaceEnabledMcpToolsChange,
   resolveCoworkReplaceRemoteMcpServersChange,
@@ -160,12 +168,12 @@ export class CoworkSessionManager {
   private readonly enablePromptSuggestionGrace: () => boolean;
   /**
    * Official stopSession tail mcpCoordinator.unregisterRootsProvider.
-   * Inject residual — default no-op (no full mcpCoordinator invent).
+   * Product default: CoworkMcpRootsRegistry residual (not soft no-op; not full coordinator invent).
    */
   private readonly unregisterRootsProvider: (sessionId: string) => void;
   /**
    * Official startSession mcpCoordinator.registerRootsProvider(sessionId, getter).
-   * Inject residual — default no-op (no full mcpCoordinator invent).
+   * Product default: CoworkMcpRootsRegistry residual (not soft no-op; not full coordinator invent).
    */
   private readonly registerRootsProvider: (
     sessionId: string,
@@ -178,6 +186,11 @@ export class CoworkSessionManager {
   private readonly getIdleGraceMs: () => number;
   /** Official ft("2800354941") residual for rwA. Default false. */
   private readonly sortMcpServersKeys: () => boolean;
+  /**
+   * tool_search_mode === "off" → eager connector MCP apply.
+   * Default false (official "on" / load when needed).
+   */
+  private readonly isEagerConnectorToolLoad: () => boolean;
   /**
    * Official mcpCoordinator.createRemoteServers inject residual.
    * Default empty map — no full coordinator invent.
@@ -299,18 +312,32 @@ export class CoworkSessionManager {
     // Official ft("1942781881") residual: default off (do not invent product gate on).
     this.enablePromptSuggestionGrace =
       options.enablePromptSuggestionGrace ?? (() => false);
-    // Official stopSession tail mcpCoordinator.unregisterRootsProvider — inject only.
+    // Official stopSession / startSession mcpCoordinator roots injects.
+    // Product default: residual roots registry (not soft no-op, not full coordinator invent).
     this.unregisterRootsProvider =
-      options.unregisterRootsProvider ?? (() => undefined);
-    // Official startSession registerRootsProvider — inject only.
+      options.unregisterRootsProvider ??
+      createDefaultUnregisterRootsProvider();
     this.registerRootsProvider =
-      options.registerRootsProvider ?? (() => undefined);
+      options.registerRootsProvider ?? createDefaultRegisterRootsProvider();
     // Official wr idleGraceMs — Statsig residual default 0.
     this.getIdleGraceMs = options.getIdleGraceMs ?? (() => 0);
     this.sortMcpServersKeys = options.sortMcpServersKeys ?? (() => false);
+    this.isEagerConnectorToolLoad =
+      options.isEagerConnectorToolLoad ?? (() => false);
+    // Official createRemoteServers / createMcpServer inject defaults (residual bag builders).
     this.createRemoteMcpServers =
-      options.createRemoteMcpServers ?? (async () => ({}));
-    this.createMcpServer = options.createMcpServer ?? (async () => null);
+      options.createRemoteMcpServers ??
+      (async (_sessionId, input) =>
+        createCoworkRemoteMcpServersResidual({
+          enabledMcpTools: input.enabledMcpTools as
+            | CoworkEnabledMcpToolsMap
+            | undefined,
+          remoteMcpServers: input.remoteMcpServers,
+        }));
+    this.createMcpServer =
+      options.createMcpServer ??
+      (async (_sessionId, server) =>
+        createCoworkMcpServerResidual(server, null));
     // Official bridge activeSessions.get for control_request interrupt — inject only.
     this.getBridgeActiveSession =
       options.getBridgeActiveSession ?? (() => null);
@@ -396,8 +423,10 @@ export class CoworkSessionManager {
     }
     const existing = this.repository.get(sessionId);
     // Residual index-BELzQL5P start: if e.spaceId → DJe(space) → t1e into systemPrompt.
+    // Official Qt: account.settings.enabled_cowork_memory !== false → start memoryEnabled.
+    // When caller omits memoryEnabled, seed from custom3p account-settings bag.
     const startInfo = this.withResolvedHostLoopMode(
-      this.withSpaceSystemPrompt(info),
+      this.withAccountMemoryEnabled(this.withSpaceSystemPrompt(info)),
       existing,
     );
     if (existing?.lifecycleState === "initializing") {
@@ -493,6 +522,28 @@ export class CoworkSessionManager {
     };
   }
 
+  /**
+   * Official Qt residual → startSession memoryEnabled:
+   * account.settings.enabled_cowork_memory !== false (default ON).
+   * Explicit start payload memoryEnabled wins; otherwise seed from disk bag.
+   */
+  private withAccountMemoryEnabled(
+    info: CoworkStartSessionInput,
+  ): CoworkStartSessionInput {
+    if (info.memoryEnabled !== undefined) return info;
+    let userData: string;
+    try {
+      userData = app.getPath("userData");
+    } catch {
+      userData = process.env.CLAUDE_USER_DATA_DIR || "";
+    }
+    if (!userData) return info;
+    return {
+      ...info,
+      memoryEnabled: isCoworkMemoryEnabledFromUserData(userData),
+    };
+  }
+
   private withResolvedHostLoopMode(
     info: CoworkStartSessionInput,
     existing: CoworkSessionRuntimeState | undefined,
@@ -575,6 +626,68 @@ export class CoworkSessionManager {
       messageUuid,
       _toolStates,
     );
+  }
+
+  /**
+   * Official LocalSessionManager.cancelQueuedMessage residual (app.asar):
+   *   if !query → false
+   *   deferredSends splice by uuid → true
+   *   else inputStream.remove(uuid) → true
+   *   else query.cancelAsyncMessage?.(uuid)
+   *   on success: splice messageBuffer by uuid
+   *
+   * Product: pendingStartMessages (initializing) + CoworkAsyncInputQueue.remove
+   * + optional cancelAsyncMessage; then messageBuffer splice.
+   */
+  async cancelQueuedMessage(sessionId: string, messageUuid: string): Promise<boolean> {
+    const uuid = typeof messageUuid === "string" ? messageUuid.trim() : "";
+    if (!sessionId || !uuid) return false;
+    const session = this.repository.get(sessionId);
+    if (!session) return false;
+
+    let cancelled = false;
+    const pending = session.pendingStartMessages;
+    if (Array.isArray(pending) && pending.length > 0) {
+      const index = pending.findIndex((item) => item.messageUuid === uuid);
+      if (index !== -1) {
+        pending.splice(index, 1);
+        cancelled = true;
+      }
+    }
+
+    if (!cancelled && session.inputStream?.remove) {
+      cancelled = session.inputStream.remove(uuid) === true;
+    }
+
+    if (!cancelled && session.query?.cancelAsyncMessage) {
+      try {
+        cancelled = (await session.query.cancelAsyncMessage(uuid)) === true;
+      } catch (error) {
+        console.warn(
+          `[CoworkSessionManager] cancelAsyncMessage failed for ${sessionId}`,
+          error,
+        );
+        return false;
+      }
+    }
+
+    if (!session.query && !cancelled) {
+      // Official: no active query → false (warn). pendingStart without query
+      // already handled above.
+      return false;
+    }
+
+    if (cancelled && Array.isArray(session.messageBuffer)) {
+      const bufferIndex = session.messageBuffer.findIndex((item) => {
+        if (!item || typeof item !== "object") return false;
+        const record = item as { uuid?: unknown };
+        return record.uuid === uuid;
+      });
+      if (bufferIndex !== -1) session.messageBuffer.splice(bufferIndex, 1);
+      this.saveAndEmitUpdate(session);
+    }
+
+    return cancelled;
   }
 
   /**
@@ -740,6 +853,8 @@ export class CoworkSessionManager {
       lifecycleState: session.lifecycleState,
       servers,
       sortKeys: this.sortMcpServersKeys(),
+      // tool_search_mode "off" → apply even when busy (tools already loaded).
+      eagerConnectorToolLoad: this.isEagerConnectorToolLoad(),
     });
     if (decision.action === "defer") {
       session.mcpServersDirty = true;
@@ -1741,7 +1856,7 @@ export class CoworkSessionManager {
       );
     }
     // Official stopSession tail: this.mcpCoordinator.unregisterRootsProvider(A).
-    // Product inject residual — default no-op (no full mcpCoordinator invent).
+    // Product: residual roots registry unregister (defaultCoworkMcpRootsRegistry).
     try {
       this.unregisterRootsProvider(sessionId);
     } catch (error) {
@@ -1994,6 +2109,10 @@ export class CoworkSessionManager {
       // hasMarkTaskComplete: product default true (Statsig ft residual not product-wired).
       onMarkTaskComplete: (sessionId) => this.markTaskComplete(sessionId),
       hasMarkTaskComplete: true,
+      // Official hasArtifacts / yn residual — local create/update/list_artifact tools.
+      hasArtifacts: options.hasArtifacts !== false,
+      artifactStoreDeps: options.artifactStoreDeps,
+      onArtifactsChanged: options.onArtifactsChanged,
       now: this.now,
       // Official ai.on("queryCompleted") → Ds.showIdle gate, then external inject.
       onQueryCompleted: (sessionId) => {
@@ -2177,7 +2296,7 @@ export class CoworkSessionManager {
    *   if (storage) { uploads = join(storage,"uploads"); await access → push }
    *   return folders;
    * }).
-   * Product inject residual — default no-op (no full mcpCoordinator invent).
+   * Product inject residual — default CoworkMcpRootsRegistry (not soft no-op).
    */
   private registerRootsProviderForSession(sessionId: string): void {
     try {

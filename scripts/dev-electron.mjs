@@ -78,4 +78,29 @@ if (shouldBuild) {
   await runNode([path.join(root, "scripts/build-dev-assets.mjs")], "desktop dev build");
 }
 
+// Residual packaged Claude has device.audio-input + product codesign id.
+// Stock Electron has neither → system menubar mic privacy light diverges.
+// Align BEFORE spawn (cannot re-sign a live main binary). Never touches
+// Downloads residual Claude-Deepseek.app.
+try {
+  const { ensureDevElectronDictationCodesign } = await import(
+    path.join(root, "scripts/ensure-dev-electron-dictation-codesign.mjs")
+  );
+  const codesign = ensureDevElectronDictationCodesign(root);
+  if (codesign.error && !codesign.hasAudioInput) {
+    console.warn(
+      "[dev-electron] dictation codesign residual failed:",
+      codesign.error,
+    );
+  } else if (codesign.signed) {
+    console.info(
+      "[dev-electron] codesign residual: Identifier=%s audio-input=%s",
+      codesign.identifier,
+      codesign.hasAudioInput,
+    );
+  }
+} catch (error) {
+  console.warn("[dev-electron] dictation codesign residual skipped", error);
+}
+
 runElectron();

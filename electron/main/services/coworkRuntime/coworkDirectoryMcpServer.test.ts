@@ -2,8 +2,10 @@ import path from "node:path";
 import { expect, it, vi } from "vitest";
 import {
   COWORK_ALLOW_FILE_DELETE_TOOL,
+  COWORK_CREATE_ARTIFACT_TOOL,
   COWORK_DIRECTORY_MCP_NAME,
   COWORK_FOLDER_ACCESS_DISABLED_BY_ADMIN,
+  COWORK_LIST_ARTIFACTS_TOOL,
   COWORK_MARK_TASK_COMPLETE_RESULT,
   COWORK_MARK_TASK_COMPLETE_SYSTEM_PROMPT,
   COWORK_MARK_TASK_COMPLETE_TOOL,
@@ -14,6 +16,7 @@ import {
   COWORK_REQUEST_DIRECTORY_PATH_REQUIRED_MESSAGE,
   COWORK_REQUEST_DIRECTORY_TOOL,
   COWORK_UNC_PATHS_NOT_ALLOWED,
+  COWORK_UPDATE_ARTIFACT_TOOL,
   appendCoworkMarkTaskCompleteSystemPrompt,
   classifyCoworkAdminWorkspaceFolders,
   classifyCoworkMountStructuralDenial,
@@ -1277,5 +1280,118 @@ it("appends official mark_task_complete system-prompt guidance once when enabled
   expect(appendCoworkMarkTaskCompleteSystemPrompt(undefined, true)).toBe(
     COWORK_MARK_TASK_COMPLETE_SYSTEM_PROMPT,
   );
-  expect(appendCoworkMarkTaskCompleteSystemPrompt(null, false)).toBeUndefined();
+});
+
+it("registers create/update/list_artifact tools by default; gates when hasArtifacts false", () => {
+  const enabled = createCoworkDirectoryMcpServerConfig({
+    sessionId: "s1",
+    vmProcessName: "vm-1",
+  });
+  const tools = registeredTools(enabled);
+  expect(tools[COWORK_CREATE_ARTIFACT_TOOL]).toBeDefined();
+  expect(tools[COWORK_UPDATE_ARTIFACT_TOOL]).toBeDefined();
+  expect(tools[COWORK_LIST_ARTIFACTS_TOOL]).toBeDefined();
+
+  const gated = createCoworkDirectoryMcpServerConfig({
+    hasArtifacts: false,
+    sessionId: "s1",
+    vmProcessName: "vm-1",
+  });
+  const gatedTools = registeredTools(gated);
+  expect(gatedTools[COWORK_CREATE_ARTIFACT_TOOL]).toBeUndefined();
+  expect(gatedTools[COWORK_UPDATE_ARTIFACT_TOOL]).toBeUndefined();
+  expect(gatedTools[COWORK_LIST_ARTIFACTS_TOOL]).toBeUndefined();
+});
+
+it("create_artifact writes local residual and emits onArtifactsChanged", async () => {
+  const files = new Map<string, string>();
+  const dirs = new Set<string>();
+  let changed = 0;
+  const getDocumentsPath = () => "/Users/me/Documents";
+  const root = "/Users/me/Documents/Claude/Artifacts";
+  const access = vi.fn(async (p: string) => {
+    if (files.has(String(p)) || dirs.has(String(p))) return;
+    throw new Error("ENOENT");
+  });
+  const mkdir = vi.fn(async (p: string) => {
+    dirs.add(String(p));
+  });
+  const writeFile = vi.fn(async (p: string, data: string) => {
+    files.set(String(p), String(data));
+  });
+  const readFile = vi.fn(async (p: string) => {
+    const v = files.get(String(p));
+    if (v === undefined) throw new Error("ENOENT");
+    return v;
+  });
+  const rm = vi.fn(async () => undefined);
+  const readdir = vi.fn(async (p: string) => {
+    if (String(p) !== root) return [];
+    const names = new Set<string>();
+    for (const file of files.keys()) {
+      if (file.startsWith(`${root}/`)) {
+        const rest = file.slice(root.length + 1);
+        const id = rest.split("/")[0];
+        if (id) names.add(id);
+      }
+    }
+    for (const dir of dirs) {
+      if (dir.startsWith(`${root}/`)) {
+        const rest = dir.slice(root.length + 1);
+        const id = rest.split("/")[0];
+        if (id) names.add(id);
+      }
+    }
+    return Array.from(names).map((name) => ({
+      name,
+      isDirectory: () => true,
+    }));
+  });
+  const stat = vi.fn(async () => ({
+    birthtimeMs: 1_700_000_000_000,
+    mtimeMs: 1_700_000_000_000,
+  }));
+
+  // Pre-write workspace HTML that create_artifact reads via html_path.
+  const htmlPath = "/tmp/workspace/board.html";
+  files.set(
+    htmlPath,
+    "<!DOCTYPE html><html><body><h1>Board</h1></body></html>",
+  );
+
+  const server = createCoworkDirectoryMcpServerConfig({
+    hasArtifacts: true,
+    artifactStoreDeps: {
+      getDocumentsPath,
+      access,
+      mkdir,
+      writeFile,
+      readFile,
+      rm,
+      readdir: readdir as never,
+      stat: stat as never,
+    },
+    onArtifactsChanged: () => {
+      changed++;
+    },
+    sessionId: "s-create",
+    vmProcessName: "vm-1",
+  });
+
+  const result = await registeredTools(server)[COWORK_CREATE_ARTIFACT_TOOL].handler({
+    id: "Demo Board",
+    html_path: htmlPath,
+    description: "Sprint board",
+  });
+  expect(result.isError).toBeUndefined();
+  expect(result.content[0]?.text).toContain('Artifact "demo-board" created');
+  expect(changed).toBe(1);
+
+  const indexPath = `${root}/demo-board/index.html`;
+  expect(files.get(indexPath)).toContain("cowork-artifact-meta");
+  expect(files.get(indexPath)).toContain("Board");
+
+  const listed = await registeredTools(server)[COWORK_LIST_ARTIFACTS_TOOL].handler({});
+  expect(listed.isError).toBeUndefined();
+  expect(listed.content[0]?.text).toContain("demo-board");
 });

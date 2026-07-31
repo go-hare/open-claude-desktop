@@ -19,7 +19,9 @@
  *       desktopTopBar: Gvi(),                           // always supported
  *       ccdPlugins: OW,                                 // always supported
  *       computerUse: bvi(),                             // darwin|win32
- *       coworkKappa / coworkArtifacts / markTaskComplete: unavailable (sync),
+ *       coworkKappa: unavailable until residual bridges (not product-wired).
+ *       markTaskComplete: SUPPORTED when host-loop VUA + onMarkTaskComplete residual is wired.
+ *       coworkArtifacts: SUPPORTED when host show/list/open residual is wired.
  *       framebufferPreview: mT(() => ft("1928275548") ? supported : unavailable),
  *       iosSimulator / androidEmulator: mT(Fle),        // unpackaged + darwin
  *       grandPrix: Fvi(),                               // darwin + partners map
@@ -33,8 +35,7 @@
  *   - Never invent status:"supported" without residual gate.
  *   - GrowthBook flags outside kni default off → unavailable (ft residual).
  *   - mT(e): packaged → unavailable; else e().
- *   - DoA async upgrades (louderPenguin / kappa / artifacts / markTaskComplete)
- *     stay unavailable until those residual bridges are wired.
+ *   - DoA async upgrades (louderPenguin / kappa) stay unavailable until residual bridges.
  */
 
 import { systemPreferences } from "electron";
@@ -526,10 +527,12 @@ export function resolveSupportedFeatures(
     desktopTopBar: SUPPORTED,
     ccdPlugins: SUPPORTED,
     computerUse: resolveComputerUseFeature(deps),
-    // Sync pw() stubs — DoA may upgrade via GrowthBook after swift load.
+    // Sync pw() stubs — kappa still unbridged (DoA / GrowthBook residual).
     coworkKappa: UNAVAILABLE,
-    coworkArtifacts: UNAVAILABLE,
-    markTaskComplete: UNAVAILABLE,
+    // Host list + cXe/YD show residual wired (featureHandlers + CoworkArtifactViewManager).
+    coworkArtifacts: SUPPORTED,
+    // Host-loop VUA residual: mark_task_complete tool + isAgentCompleted (coworkSessionManager).
+    markTaskComplete: SUPPORTED,
     framebufferPreview,
     iosSimulator: deviceSim,
     androidEmulator: deviceSim,

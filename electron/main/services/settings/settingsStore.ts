@@ -308,8 +308,9 @@ export class SettingsStore {
    *
    * Sync `pw()` map is resolved via `resolveSupportedFeatures` (Dvi/mvi/pHA/…).
    * Product shell surface keys (localSessions, …) are honest process capabilities.
-   * DoA async upgrades (louderPenguin / kappa / artifacts) stay unavailable until
-   * those residual bridges are wired — never invent supported.
+   * DoA async upgrades (louderPenguin / kappa) stay unavailable until residual
+   * bridges are wired — never invent supported. Host Artifacts + markTaskComplete
+   * residual are already product-supported via resolveSupportedFeatures.
    */
   getSupportedFeatures(): Record<string, { status: string; reason?: string; unsupportedCode?: string }> {
     let isPackaged = false;

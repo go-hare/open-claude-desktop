@@ -1200,8 +1200,10 @@ export async function ensureClaudePreviewHostBridge(options: {
 }
 
 /**
- * Build serializable mcpServers entry for Code CLI spawn (`--mcp-config`).
+ * Build serializable bare mcpServers map for Code CLI spawn merge.
  * Official uses non-serializable SDK instance; product CLI uses HTTP bridge.
+ * Caller (`claudeCliRunner.pushCliMcpConfig`) wraps as `{ mcpServers }` for
+ * CLI parseMcpConfig / McpJsonConfigSchema — do not return that wrapper here.
  */
 export async function buildClaudePreviewCliMcpConfig(options: {
   host: ClaudePreviewMcpHost;

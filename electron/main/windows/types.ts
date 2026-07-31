@@ -1,6 +1,7 @@
 import type { BrowserWindow, WebContentsView } from "electron";
 import type { ElectronShellPaths } from "../paths/electronShellPaths";
 import type { SecondaryWindowManager } from "./secondaryWindows";
+import type { CoworkArtifactViewManager } from "./coworkArtifactViewManager";
 import type { CoworkFilePreviewManager } from "./coworkFilePreviewManager";
 
 export type SidebarMode = "chat" | "code" | "task" | "epitaxy";
@@ -56,6 +57,8 @@ export type DesktopWindowParts = {
   findInPageView: WebContentsView;
   secondaryWindows: SecondaryWindowManager;
   coworkFilePreview: CoworkFilePreviewManager;
+  /** Official CoworkArtifacts cXe/YD host view residual. */
+  coworkArtifacts: CoworkArtifactViewManager;
   loadAll: () => Promise<void>;
   layout: () => void;
 };

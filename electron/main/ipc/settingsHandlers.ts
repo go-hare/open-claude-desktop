@@ -61,14 +61,26 @@ import {
 } from "../services/settings/preferenceEffects";
 import { resolveElectronShellPaths } from "../paths/electronShellPaths";
 import {
+  bindWakeSchedulerAfterSwiftLoad,
   ensureWakeSchedulerController,
   getWakeSchedulerStatus,
   openWakeSchedulerSettings,
 } from "../services/settings/wakeScheduler";
 import {
+  isStartupOnLoginEnabled,
+  setStartupOnLoginEnabled,
+} from "../services/settings/startupOnLogin";
+import { getClaudeSwiftAddonCached } from "../services/settings/claudeSwiftAddon";
+import {
   ensureNativeQuickEntry,
   tryActivateNativeQuickEntry,
 } from "../services/settings/quickEntryNative";
+import {
+  applyDictationShortcutPreference,
+  bootDictationHotkeys,
+  ensureCapsLockDictationListener,
+} from "../services/settings/dictationHotkey";
+import type { DictationShortcutValue } from "../services/settings/desktopDialogI18n";
 import type { IpcHandlerContext } from "./context";
 import { originalEventSurface } from "./originalEventSurface";
 import { dispatchBridgeEvent, registerInterfaceSyncHandlers, registerNamespaceHandlers } from "./registerIpc";
@@ -278,6 +290,12 @@ function quickEntryNativeDeps(context: IpcHandlerContext) {
     getMainWindow: () => context.windows.mainWindow,
     getMainViewWebContents: () => context.windows.mainView.webContents,
     account: context.coworkAccount,
+    // Official Ii() residual for or()/PwA: 3p|dotClaude → app://localhost
+    getDeploymentMode: () => {
+      const prefs = context.settings.getPreferences();
+      const mode = prefs.deploymentMode;
+      return typeof mode === "string" && mode.length > 0 ? mode : null;
+    },
     // Official owe residual: gi("quickEntryShortcut")
     getQuickEntryShortcut: () => context.settings.getPreferences().quickEntryShortcut,
     onSubmit: (payload: {
@@ -647,17 +665,10 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
     openQuickEntry: () => activateQuickEntry(context),
   });
   syncMenuBarTray();
-  // Official Y9i residual: load @ant/claude-swift when Dvi says supported.
-  // Fail soft — never invents overlay without real toggle.
-  void ensureNativeQuickEntry(quickEntryNativeDeps(context)).catch((error) => {
-    console.warn("[settingsHandlers] ensureNativeQuickEntry failed", error);
-  });
-  // Product residual: register Electron globalShortcut for Quick Entry.
-  // nativeQuickEntry status follows official Dvi (darwin + macOS 13+).
-  syncQuickEntryShortcutFromPreferences(context);
 
-  // Official wvi/pvi residual: darwin controller only; native API remains null until bridge.
-  // Reconcile is honest no-op without API (never invents install/enabled).
+  // Official wvi/pvi residual: darwin controller first so F9i→dvi bind can
+  // reconcile against real prefs. getApi re-reads activeNativeApi (hkA).
+  // Reconcile before Swift load is honest no-op without API (never invents install).
   const wakeController = ensureWakeSchedulerController({
     platform: process.platform,
     getPreference: (key) => settings.getPreferences()[key],
@@ -677,9 +688,88 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
   });
   if (wakeController) {
     void wakeController.reconcile().catch(() => {
-      /* native API absent → deferred */
+      /* native API absent → deferred until Swift bind */
     });
   }
+
+  // Official Y9i residual: load @ant/claude-swift when Dvi says supported.
+  // Fail soft — never invents overlay without real toggle.
+  // After load: swe() capsLock + F9i().then(() => dvi(wvi(hkA))) wake bind.
+  void ensureNativeQuickEntry(quickEntryNativeDeps(context))
+    .then(async () => {
+      ensureCapsLockDictationListener();
+      // Official hkA = nr?.wakeScheduler; dvi binds + reconcile. Never invents
+      // enabled — Nest-only / unpackaged LaunchDaemons stay native truth.
+      const bindResult = await bindWakeSchedulerAfterSwiftLoad(
+        getClaudeSwiftAddonCached(),
+        { isPackaged: app.isPackaged },
+      );
+      if (bindResult.bound) {
+        console.info(
+          "[settingsHandlers] wakeScheduler native bound status=%s%s",
+          bindResult.status ?? "unknown",
+          bindResult.error ? ` error=${bindResult.error}` : "",
+        );
+      } else {
+        console.info(
+          "[settingsHandlers] wakeScheduler native not exposed (hkA null)",
+        );
+      }
+    })
+    .catch((error) => {
+      console.warn("[settingsHandlers] ensureNativeQuickEntry failed", error);
+    });
+  // Product residual: register Electron globalShortcut for Quick Entry.
+  // nativeQuickEntry status follows official Dvi (darwin + macOS 13+).
+  syncQuickEntryShortcutFromPreferences(context);
+
+  // Official Nme/PR/uit residual for DICTATION slot (custom accelerator + capsLock).
+  // Only when pw().quickEntryDictation.status === "supported".
+  void bootDictationHotkeys({
+    getDictationShortcut: () =>
+      settings.getPreferences().quickEntryDictationShortcut as DictationShortcutValue,
+    setDictationShortcut: (value) => {
+      // Official xn residual on PR failure: write SSA default + emit preferencesChanged.
+      const ok = settings.setPreference("quickEntryDictationShortcut", value);
+      if (ok) {
+        try {
+          dispatchBridgeEvent(
+            context.windows.mainView.webContents,
+            "claude.settings",
+            "AppPreferences",
+            "preferencesChanged",
+            settings.getPreferences(),
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+      return ok;
+    },
+    isDictationFeatureSupported: () => {
+      const features = settings.getSupportedFeatures();
+      return features.quickEntryDictation?.status === "supported";
+    },
+    getLocale: () => {
+      const prefs = settings.getPreferences();
+      return typeof prefs.locale === "string" && prefs.locale.length > 0
+        ? prefs.locale
+        : app.getLocale() || null;
+    },
+    openClaudeSettings: () => {
+      // HOTKEY denied dialog residual: open app settings surface if available.
+      try {
+        const wc = context.windows.mainView.webContents;
+        if (wc && !wc.isDestroyed()) {
+          dispatchBridgeEvent(wc, "claude.settings", "AppPreferences", "openSettingsRequested");
+        }
+      } catch {
+        /* ignore */
+      }
+    },
+  }).catch((error) => {
+    console.warn("[settingsHandlers] bootDictationHotkeys failed", error);
+  });
 
   registerNamespaceHandlers("claude.settings", {
     AppConfig: {
@@ -707,6 +797,12 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         if (key === "quickEntryShortcut") {
           syncQuickEntryShortcutFromPreferences(context, { preferPreference: true });
         }
+        // Official Rh.on("quickEntryDictationShortcut", d) + swe residual.
+        if (key === "quickEntryDictationShortcut") {
+          void applyDictationShortcutPreference(value as DictationShortcutValue).catch((error) => {
+            console.warn("[settingsHandlers] applyDictationShortcutPreference failed", error);
+          });
+        }
         dispatchBridgeEvent(
           mainView,
           "claude.settings",
@@ -718,11 +814,11 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       },
     },
     Startup: {
-      isStartupOnLoginEnabled: async () => app.getLoginItemSettings().openAtLogin,
-      setStartupOnLoginEnabled: async (_event, enabled) => {
-        app.setLoginItemSettings({ openAtLogin: Boolean(enabled) });
-        return app.getLoginItemSettings().openAtLogin === Boolean(enabled);
-      },
+      // Official EKA residual: path=xSe(), openAtLogin||executableWillLaunchAtLogin;
+      // set writes openAtLogin+enabled+path+name (product name Claudex).
+      isStartupOnLoginEnabled: async () => isStartupOnLoginEnabled(),
+      setStartupOnLoginEnabled: async (_event, enabled) =>
+        setStartupOnLoginEnabled(Boolean(enabled)),
       // Official EKA: is → gi; set → xn("menuBarEnabled") which emits Rh → lKA + preferencesChanged.
       isMenuBarEnabled: async () => settings.isMenuBarEnabled(),
       setMenuBarEnabled: async (_event, enabled) => {

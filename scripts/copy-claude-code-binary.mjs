@@ -5,7 +5,7 @@
  *   @go-hare/claude-code-darwin-arm64|darwin-x64|linux-*|win32-*
  *
  * Env:
- *   CLAUDE_CODE_NPM_VERSION   default 2.7.16 (effort xhigh + ultracode + effortLevels)
+ *   CLAUDE_CODE_NPM_VERSION   default 2.7.19
  *   CLAUDE_CODE_BINARY_SOURCE / CLAUDE_CODE_EXECUTABLE  optional override for host binary only
  *   CLAUDE_CODE_SKIP_PLATFORMS=1  only copy host (+ win top-level if available)
  */
@@ -22,7 +22,7 @@ import { pipeline } from "node:stream/promises";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetRoot = path.join(projectRoot, "resources", "claude-code-bin");
-const VERSION = process.env.CLAUDE_CODE_NPM_VERSION || "2.7.16";
+const VERSION = process.env.CLAUDE_CODE_NPM_VERSION || "2.7.19";
 const SKIP_PLATFORMS = process.env.CLAUDE_CODE_SKIP_PLATFORMS === "1";
 
 /** Platform package key → binary file name inside the npm package. */

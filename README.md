@@ -26,24 +26,42 @@ source main process
 - 功能面对齐审计：`../docs/electron-shell-functional-gap.json`
 - 架构文档：`../docs/electron-shell-architecture.md`
 
-## 常用命令
+## 打包 vs 测试（两条加载路线，禁止混用）
+
+| 场景 | 命令 | 主视图 | Web |
+|------|------|--------|-----|
+| **打包** | `npm run package` → `npm run package:open` | `app://localhost` | 打包树 `ion-dist`（open-claude-web） |
+| **测试 / 开发** | `npm run dev` | `http://localhost:5176` | open-claude-web Vite |
+
+| 平台 | 产物 | 可执行 |
+|------|------|--------|
+| macOS | `out/Claudex-darwin-<arch>/Claudex.app` | `Contents/MacOS/Claude` |
+| Windows | `out/Claudex-win32-<arch>/` | `Claudex.exe` |
+
+完整规范见 [`docs/package-and-test.md`](docs/package-and-test.md)（含 Windows 流水线）。
 
 ```bash
-npm run dev            # 开发启动：构建 main/preload，并加载 CLAUDE_DESKTOP_MAIN_VIEW_URL
-npm run build          # 构建主进程并复制原包完整壳资源 + runtime native modules
-npm run audit:shell    # 审计当前 build 与原包壳入口/preload invoke 是否对齐
-npm run package        # 打包 macOS app
-npm run smoke          # 开发态 smoke；捕获 marker 后清理本次进程树
-npm run smoke:packaged # 打包产物 smoke；捕获 marker 后清理本次进程树
-npm run verify:config  # 校验项目配置
-npm run verify:runtime # 校验原包 runtime native modules，并 smoke node-pty
-```
+# 打包（host-native：在对应 OS 上执行）
+# 产品 main + product-web → ion-dist；mac 另叠 residual MacOS/Claude
+npm run package
+npm run package:open                 # mac open .app / win 启动 Claudex.exe
+npm run package:open -- --isolated   # 独立 userData，避免与 dev 单实例锁冲突
+npm run package:open -- --kill-dev   # 先结束本仓库 dev Electron
 
-默认 `npm run dev` 会加载 `http://localhost:5176`。通常从仓库根目录运行 `npm run dev`，让根脚本同时启动 React shell 和 Electron；只调试桌面壳时，可以先自行启动 web，再在本目录运行：
+# 开发 / 测试（终端 1：web，终端 2：壳）
+cd ../open-claude-web && npm run dev   # :5176
+cd open-claude-desktop && npm run dev  # CLAUDE_DESKTOP_MAIN_VIEW_URL=http://localhost:5176
 
-```bash
-set CLAUDE_DESKTOP_MAIN_VIEW_URL=http://localhost:5176
-npm run dev
+# Smoke（隔离 userData）
+npm run smoke              # 开发壳 + http 测试路由
+npm run smoke:packaged     # 打包二进制，不注入 MAIN_VIEW_URL（mac Claude / win Claudex.exe）
+
+# 其它
+npm run build              # 主进程 + 原包壳资源 + runtime
+npm run audit:shell
+npm run verify:config
+npm run verify:runtime
+npm run sync:residual      # 可选：官方 residual → resources/original-claude.app + ion-dist
 ```
 
 ## 当前验证结果
@@ -79,11 +97,20 @@ current runtime native modules complete=true
 packaged runtime native modules complete=true
 ```
 
-打包产物：
+打包产物（host-native）：
 
 ```txt
-out/Claudex-darwin-arm64/Claudex.app
-out/Claudex-win32-x64/Claudex.exe
+# macOS
+out/Claudex-darwin-<arch>/Claudex.app
+  Contents/MacOS/Claude
+  Contents/Resources/ion-dist/     # product web
+  Contents/Resources/app.asar      # product main (chunks fingerprint)
+
+# Windows（在 Windows 主机 npm run package）
+out/Claudex-win32-<arch>/
+  Claudex.exe
+  resources/ion-dist/              # product web（align 注入）
+  resources/claude-code-bin/claude.exe
 ```
 
 packaged smoke 输出：

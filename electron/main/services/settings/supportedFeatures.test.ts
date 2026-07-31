@@ -284,16 +284,19 @@ describe("supportedFeatures pw residual", () => {
     });
   });
 
-  it("sync DoA stubs stay unavailable (never invent kappa/artifacts)", () => {
+  it("sync DoA stubs: kappa unavailable; artifacts + markTaskComplete residual supported", () => {
     const features = resolveSupportedFeatures({
       platform: "darwin",
       macOsMajor: 15,
       isPackaged: false,
       isGrowthBookFeatureOn: () => true,
     });
+    // Kappa has no product residual bridge — never invent supported.
     expect(features.coworkKappa).toEqual({ status: "unavailable" });
-    expect(features.coworkArtifacts).toEqual({ status: "unavailable" });
-    expect(features.markTaskComplete).toEqual({ status: "unavailable" });
+    // Host Artifacts residual (list + show/hide view) is product-supported.
+    expect(features.coworkArtifacts).toEqual({ status: "supported" });
+    // Host-loop VUA mark_task_complete residual is product-supported.
+    expect(features.markTaskComplete).toEqual({ status: "supported" });
   });
 
   it("desktopTopBar / ccdPlugins / chillingSlothLocal always supported", () => {
@@ -328,10 +331,10 @@ describe("SettingsStore.getSupportedFeatures", () => {
     // Official Dvi: must match resolveNativeQuickEntryFeature — never invent beyond Dvi.
     expect(features.nativeQuickEntry?.status).toBe(resolveNativeQuickEntryFeature().status);
 
-    // DoA-only / unbridged stay unavailable.
-    for (const key of ["coworkKappa", "coworkArtifacts", "markTaskComplete"]) {
-      expect(features[key]).toEqual({ status: "unavailable" });
-    }
+    // Kappa unbridged; artifacts + markTaskComplete residual supported.
+    expect(features.coworkKappa).toEqual({ status: "unavailable" });
+    expect(features.coworkArtifacts).toEqual({ status: "supported" });
+    expect(features.markTaskComplete).toEqual({ status: "supported" });
 
     // Full pw key surface present (YK readers can resolve).
     for (const key of [

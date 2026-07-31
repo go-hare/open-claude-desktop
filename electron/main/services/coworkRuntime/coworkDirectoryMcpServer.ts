@@ -4,13 +4,15 @@
  *   allow_cowork_file_delete (LUA)
  *   present_files (bUA)
  *   mark_task_complete (VUA) — gated by hasMarkTaskComplete (official ft flag residual)
- *   artifacts / launch_code_session / skills — residual until product-wired
+ *   create_artifact / update_artifact / list_artifacts (b1 / JUA / KUA → yn residual)
+ *   launch_code_session / skills — residual until product-wired
  *
- * Host-loop product path ships Bm + LUA + bUA + optional VUA with official
- * messages. Dual-exec VM remount rwd, scratchpad promote iJA, HTML artifacts yn
- * store, and full getVMPathContext VM mounts remain residual.
+ * Host-loop product path ships Bm + LUA + bUA + optional VUA + local yn create/list
+ * with official messages. Dual-exec VM remount rwd, scratchpad promote iJA, and full
+ * getVMPathContext VM mounts remain residual. No Anthropic share invent.
  */
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -20,17 +22,35 @@ import {
   normalizeCoworkVmMountPathSegment,
   type CoworkVmPathContext,
 } from "../coworkSessions/coworkVmPathTranslation";
+import {
+  createCoworkArtifactLocal,
+  getCoworkArtifactIndexHtmlPath,
+  isCoworkArtifactSlugTaken,
+  isCoworkMcpToolName,
+  listCoworkArtifactsLocal,
+  readCoworkArtifactHtmlFromPath,
+  slugifyCoworkArtifactId,
+  updateCoworkArtifactLocal,
+  type CoworkArtifactLocalStoreDeps,
+} from "./coworkArtifactLocalStore";
 
 export const COWORK_DIRECTORY_MCP_NAME = "cowork";
 export const COWORK_REQUEST_DIRECTORY_TOOL = "request_cowork_directory";
 export const COWORK_ALLOW_FILE_DELETE_TOOL = "allow_cowork_file_delete";
 export const COWORK_PRESENT_FILES_TOOL = "present_files";
 export const COWORK_MARK_TASK_COMPLETE_TOOL = "mark_task_complete";
-/** Official ql / $7 / UUA / BRA */
+/** Official b1 / JUA / KUA */
+export const COWORK_CREATE_ARTIFACT_TOOL = "create_artifact";
+export const COWORK_UPDATE_ARTIFACT_TOOL = "update_artifact";
+export const COWORK_LIST_ARTIFACTS_TOOL = "list_artifacts";
+/** Official ql / $7 / UUA / BRA / PUA / bni / H2e */
 export const COWORK_REQUEST_DIRECTORY_MCP_TOOL = `mcp__${COWORK_DIRECTORY_MCP_NAME}__${COWORK_REQUEST_DIRECTORY_TOOL}`;
 export const COWORK_ALLOW_FILE_DELETE_MCP_TOOL = `mcp__${COWORK_DIRECTORY_MCP_NAME}__${COWORK_ALLOW_FILE_DELETE_TOOL}`;
 export const COWORK_PRESENT_FILES_MCP_TOOL = `mcp__${COWORK_DIRECTORY_MCP_NAME}__${COWORK_PRESENT_FILES_TOOL}`;
 export const COWORK_MARK_TASK_COMPLETE_MCP_TOOL = `mcp__${COWORK_DIRECTORY_MCP_NAME}__${COWORK_MARK_TASK_COMPLETE_TOOL}`;
+export const COWORK_CREATE_ARTIFACT_MCP_TOOL = `mcp__${COWORK_DIRECTORY_MCP_NAME}__${COWORK_CREATE_ARTIFACT_TOOL}`;
+export const COWORK_UPDATE_ARTIFACT_MCP_TOOL = `mcp__${COWORK_DIRECTORY_MCP_NAME}__${COWORK_UPDATE_ARTIFACT_TOOL}`;
+export const COWORK_LIST_ARTIFACTS_MCP_TOOL = `mcp__${COWORK_DIRECTORY_MCP_NAME}__${COWORK_LIST_ARTIFACTS_TOOL}`;
 
 /** Official canUseTool pre-prompt when path hits session storage (XPA). */
 export const COWORK_REQUEST_DIRECTORY_INTERNAL_PREPROMPT_MESSAGE =
@@ -276,6 +296,19 @@ export type CoworkDirectoryMcpServerOptions = {
    */
   onMarkTaskComplete?: () => void;
   /**
+   * Official hasArtifacts / yn residual. Default true for host-loop product.
+   * When false, create/update/list_artifact tools are not registered.
+   */
+  hasArtifacts?: boolean;
+  /**
+   * Inject local yn store deps (Documents root / FeatureState bag / fs). Optional.
+   */
+  artifactStoreDeps?: CoworkArtifactLocalStoreDeps;
+  /**
+   * Official after yn.create/update — product emits onArtifactsChanged via inject.
+   */
+  onArtifactsChanged?: () => void;
+  /**
    * Official Th() / vi().allowedWorkspaceFolders for P4 admin roots.
    * undefined/null → unrestricted; [] → disabled; non-empty → allowlist.
    * Settings product store residual when unset.
@@ -284,6 +317,16 @@ export type CoworkDirectoryMcpServerOptions = {
   sessionId: string;
   vmProcessName: string;
 };
+
+/** Official create_artifact tool description residual (short host-loop form). */
+export const COWORK_CREATE_ARTIFACT_DESCRIPTION =
+  "Create a persisted HTML artifact that opens in the Cowork sidebar and survives across sessions. Use it when the user will want to look at something again and the underlying data changes: status pages, recurring reports, interactive explorers, or any result you'd otherwise render once as a markdown table in chat that the user might want to re-check later. Not for one-off explanations or static visuals — those belong in the chat reply. Write the complete HTML document to a file in your workspace first (so you can Read it back and verify it), then pass that file's absolute path as html_path. Keep it self-contained: inline all CSS and JS, use data: URLs for images. Design for light mode: include `:root { color-scheme: light }` and use a light background with dark text.";
+
+export const COWORK_UPDATE_ARTIFACT_DESCRIPTION =
+  "Update an existing artifact. Call list_artifacts first to find the artifact id, Read the returned `path` to see the current HTML, write the updated document to a file in your workspace, then pass that file's path as html_path. Same constraints as create_artifact: self-contained HTML, inline all CSS/JS, data: URLs for images.";
+
+export const COWORK_LIST_ARTIFACTS_DESCRIPTION =
+  "List all Cowork artifacts in the local library. Returns each artifact's id, name, path, createdAt, and updatedAt. Read the file at `path` to see the artifact's current HTML. Use this to find the id of an existing artifact before calling update_artifact.";
 
 function errorResult(message: string) {
   return {
@@ -1564,6 +1607,221 @@ export function createCoworkDirectoryMcpServerConfig(
           // Official: e.onMarkTaskComplete(); return Task marked complete.
           options.onMarkTaskComplete?.();
           return textResult(COWORK_MARK_TASK_COMPLETE_RESULT);
+        },
+      ),
+    );
+  }
+
+  // Official b1 / JUA / KUA residual — local yn.create/update/list (host-loop).
+  // Default on; set hasArtifacts:false to hide (feature-gated product residual).
+  const hasArtifacts = options.hasArtifacts !== false;
+  if (hasArtifacts) {
+    const artifactDeps: CoworkArtifactLocalStoreDeps = {
+      ...(options.artifactStoreDeps ?? {}),
+    };
+    const afterArtifactsChange = () => {
+      try {
+        options.onArtifactsChanged?.();
+      } catch {
+        /* ignore */
+      }
+    };
+
+    tools.push(
+      tool(
+        COWORK_CREATE_ARTIFACT_TOOL,
+        COWORK_CREATE_ARTIFACT_DESCRIPTION,
+        {
+          id: z
+            .string()
+            .min(1)
+            .describe(
+              "Kebab-case slug identifying the artifact (e.g. 'sprint-velocity'). Lowercase letters, digits, hyphens, and underscores only.",
+            ),
+          html_path: z
+            .string()
+            .describe(
+              "Absolute path to a file you've already written (with the Write tool) containing the complete self-contained HTML document.",
+            ),
+          description: z
+            .string()
+            .optional()
+            .describe(
+              "Concise summary of what this artifact shows and where its data comes from.",
+            ),
+          mcp_tools: z
+            .array(z.string())
+            .optional()
+            .describe(
+              "Fully-qualified MCP tool names (mcp__<server>__<tool>) your HTML will call via window.cowork.callMcpTool(). Only list tools you actually called this session and whose output shape you verified.",
+            ),
+        },
+        async (args) => {
+          let slug: string;
+          try {
+            slug = slugifyCoworkArtifactId(String(args.id ?? ""));
+          } catch {
+            return errorResult("Artifact id must contain at least one letter or number.");
+          }
+          if (await isCoworkArtifactSlugTaken(slug, artifactDeps)) {
+            return errorResult(
+              `An artifact with id "${slug}" already exists. Use update_artifact to modify it, or choose a different id.`,
+            );
+          }
+          const mcpTools = Array.isArray(args.mcp_tools)
+            ? args.mcp_tools.filter((item): item is string => typeof item === "string")
+            : undefined;
+          if (mcpTools) {
+            const bad = mcpTools.find((item) => !isCoworkMcpToolName(item));
+            if (bad !== undefined) {
+              return errorResult(
+                `mcp_tools entry "${bad}" must be of the form mcp__<server>__<tool>.`,
+              );
+            }
+          }
+          const loaded = await readCoworkArtifactHtmlFromPath(
+            String(args.html_path ?? ""),
+            artifactDeps,
+          );
+          if (!loaded.ok) return errorResult(loaded.error);
+          try {
+            const created = await createCoworkArtifactLocal(
+              slug,
+              loaded.html,
+              {
+                createdBySessionId: options.sessionId,
+                description:
+                  typeof args.description === "string" ? args.description : undefined,
+                mcpTools,
+              },
+              artifactDeps,
+            );
+            afterArtifactsChange();
+            return textResult(`Artifact "${created.id}" created.`);
+          } catch (error) {
+            console.error("[CoworkArtifacts] create_artifact failed", error);
+            return errorResult("Failed to save artifact.");
+          }
+        },
+      ),
+      tool(
+        COWORK_UPDATE_ARTIFACT_TOOL,
+        COWORK_UPDATE_ARTIFACT_DESCRIPTION,
+        {
+          id: z
+            .string()
+            .min(1)
+            .describe("Kebab-case slug of the existing artifact to update."),
+          html_path: z
+            .string()
+            .describe(
+              "Absolute path to a file you've already written (with the Write tool) containing the complete self-contained HTML document.",
+            ),
+          description: z.string().optional().describe("Optional updated description."),
+          mcp_tools: z
+            .array(z.string())
+            .optional()
+            .describe(
+              "Optional fully-qualified MCP tool names (mcp__<server>__<tool>).",
+            ),
+        },
+        async (args) => {
+          let slug: string;
+          try {
+            slug = slugifyCoworkArtifactId(String(args.id ?? ""));
+          } catch {
+            return errorResult("Artifact id must contain at least one letter or number.");
+          }
+          const mcpTools = Array.isArray(args.mcp_tools)
+            ? args.mcp_tools.filter((item): item is string => typeof item === "string")
+            : undefined;
+          if (mcpTools) {
+            const bad = mcpTools.find((item) => !isCoworkMcpToolName(item));
+            if (bad !== undefined) {
+              return errorResult(
+                `mcp_tools entry "${bad}" must be of the form mcp__<server>__<tool>.`,
+              );
+            }
+          }
+          const loaded = await readCoworkArtifactHtmlFromPath(
+            String(args.html_path ?? ""),
+            artifactDeps,
+          );
+          if (!loaded.ok) return errorResult(loaded.error);
+          try {
+            const updated = await updateCoworkArtifactLocal(
+              slug,
+              loaded.html,
+              {
+                updatedBySessionId: options.sessionId,
+                description:
+                  typeof args.description === "string" ? args.description : undefined,
+                mcpTools,
+              },
+              artifactDeps,
+            );
+            afterArtifactsChange();
+            return textResult(`Artifact "${updated.id}" updated.`);
+          } catch (error) {
+            console.error("[CoworkArtifacts] update_artifact failed", error);
+            const message = error instanceof Error ? error.message : "Failed to update artifact.";
+            return errorResult(message.includes("not found") ? message : "Failed to update artifact.");
+          }
+        },
+      ),
+      tool(
+        COWORK_LIST_ARTIFACTS_TOOL,
+        COWORK_LIST_ARTIFACTS_DESCRIPTION,
+        {},
+        async () => {
+          // Official list_artifacts: yn.getAllWithDiskStatus() then drop
+          // ArtifactFolderMissing — bag-first, not raw disk readdir invent.
+          // Product: bag when FeatureState inject present; else disk enum residual.
+          let rows: Array<Record<string, unknown>> = [];
+          const bag = artifactDeps.featureState?.loadMap<Record<string, unknown>>(
+            "artifacts",
+          );
+          if (bag && bag.size >= 0 && artifactDeps.featureState) {
+            for (const row of bag.values()) {
+              const id = String(row.id ?? "");
+              if (!id) continue;
+              const indexPath = getCoworkArtifactIndexHtmlPath(
+                id,
+                artifactDeps.getDocumentsPath,
+              );
+              try {
+                await (artifactDeps.access ?? fs.access)(indexPath);
+                rows.push(row);
+              } catch {
+                // Official filters ArtifactFolderMissing out of list_artifacts.
+              }
+            }
+          } else {
+            rows = await listCoworkArtifactsLocal(artifactDeps);
+          }
+          const mapped = rows.map((row) => {
+            const id = String(row.id);
+            return {
+              id,
+              name: row.name,
+              path: getCoworkArtifactIndexHtmlPath(
+                id,
+                artifactDeps.getDocumentsPath,
+              ),
+              createdAt:
+                typeof row.createdAt === "number"
+                  ? new Date(row.createdAt).toISOString()
+                  : undefined,
+              updatedAt:
+                typeof row.updatedAt === "number"
+                  ? new Date(row.updatedAt).toISOString()
+                  : undefined,
+            };
+          });
+          if (mapped.length === 0) {
+            return textResult("No artifacts found. Use create_artifact to create one.");
+          }
+          return textResult(JSON.stringify(mapped, null, 2));
         },
       ),
     );

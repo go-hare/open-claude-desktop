@@ -101,6 +101,21 @@ function endpointOf(resolution: DeploymentModeResolution): string | null {
   if (typeof e.inferenceGatewayBaseUrl === "string" && e.inferenceGatewayBaseUrl) {
     return e.inferenceGatewayBaseUrl;
   }
+  if (typeof e.inferenceOpenAIBaseUrl === "string" && e.inferenceOpenAIBaseUrl) {
+    return e.inferenceOpenAIBaseUrl;
+  }
+  if (typeof e.inferenceGeminiBaseUrl === "string" && e.inferenceGeminiBaseUrl) {
+    return e.inferenceGeminiBaseUrl;
+  }
+  if (typeof e.inferenceGrokBaseUrl === "string" && e.inferenceGrokBaseUrl) {
+    return e.inferenceGrokBaseUrl;
+  }
+  if (typeof e.inferenceVertexBaseUrl === "string" && e.inferenceVertexBaseUrl) {
+    return e.inferenceVertexBaseUrl;
+  }
+  if (typeof e.inferenceBedrockBaseUrl === "string" && e.inferenceBedrockBaseUrl) {
+    return e.inferenceBedrockBaseUrl;
+  }
   if (typeof e.bootstrapUrl === "string" && e.bootstrapUrl) return e.bootstrapUrl;
   return resolution.mode === "3p" ? "app://localhost" : null;
 }
@@ -116,6 +131,9 @@ function suppliedFromEnterprise(
       key === "inferenceGatewayApiKey"
       || key === "inferenceBedrockBearerToken"
       || key === "inferenceFoundryApiKey"
+      || key === "inferenceOpenAIApiKey"
+      || key === "inferenceGeminiApiKey"
+      || key === "inferenceGrokApiKey"
     ) {
       values[key] = "[set]";
       continue;

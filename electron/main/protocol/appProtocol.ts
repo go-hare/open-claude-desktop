@@ -6,7 +6,16 @@ import { createStaticIonDistHandler } from "./staticIonDist";
 import { installShellCustomProtocolHandlers, registerShellCustomProtocolSchemes } from "./customShellProtocols";
 
 export type AppProtocolOptions = {
+  /**
+   * Primary app:// SPA root (product-web when present).
+   * Historical name: ionDistRoot.
+   */
   ionDistRoot: string;
+  /**
+   * Official residual ion-dist for setup-desktop-3p / device-code-verify.
+   * When omitted, residual routes fall back to ionDistRoot (breaks when primary is product-web).
+   */
+  residualIonDistRoot?: string;
   custom3p?: Omit<Custom3pApiOptions, "ionDistRoot">;
 };
 
@@ -27,9 +36,15 @@ export function registerAppProtocolScheme(): void {
 export function installAppProtocolHandler(options: AppProtocolOptions): void {
   installShellCustomProtocolHandlers();
 
-  const staticHandler = createStaticIonDistHandler({ root: options.ionDistRoot });
+  // Dual-root: product-web primary + official ion-dist residual for Custom3p setup SPA.
+  const staticHandler = createStaticIonDistHandler({
+    root: options.ionDistRoot,
+    residualRoot: options.residualIonDistRoot,
+  });
   const installId = options.custom3p?.installId ?? loadOrCreateCustom3pInstallId({ userDataPath: app.getPath("userData") });
-  const apiHandler = createCustom3pApiHandler({ ionDistRoot: options.ionDistRoot, ...(options.custom3p ?? {}), installId });
+  // i18n under residual ion-dist; prefer residual when product-web is primary.
+  const apiIonRoot = options.residualIonDistRoot ?? options.ionDistRoot;
+  const apiHandler = createCustom3pApiHandler({ ionDistRoot: apiIonRoot, ...(options.custom3p ?? {}), installId });
 
   protocol.handle(APP_PROTOCOL, async (request) => {
     const url = new URL(request.url);

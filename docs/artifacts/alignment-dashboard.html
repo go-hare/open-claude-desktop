@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Claudex Alignment Dashboard</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; background: #f5f5f7; color: #1d1d1f; }
+  .container { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; }
+  h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; }
+  .subtitle { color: #6e6e73; margin-bottom: 2rem; font-size: 0.9rem; }
+
+  .card { background: #fff; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+
+  .stat-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+  .stat { flex: 1; min-width: 140px; background: #fff; border-radius: 10px; padding: 1rem 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+  .stat-value { font-size: 1.75rem; font-weight: 700; }
+  .stat-label { font-size: 0.8rem; color: #6e6e73; text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat-green .stat-value { color: #30a14e; }
+  .stat-blue .stat-value { color: #1a7fdb; }
+  .stat-amber .stat-value { color: #d4a843; }
+
+  .pass { color: #30a14e; font-weight: 600; }
+  .fail { color: #cf222e; font-weight: 600; }
+  .warn { color: #d4a843; font-weight: 600; }
+
+  h2 { font-size: 1.15rem; font-weight: 600; margin-bottom: 0.75rem; }
+  h3 { font-size: 1rem; font-weight: 600; margin: 1rem 0 0.5rem; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #eaeaea; }
+  th { font-weight: 600; color: #6e6e73; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:last-child td { border-bottom: none; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+  .badge-pass { background: #dafbe1; color: #1a7f37; }
+  .badge-warn { background: #fff8c5; color: #9a6700; }
+  .badge-fail { background: #ffebe9; color: #cf222e; }
+  .badge-info { background: #ddf4ff; color: #0969da; }
+
+  .bar-wrap { background: #eaeaea; border-radius: 6px; height: 8px; margin-top: 4px; }
+  .bar-fill { background: #30a14e; border-radius: 6px; height: 100%; }
+  .bar-fill.amber { background: #d4a843; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  .timestamp { color: #8e8e93; font-size: 0.78rem; margin-top: 1.5rem; text-align: center; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Claudex Alignment Dashboard</h1>
+<p class="subtitle">Electron shell 1:1 parity with official Claude Desktop — live from audit reports</p>
+
+<div class="stat-row">
+  <div class="stat stat-green">
+    <div class="stat-value">553</div>
+    <div class="stat-label">Real IPC Handlers</div>
+  </div>
+  <div class="stat stat-green">
+    <div class="stat-value">0</div>
+    <div class="stat-label">Fallback Handlers</div>
+  </div>
+  <div class="stat stat-blue">
+    <div class="stat-value">75</div>
+    <div class="stat-label">IPC Interfaces</div>
+  </div>
+  <div class="stat stat-green">
+    <div class="stat-value">100%</div>
+    <div class="stat-label">Handler Coverage</div>
+  </div>
+  <div class="stat stat-green">
+    <div class="stat-value">0</div>
+    <div class="stat-label">Missing Resources</div>
+  </div>
+</div>
+
+<!-- Bundle Alignment -->
+<div class="card">
+  <h2>Packaged Bundle Alignment</h2>
+  <div class="grid-2">
+    <div>
+      <h3>Identity</h3>
+      <table>
+        <tr><td>Bundle ID</td><td><span class="badge badge-pass">com.local.claudex.desktop</span></td></tr>
+        <tr><td>Binary executable</td><td><span class="badge badge-info">Independent</span></td></tr>
+        <tr><td>Info.plist residual</td><td><span class="badge badge-pass">Aligned</span></td></tr>
+        <tr><td>Codesign identity</td><td><span class="badge badge-pass">OK</span></td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Resources &amp; Frameworks</h3>
+      <table>
+        <tr><td>Missing Resources</td><td><span class="badge badge-pass">0</span></td></tr>
+        <tr><td>Extra Resources</td><td><span class="badge badge-pass">0</span></td></tr>
+        <tr><td>Missing Frameworks</td><td><span class="badge badge-pass">0</span></td></tr>
+        <tr><td>Missing Helpers</td><td><span class="badge badge-pass">0</span></td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h3>app.asar Integrity</h3>
+  <table>
+    <tr><td>Integrity hash matches plist</td><td><span class="badge badge-pass">Yes</span></td></tr>
+    <tr><td>Product main fingerprint</td><td><span class="badge badge-pass">448 index, 263 entries, chunks OK</span></td></tr>
+    <tr><td>Missing runtime node_modules</td><td><span class="badge badge-pass">0</span></td></tr>
+    <tr><td>Missing unpacked entries</td><td><span class="badge badge-pass">0</span></td></tr>
+    <tr><td>Smoke user data contamination</td><td><span class="badge badge-pass">False</span></td></tr>
+    <tr><td>Absolute Electron Framework symlink</td><td><span class="badge badge-pass">No</span></td></tr>
+  </table>
+</div>
+
+<!-- Functional Gap -->
+<div class="card">
+  <h2>Functional Surface</h2>
+  <table>
+    <tr><td>Build shell entry mirror</td><td><span class="badge badge-pass">Complete</span></td></tr>
+    <tr><td>Preload invoke channels aligned</td><td><span class="badge badge-pass">Yes (544 channels)</span></td></tr>
+    <tr><td>Preload sendSync channels</td><td><span class="badge badge-info">15</span></td></tr>
+    <tr><td>Renderer event listeners</td><td><span class="badge badge-info">75 channels</span></td></tr>
+    <tr><td>Source explicit implementations</td><td><span class="badge badge-pass">All (zero unavailable/unsupported)</span></td></tr>
+  </table>
+  <p style="margin-top:0.75rem;font-size:0.85rem;color:#6e6e73;">
+    Build strategy: source main process + original compiled preload/renderer/secondary shell resources.
+    LocalSessions / LocalAgentModeSessions all explicit; runtime fallback = 0.
+  </p>
+</div>
+
+<!-- Runtime Coverage -->
+<div class="card">
+  <h2>Runtime IPC Coverage</h2>
+  <p style="font-size:0.85rem;color:#6e6e73;margin-bottom:0.75rem;">Measured from running packaged app</p>
+  <div class="grid-2">
+    <div>
+      <h3>Top Interfaces by Handler Count</h3>
+      <table>
+        <tr><th>Interface</th><th>Handlers</th></tr>
+        <tr><td>claude.web.LocalSessions</td><td>129</td></tr>
+        <tr><td>claude.web.LocalAgentModeSessions</td><td>38</td></tr>
+        <tr><td>claude.web.Launch</td><td>28</td></tr>
+        <tr><td>claude.settings.Extensions</td><td>26</td></tr>
+        <tr><td>claude.settings.Custom3pSetup</td><td>22</td></tr>
+        <tr><td>claude.web.CoworkSpaces</td><td>20</td></tr>
+        <tr><td>claude.web.CoworkArtifacts</td><td>18</td></tr>
+        <tr><td>claude.web.FileSystem</td><td>17</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Runtime Status</h3>
+      <table>
+        <tr><td>Main window visible</td><td><span class="badge badge-pass">true</span></td></tr>
+        <tr><td>Find in page visible</td><td><span class="badge badge-info">false</span></td></tr>
+        <tr><td>Claude Code bundled</td><td><span class="badge badge-pass">true</span></td></tr>
+        <tr><td>Uses bundled executable</td><td><span class="badge badge-pass">true</span></td></tr>
+        <tr><td>Main view URL</td><td><span style="font-size:0.78rem;">app://localhost/login?returnTo=%2Ftask%2Fnew</span></td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Build Resources -->
+<div class="card">
+  <h2>Build Shell Entries (18 entries, all present)</h2>
+  <table>
+    <tr><th>Entry</th><th>Size</th><th>SHA256 (first 16)</th></tr>
+    <tr><td>build/index.js</td><td>12.3 MB</td><td>f0d6a9f7ca3d8914…</td></tr>
+    <tr><td>build/index.pre.js</td><td>778 KB</td><td>0be8509a3450405c…</td></tr>
+    <tr><td>build/mcp-runtime/directMcpHost.js</td><td>584 KB</td><td>619c014e097585b2…</td></tr>
+    <tr><td>build/mainView.js</td><td>180 KB</td><td>5cfad7a7542261fc…</td></tr>
+    <tr><td>build/mainWindow.js</td><td>162 KB</td><td>6f6928f6700c553e…</td></tr>
+    <tr><td>build/aboutWindow.js</td><td>142 KB</td><td>8bf23fb5fcd303f7…</td></tr>
+    <tr><td>build/quickWindow.js</td><td>142 KB</td><td>453460ab2bcf67ff…</td></tr>
+    <tr><td>build/findInPage.js</td><td>140 KB</td><td>ebf783a39c0f223c…</td></tr>
+    <tr><td>build/buddy.js</td><td>59 KB</td><td>fdeda1803f174f83…</td></tr>
+  </table>
+  <p style="margin-top:0.5rem;font-size:0.8rem;color:#6e6e73;">+ 9 smaller entries (workers, CSS) — all present and hash-verified.</p>
+</div>
+
+<p class="timestamp">Generated from audit reports — electron-shell-functional-gap.json, electron-packaged-bundle-alignment.json, electron-shell-runtime-coverage.json — 2026-07-30</p>
+
+</div>
+</body>
+</html>

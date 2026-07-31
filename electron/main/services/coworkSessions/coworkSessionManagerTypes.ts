@@ -4,6 +4,7 @@ import type {
   CoworkAccountDetails,
   CoworkAccountIdentity,
 } from "../coworkAccount/coworkAccountContext";
+import type { CoworkArtifactLocalStoreDeps } from "../coworkRuntime/coworkArtifactLocalStore";
 import type { CoworkModelConfig } from "./coworkSessionModel";
 import type {
   CoworkPermissionEvent,
@@ -257,6 +258,19 @@ export type CoworkSessionManagerOptions = {
   homePath?: string;
   now?: () => number;
   onQueryCompleted?: (sessionId: string) => void;
+  /**
+   * Official hasArtifacts / yn residual for directory MCP create/update/list tools.
+   * Default true when unset.
+   */
+  hasArtifacts?: boolean;
+  /**
+   * Local yn store inject (Documents root). Disk is source of truth; bag optional.
+   */
+  artifactStoreDeps?: CoworkArtifactLocalStoreDeps;
+  /**
+   * Official after yn.create/update — emit CoworkArtifacts.onArtifactsChanged residual.
+   */
+  onArtifactsChanged?: () => void;
   permissionBroker?: Omit<CoworkPermissionBrokerOptions, "emit">;
   /**
    * Official P4 native folder picker for mcp__cowork__request_cowork_directory
@@ -372,6 +386,12 @@ export type CoworkSessionManagerOptions = {
    * Default false (identity).
    */
   sortMcpServersKeys?: () => boolean;
+  /**
+   * Product tool_search_mode residual (c71860c77 we / S7):
+   * true when account.settings.tool_search_mode === "off" ("Tools already loaded").
+   * Eager setMcpServers even while session is busy; default false (defer / load when needed).
+   */
+  isEagerConnectorToolLoad?: () => boolean;
   /**
    * Official mcpCoordinator.createRemoteServers residual inject for
    * replaceRemoteMcpServers query branch. Default {}.

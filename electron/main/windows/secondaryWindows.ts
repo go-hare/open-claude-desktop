@@ -1,5 +1,6 @@
 import { BrowserWindow, app, screen } from "electron";
 import type { ElectronShellPaths } from "../paths/electronShellPaths";
+import { resolveOfficialAppIconPath } from "../services/settings/officialAppIcon";
 
 export type SecondaryWindowName = "about" | "quick" | "buddy";
 
@@ -78,6 +79,7 @@ function focusAppForPanel(): void {
 
 export function createSecondaryWindowManager(mainWindow: BrowserWindow, paths: ElectronShellPaths): SecondaryWindowManager {
   const state: SecondaryWindowState = {};
+  const appIconPath = resolveOfficialAppIconPath(paths.resourcesRoot);
 
   const definitions: Record<SecondaryWindowName, SecondaryWindowDefinition> = {
     about: {
@@ -134,6 +136,7 @@ export function createSecondaryWindowManager(mainWindow: BrowserWindow, paths: E
       frame: definition.frame ?? true,
       titleBarStyle: process.platform === "darwin" && definition.frame !== false ? "hiddenInset" : undefined,
       backgroundColor: "#ffffff",
+      ...(appIconPath ? { icon: appIconPath } : {}),
       webPreferences: {
         preload: definition.preload,
       },

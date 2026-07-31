@@ -7,9 +7,12 @@ import {
   resetKeepAwakeForTests,
 } from "./keepAwake";
 import {
+  bindWakeSchedulerAfterSwiftLoad,
   createWakeSchedulerForPlatform,
+  getWakeSchedulerNativeApi,
   getWakeSchedulerStatus,
   openWakeSchedulerSettings,
+  resolveHkAWakeSchedulerApi,
   resetWakeSchedulerForTests,
   scheduleWake,
   cancelWakes,
@@ -301,5 +304,69 @@ describe("wakeScheduler residual", () => {
     const ctrl = new WakeSchedulerController({ getApi: () => api });
     expect(await ctrl.scheduleWake(42)).toBe(0);
     expect(await ctrl.cancelWakes()).toBe(7);
+  });
+
+  it("hkA residual: resolve only when wakeScheduler.status is a function", () => {
+    expect(resolveHkAWakeSchedulerApi(null)).toBeNull();
+    expect(resolveHkAWakeSchedulerApi({})).toBeNull();
+    expect(resolveHkAWakeSchedulerApi({ wakeScheduler: {} })).toBeNull();
+    expect(
+      resolveHkAWakeSchedulerApi({
+        wakeScheduler: { status: "notFound" as unknown as () => string },
+      }),
+    ).toBeNull();
+    const api: WakeSchedulerNativeApi = {
+      status: async () => "notRegistered",
+    };
+    expect(resolveHkAWakeSchedulerApi({ wakeScheduler: api })).toBe(api);
+  });
+
+  it("bindWakeSchedulerAfterSwiftLoad sets native API and reconciles", async () => {
+    let status: string = "notRegistered";
+    const api: WakeSchedulerNativeApi = {
+      status: async () => status,
+      install: async () => {
+        status = "requiresApproval";
+        return { success: true };
+      },
+    };
+    const prefs: Record<string, unknown> = {
+      wakeSchedulerEnabled: false,
+      wakeSchedulerApprovedThisCycle: false,
+      wakeSchedulerRegisteredAtVersion: "",
+      wakeSchedulerCourtesyFlippedKeepAwake: false,
+      keepAwakeEnabled: false,
+    };
+    // Pref off → bind still succeeds; no invent install.
+    const ctrl = new WakeSchedulerController({
+      getApi: () => getWakeSchedulerNativeApi(),
+      getPreference: (k) => prefs[k],
+      setPreference: async (k, v) => {
+        prefs[k] = v;
+      },
+      getAppVersion: () => "1.0.0",
+      platform: "darwin",
+    });
+    // Seed singleton so bind reuses controller path via ensure.
+    // bind creates/uses activeController; inject via set + ensure is internal —
+    // call bind with nr and verify activeNativeApi + status.
+    const result = await bindWakeSchedulerAfterSwiftLoad(
+      { wakeScheduler: api },
+      { isPackaged: true, log: { warn: () => {}, error: () => {}, info: () => {} } },
+    );
+    expect(result.bound).toBe(true);
+    expect(getWakeSchedulerNativeApi()).toBe(api);
+    // Pref off + notRegistered → no install invent; status from native.
+    const st = await getWakeSchedulerStatus({ platform: "darwin" });
+    expect(st.status).toBe("notRegistered");
+    expect(st.enabled).toBe(false);
+    // unbound path
+    resetWakeSchedulerForTests();
+    const unbound = await bindWakeSchedulerAfterSwiftLoad(null, {
+      isPackaged: true,
+    });
+    expect(unbound.bound).toBe(false);
+    expect(getWakeSchedulerNativeApi()).toBeNull();
+    void ctrl;
   });
 });

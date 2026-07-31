@@ -143,8 +143,17 @@ it("persists Capabilities account keys used by GrowthBook residual arms", async 
   expect(payload.account.settings.tool_search_mode).toBe("on");
   expect(payload.account.settings.enabled_gdrive_indexing).toBe(true);
   expect(payload.account.settings.enabled_mcp_tools).toEqual({ inline_visualizations: true });
-  expect(payload.growthbook.features.chat_follow_up_chips_main).toEqual({ defaultValue: true });
-  expect(payload.growthbook.features.cai_opt_in_connector_suggestions).toEqual({ defaultValue: true });
+  // Cloud-only CSV chips not invented as true (missing → hide in Capabilities).
+  expect(payload.growthbook.features.chat_follow_up_chips_main).toBeUndefined();
+  expect(payload.growthbook.features.apps_use_turmeric).toBeUndefined();
+  expect(payload.growthbook.features.claudeai_saffron).toBeUndefined();
+  // Product residual arms that stay true.
+  expect(payload.growthbook.features.claudeai_skills).toEqual({ defaultValue: true });
+  expect(payload.growthbook.features.cache_scoped_prompt_ordering).toEqual({
+    defaultValue: { enable_tool_search: true },
+  });
+  // Discovery Wt is cloud MCP directory residual — missing flag (not invented true).
+  expect(payload.growthbook.features.cai_opt_in_connector_suggestions).toBeUndefined();
 });
 
 it("1p deployment mode returns logged-out bootstrap without account uuid", async () => {

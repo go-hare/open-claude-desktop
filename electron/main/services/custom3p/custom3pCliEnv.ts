@@ -69,6 +69,18 @@ export type Custom3pEnterpriseConfig = {
   inferenceBedrockServiceTier?: string;
   inferenceFoundryResource?: string;
   inferenceFoundryApiKey?: string;
+  /**
+   * Product multi-vendor residual (claude-code modelType):
+   * openai / gemini / grok use native SDK clients via OPENAI_* / GEMINI_* / GROK_*.
+   * Official Setup residual only has gateway|bedrock|vertex|foundry; these fields are
+   * product extensions on the same enterprise bag shape used by Setup + configLibrary.
+   */
+  inferenceOpenAIBaseUrl?: string;
+  inferenceOpenAIApiKey?: string;
+  inferenceGeminiBaseUrl?: string;
+  inferenceGeminiApiKey?: string;
+  inferenceGrokBaseUrl?: string;
+  inferenceGrokApiKey?: string;
   /** Official SC residual — model picker / probeInference source. */
   inferenceModels?: Custom3pInferenceModel[];
   disableNonessentialTelemetry?: boolean;
@@ -154,6 +166,12 @@ export function custom3pEnterpriseConfigFromUnknown(
     inferenceBedrockServiceTier: stringField(bag.inferenceBedrockServiceTier),
     inferenceFoundryResource: stringField(bag.inferenceFoundryResource),
     inferenceFoundryApiKey: stringField(bag.inferenceFoundryApiKey),
+    inferenceOpenAIBaseUrl: stringField(bag.inferenceOpenAIBaseUrl),
+    inferenceOpenAIApiKey: stringField(bag.inferenceOpenAIApiKey),
+    inferenceGeminiBaseUrl: stringField(bag.inferenceGeminiBaseUrl),
+    inferenceGeminiApiKey: stringField(bag.inferenceGeminiApiKey),
+    inferenceGrokBaseUrl: stringField(bag.inferenceGrokBaseUrl),
+    inferenceGrokApiKey: stringField(bag.inferenceGrokApiKey),
     inferenceModels: inferenceModelsField(bag.inferenceModels),
     disableNonessentialTelemetry: booleanField(bag.disableNonessentialTelemetry),
     disableEssentialTelemetry: booleanField(bag.disableEssentialTelemetry),
@@ -186,7 +204,8 @@ export function buildHostManagedCliFlags(
 }
 
 /**
- * Official provider sessionEnvVars residual (gateway / vertex / bedrock / foundry).
+ * Official provider sessionEnvVars residual (gateway / vertex / bedrock / foundry)
+ * plus product multi-vendor openai / gemini / grok (claude-code modelType clients).
  * Does not include G4 base fields (entrypoint / BASE_URL).
  */
 export function buildCustom3pSessionEnvVars(
@@ -254,6 +273,44 @@ export function buildCustom3pSessionEnvVars(
         ANTHROPIC_API_KEY: "",
         CLAUDE_CODE_OAUTH_TOKEN: "",
       };
+    case "openai": {
+      // Product CLI: modelType openai → OPENAI_* (providers.ts / openai/client.ts).
+      // Clear Anthropic gateway credentials so shell inheritance cannot mix providers.
+      return {
+        CLAUDE_CODE_USE_OPENAI: "1",
+        OPENAI_API_KEY: config.inferenceOpenAIApiKey ?? "",
+        OPENAI_BASE_URL: config.inferenceOpenAIBaseUrl ?? "",
+        ANTHROPIC_API_KEY: "",
+        ANTHROPIC_AUTH_TOKEN: "",
+        CLAUDE_CODE_OAUTH_TOKEN: "",
+      };
+    }
+    case "gemini": {
+      const env: Record<string, string> = {
+        CLAUDE_CODE_USE_GEMINI: "1",
+        GEMINI_API_KEY: config.inferenceGeminiApiKey ?? "",
+        ANTHROPIC_API_KEY: "",
+        ANTHROPIC_AUTH_TOKEN: "",
+        CLAUDE_CODE_OAUTH_TOKEN: "",
+      };
+      if (config.inferenceGeminiBaseUrl) {
+        env.GEMINI_BASE_URL = config.inferenceGeminiBaseUrl;
+      }
+      return env;
+    }
+    case "grok": {
+      const env: Record<string, string> = {
+        CLAUDE_CODE_USE_GROK: "1",
+        GROK_API_KEY: config.inferenceGrokApiKey ?? "",
+        ANTHROPIC_API_KEY: "",
+        ANTHROPIC_AUTH_TOKEN: "",
+        CLAUDE_CODE_OAUTH_TOKEN: "",
+      };
+      if (config.inferenceGrokBaseUrl) {
+        env.GROK_BASE_URL = config.inferenceGrokBaseUrl;
+      }
+      return env;
+    }
     default:
       // Unknown provider: still mark host-managed 3p without inventing credentials.
       return {
@@ -263,7 +320,7 @@ export function buildCustom3pSessionEnvVars(
   }
 }
 
-/** Official gateway apiHostOverride residual. */
+/** Official gateway apiHostOverride residual (+ product openai/gemini/grok never map to ANTHROPIC_BASE_URL). */
 export function resolveCustom3pApiHost(
   config: Custom3pEnterpriseConfig,
 ): string | undefined {
@@ -274,6 +331,33 @@ export function resolveCustom3pApiHost(
       return config.inferenceVertexBaseUrl;
     case "bedrock":
       return config.inferenceBedrockBaseUrl;
+    case "openai":
+    case "gemini":
+    case "grok":
+      // Not an Anthropic host — buildDesktopCustom3pCliEnv must not map this to ANTHROPIC_BASE_URL.
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+/** Product multi-vendor base URL for health / status display (not G4 ANTHROPIC_BASE_URL). */
+export function resolveCustom3pProviderEndpoint(
+  config: Custom3pEnterpriseConfig,
+): string | undefined {
+  switch (config.inferenceProvider) {
+    case "gateway":
+      return config.inferenceGatewayBaseUrl;
+    case "vertex":
+      return config.inferenceVertexBaseUrl;
+    case "bedrock":
+      return config.inferenceBedrockBaseUrl;
+    case "openai":
+      return config.inferenceOpenAIBaseUrl;
+    case "gemini":
+      return config.inferenceGeminiBaseUrl;
+    case "grok":
+      return config.inferenceGrokBaseUrl;
     default:
       return undefined;
   }
@@ -332,6 +416,9 @@ export function buildDesktopCustom3pCliEnv(
 ): Record<string, string> | null {
   if (!config?.inferenceProvider) return null;
 
+  const provider = config.inferenceProvider;
+  const multiVendor =
+    provider === "openai" || provider === "gemini" || provider === "grok";
   const apiHost = resolveCustom3pApiHost(config);
   const env: Record<string, string> = {
     CLAUDE_CODE_ENTRYPOINT: "claude-desktop-3p",
@@ -346,7 +433,8 @@ export function buildDesktopCustom3pCliEnv(
   };
 
   // Do not invent a base URL — only set when enterprise bag has one (gateway residual).
-  if (apiHost) env.ANTHROPIC_BASE_URL = apiHost;
+  // Multi-vendor openai/gemini/grok must never write ANTHROPIC_BASE_URL from their host.
+  if (apiHost && !multiVendor) env.ANTHROPIC_BASE_URL = apiHost;
 
   // Official K6t.shortnameIdentityOverrides only writes ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL
   // when discovered model id is exactly sonnet|haiku|opus. Product bag models (e.g. deepseek-v4-pro)
@@ -356,10 +444,18 @@ export function buildDesktopCustom3pCliEnv(
   // Pin default model env to bag inferenceModels[0] when present so "Default model" spawn hits bag.
   const primaryModel = primaryInferenceModelName(config);
   if (primaryModel) {
-    env.ANTHROPIC_MODEL = primaryModel;
-    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = primaryModel;
-    env.ANTHROPIC_DEFAULT_SONNET_MODEL = primaryModel;
-    env.ANTHROPIC_DEFAULT_OPUS_MODEL = primaryModel;
+    if (provider === "openai") {
+      env.OPENAI_MODEL = primaryModel;
+    } else if (provider === "gemini") {
+      env.GEMINI_MODEL = primaryModel;
+    } else if (provider === "grok") {
+      env.GROK_MODEL = primaryModel;
+    } else {
+      env.ANTHROPIC_MODEL = primaryModel;
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = primaryModel;
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL = primaryModel;
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL = primaryModel;
+    }
   }
 
   // Drop empty optional telemetry flags so we do not force DISABLE_TELEMETRY="".
@@ -445,6 +541,11 @@ const PROVIDER_FLAG_KEYS = [
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",
+  // Product multi-vendor residual — clear before host inject so process inheritance
+  // cannot leave a stale openai/gemini/grok flag when switching to gateway/cloud.
+  "CLAUDE_CODE_USE_OPENAI",
+  "CLAUDE_CODE_USE_GEMINI",
+  "CLAUDE_CODE_USE_GROK",
 ] as const;
 
 /** Read persisted chooser mode from desktop-shell-settings (dotClaude passthrough gate). */
@@ -568,6 +669,24 @@ export function buildClaudeCliSpawnEnv(options: {
     // bag has no baseUrl, do not keep a process-inherited URL as if it came from userData.
     if (!Object.prototype.hasOwnProperty.call(custom3pEnv, "ANTHROPIC_BASE_URL")) {
       delete env.ANTHROPIC_BASE_URL;
+    }
+    // Product multi-vendor: strip process-inherited OPENAI_*/GEMINI_*/GROK_* when the
+    // applied bag is not that provider (sessionEnvVars only sets the active vendor).
+    const active = enterprise?.inferenceProvider;
+    if (active !== "openai") {
+      for (const key of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "OPENAI_SMALL_FAST_MODEL"] as const) {
+        if (!Object.prototype.hasOwnProperty.call(custom3pEnv, key)) delete env[key];
+      }
+    }
+    if (active !== "gemini") {
+      for (const key of ["GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_SMALL_FAST_MODEL"] as const) {
+        if (!Object.prototype.hasOwnProperty.call(custom3pEnv, key)) delete env[key];
+      }
+    }
+    if (active !== "grok") {
+      for (const key of ["GROK_API_KEY", "XAI_API_KEY", "GROK_BASE_URL", "GROK_MODEL"] as const) {
+        if (!Object.prototype.hasOwnProperty.call(custom3pEnv, key)) delete env[key];
+      }
     }
     // Host-managed 3p residual: empty credential slots must not fall back to process
     // inheritance after assign (Object.assign keeps prior keys if source omits them —

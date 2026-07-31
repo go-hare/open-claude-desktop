@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import https from "node:https";
+import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
@@ -18,9 +19,11 @@ import {
 } from "../services/localSessions/localAgentAssets";
 import type { LocalSessionStore } from "../services/localSessions/localSessionStore";
 import { parseEffortFlagSettings } from "../services/localSessions/claudeCliRunner";
+import { getOfficialCodeStats } from "../services/localSessions/codeStatsAggregation";
 import { getSupportedCommands } from "../services/localSessions/supportedCommands";
 import { getTranscriptFeedback, submitTranscriptFeedback } from "../services/localSessions/transcriptFeedbackStore";
 import { getLocalSessionEnvironment, saveLocalSessionEnvironment } from "../services/localSessions/localSessionEnvironmentStore";
+import { exportCoworkCliSessionTranscript } from "../services/coworkSessions/coworkSessionShareExport";
 import { loadOriginalNodePty } from "../services/originalRuntime/originalRuntimeModules";
 import type { IpcHandlerContext } from "./context";
 import {
@@ -37,11 +40,18 @@ import {
 } from "../services/localSessions/codePermissionModePolicy";
 import { CodeAutoArchiveEngine } from "../services/localSessions/codeAutoArchiveEngine";
 import { CodeAutoFixEngine } from "../services/localSessions/codeAutoFixEngine";
+import { isAutofixOnPrCreateFromUserData } from "../services/settings/toolAccessMode";
 import {
   createJsonWorktreeRegistry,
   WorktreePool,
 } from "../services/localSessions/worktreePool";
 import { resolveSshRemoteCwd } from "../services/localSessions/sshCliSpawn";
+import {
+  commandExistsOnAllPaths,
+  installGhResidual,
+  resolveCommandOnAllPaths,
+  resolveGhPath,
+} from "../services/localSessions/localSessionCommandPath";
 import {
   buildSshArgv,
   defaultExecSsh,
@@ -120,6 +130,8 @@ const BRIDGE_SESSION_KEYS = [
   "userSelectedFiles",
   "model",
   "effort",
+  // Official D.fastMode residual — local session opt-in for fast mode picker.
+  "fastMode",
   "permissionMode",
   "sourceBranch",
   "useWorktree",
@@ -192,13 +204,8 @@ function toBridgeSessions(
 }
 
 async function commandExists(command: string): Promise<boolean> {
-  try {
-    if (process.platform === "win32") await execFileAsync("where.exe", [command], { timeout: 3000 });
-    else await execFileAsync("/usr/bin/env", ["which", command], { timeout: 3000 });
-    return true;
-  } catch {
-    return false;
-  }
+  // Official residual: resolve via allPaths (GUI PATH often omits Homebrew).
+  return commandExistsOnAllPaths(command);
 }
 
 async function executableAvailable(command: string): Promise<boolean> {
@@ -271,10 +278,14 @@ function commandShell(command: string): { file: string; args: string[] } {
   return { file: process.env.SHELL || "/bin/zsh", args: ["-lc", command] };
 }
 
-async function runGit(cwd: string | null, args: string[]) {
+async function runGit(cwd: string | null, args: string[], timeoutMs = 10000) {
   if (!cwd) return { ok: false, error: "missing cwd" };
   try {
-    const { stdout, stderr } = await execFileAsync("git", args, { cwd, timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+    const { stdout, stderr } = await execFileAsync("git", args, {
+      cwd,
+      timeout: timeoutMs,
+      maxBuffer: 8 * 1024 * 1024,
+    });
     return { ok: true, stdout, stderr };
   } catch (error) {
     const err = error as { stdout?: string; stderr?: string; message?: string; code?: unknown };
@@ -284,12 +295,35 @@ async function runGit(cwd: string | null, args: string[]) {
 
 async function runProcess(cwd: string | null, command: string, args: string[], timeout = 30000) {
   if (!cwd) return { stdout: "", stderr: "missing cwd", code: 1, error: "missing cwd" };
+  // Official spawnGh residual: resolve bare commands (esp. gh) against allPaths.
+  let resolved = command;
+  if (!command.includes("/") && !command.includes("\\")) {
+    const found = await resolveCommandOnAllPaths(command);
+    if (!found) {
+      return {
+        stdout: "",
+        stderr: `spawn ${command} ENOENT`,
+        code: 1,
+        error: `spawn ${command} ENOENT`,
+        ok: false,
+        success: false,
+      };
+    }
+    resolved = found;
+  }
   try {
-    const { stdout, stderr } = await execFileAsync(command, args, { cwd, timeout, maxBuffer: 8 * 1024 * 1024 });
-    return { stdout, stderr, code: 0 };
+    const { stdout, stderr } = await execFileAsync(resolved, args, { cwd, timeout, maxBuffer: 8 * 1024 * 1024 });
+    return { stdout, stderr, code: 0, ok: true, success: true };
   } catch (error) {
     const err = error as { stdout?: string; stderr?: string; message?: string; code?: unknown };
-    return { stdout: err.stdout ?? "", stderr: err.stderr ?? err.message ?? "", code: typeof err.code === "number" ? err.code : 1, error: err.message };
+    return {
+      stdout: err.stdout ?? "",
+      stderr: err.stderr ?? err.message ?? "",
+      code: typeof err.code === "number" ? err.code : 1,
+      error: err.message,
+      ok: false,
+      success: false,
+    };
   }
 }
 
@@ -418,27 +452,86 @@ async function githubPull(cwd: string | null, number?: number | null, branch?: s
   return pull.ok && pull.data ? { ok: true, repo, pull: pull.data } : { ok: false, repo, error: pullError ?? "pull_request_not_found" };
 }
 
+/**
+ * Official generateLocalPrContent residual (GitHubPrManager):
+ *   stat/log/diff against base...HEAD (not unstaged dump of entire dirty tree).
+ *   Returns null when there is no base...HEAD content.
+ * Product: keep a compact Summary + commits + Test plan body so createLocalPr
+ * never embeds multi-thousand-line porcelain status into --body.
+ */
 async function generatePrContent(cwd: string | null) {
-  const branch = await currentBranch(cwd) ?? "current branch";
-  const status = await gitText(cwd, ["status", "--short"]) ?? "";
-  const stat = await gitText(cwd, ["diff", "--stat", "HEAD"]) ?? await gitText(cwd, ["diff", "--stat"]) ?? "";
-  const commits = await gitText(cwd, ["log", "--oneline", "-10"]) ?? "";
-  const title = branch.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim() || "Update project";
+  if (!cwd) return null;
+  const branch = (await currentBranch(cwd)) ?? "current branch";
+  // Official base: origin/HEAD → main|master fallback (same as getGitInfo residual).
+  let base = "main";
+  const originHead = await runGit(cwd, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
+  if (originHead.ok) {
+    const ref = String(originHead.stdout ?? "").trim();
+    const match = ref.match(/refs\/remotes\/origin\/(.+)$/);
+    if (match?.[1]) base = match[1];
+  } else {
+    for (const candidate of ["main", "master"]) {
+      const probe = await runGit(cwd, ["rev-parse", "--verify", `origin/${candidate}`]);
+      if (probe.ok) {
+        base = candidate;
+        break;
+      }
+    }
+  }
+  const range = `${base}...HEAD`;
+  const stat = (await gitText(cwd, ["diff", "--no-ext-diff", "--stat", range])) ?? "";
+  const commits = (await gitText(cwd, ["log", "--oneline", `${base}..HEAD`])) ?? "";
+  const fullDiff = (await gitText(cwd, ["diff", "--no-ext-diff", range])) ?? "";
+  // Official: no commits and no diff against base → null (caller may fall back).
+  if (!stat.trim() && !commits.trim() && !fullDiff.trim()) {
+    // Local-only dirty tree with no commits ahead of base: still offer a minimal bag
+    // so FE can create with --fill-ish title, but never dump full porcelain.
+    const dirty = (await gitText(cwd, ["status", "--short"])) ?? "";
+    if (!dirty.trim()) return null;
+    const title =
+      branch === "main" || branch === "master"
+        ? "Update project"
+        : branch.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim() || "Update project";
+    return {
+      title,
+      body: ["## Summary", "Local working tree changes.", "", "## Test plan", "- [ ] Not run."].join("\n"),
+      branch,
+      base,
+      status: dirty.slice(0, 500),
+      stat: "",
+      commits: "",
+    };
+  }
+  const title =
+    branch === "main" || branch === "master"
+      ? (commits.split(/\r?\n/).find((line) => line.trim())?.replace(/^[a-f0-9]+\s+/i, "").trim()
+        || "Update project")
+      : branch.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim() || "Update project";
+  const commitLines = commits
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 20)
+    .map((line) => `- ${line}`);
+  // Cap body so gh/UI never re-display multi-MB command failures as pink text.
+  let summaryBlock = stat.trim() || "Describe the changes in this PR.";
+  if (summaryBlock.length > 4000) summaryBlock = `${summaryBlock.slice(0, 4000)}\n…`;
   const body = [
     "## Summary",
-    stat ? stat : "Describe the changes in this PR.",
+    summaryBlock,
     "",
     "## Recent commits",
-    commits ? commits.split(/\r?\n/).map((line) => `- ${line}`).join("\n") : "- No local commits found.",
-    "",
-    "## Working tree",
-    status ? `\`\`\`\n${status}\n\`\`\`` : "Clean working tree.",
+    commitLines.length ? commitLines.join("\n") : "- No commits ahead of base.",
     "",
     "## Test plan",
-    "- Not run.",
+    "- [ ] Not run.",
   ].join("\n");
-  return { title, body, branch, status, stat, commits };
+  return { title, body, branch, base, status: "", stat: summaryBlock, commits };
 }
+
+/** Official createLocalPr failure residual. */
+const CREATE_PR_AUTH_ERROR =
+  "Could not create pull request. Check that gh is installed and authenticated.";
 
 type SshSettingsFile = {
   configs?: Array<Record<string, unknown>>;
@@ -844,79 +937,18 @@ function contextUsageFromTranscript(transcript: unknown[]) {
   return { ...usage, messages: transcript.length, toolCallCount: countToolUses(transcript), totalTokens };
 }
 
-function streaksForDates(dates: Set<string>) {
-  if (dates.size === 0) return { currentStreak: 0, longestStreak: 0 };
-  const sorted = Array.from(dates).sort();
-  let longestStreak = 1;
-  let currentRun = 1;
-  for (let index = 1; index < sorted.length; index += 1) {
-    const previousDate = sorted[index - 1];
-    const currentDate = sorted[index];
-    if (!previousDate || !currentDate) continue;
-    const previous = new Date(previousDate);
-    previous.setUTCDate(previous.getUTCDate() + 1);
-    if (dateKey(previous) === currentDate) {
-      currentRun += 1;
-      longestStreak = Math.max(longestStreak, currentRun);
-    } else {
-      currentRun = 1;
-    }
-  }
-
-  let currentStreak = 0;
-  const cursor = new Date();
-  for (;;) {
-    const key = dateKey(cursor);
-    if (!dates.has(key)) break;
-    currentStreak += 1;
-    cursor.setUTCDate(cursor.getUTCDate() - 1);
-  }
-
-  return { currentStreak, longestStreak };
-}
-
 /**
- * Code stats from userData metadata only.
- * Official residual does not bulk-load every jsonl on stats/list — that path OOMs when
- * ~/.claude/projects is multi-GB. Token/tool detail stays on per-session getTranscript.
+ * Official LocalSessions.getCodeStats residual (app.asar Yit / D7i):
+ * scan ~/.claude/projects jsonl (+ stats-cache.json prefix), not userData code-sessions.
+ * `store` kept for signature parity with older product callers.
  */
-async function getSessionUsageCodeStats(store: LocalSessionStore) {
-  const sessions = store.getAll(true).filter((session) => session.kind === "code");
-  const daily = new Map<string, { messageCount: number; sessionCount: number; toolCallCount: number }>();
-  const dailyModelTokens = new Map<string, Record<string, number>>();
-  const modelUsage: Record<string, ReturnType<typeof emptyModelUsage>> = {};
-  const hourly = new Map<number, number>();
-
-  for (const session of sessions) {
-    const sessionDate = dateKey(session.createdAt);
-    const day = daily.get(sessionDate) ?? { messageCount: 0, sessionCount: 0, toolCallCount: 0 };
-    day.sessionCount += 1;
-    daily.set(sessionDate, day);
-
-    const model = session.model || "opus-4";
-    modelUsage[model] ??= emptyModelUsage();
-
-    const activityAt = Date.parse(session.lastActivityAt ?? session.updatedAt ?? session.createdAt);
-    if (Number.isFinite(activityAt)) {
-      const hour = new Date(activityAt).getUTCHours();
-      hourly.set(hour, (hourly.get(hour) ?? 0) + 1);
-    }
+async function getSessionUsageCodeStats(_store: LocalSessionStore) {
+  try {
+    return await getOfficialCodeStats();
+  } catch (error) {
+    console.error("LocalSessions.getCodeStats failed", error);
+    return null;
   }
-
-  const activeDates = new Set(
-    Array.from(daily.entries())
-      .filter(([, value]) => value.sessionCount > 0 || value.messageCount > 0)
-      .map(([date]) => date),
-  );
-  const peak = Array.from(hourly.entries()).sort((left, right) => right[1] - left[1])[0]?.[0] ?? null;
-
-  return {
-    dailyActivity: Array.from(daily.entries()).sort(([left], [right]) => left.localeCompare(right)).map(([date, value]) => ({ date, ...value })),
-    dailyModelTokens: Array.from(dailyModelTokens.entries()).sort(([left], [right]) => left.localeCompare(right)).map(([date, tokensByModel]) => ({ date, tokensByModel })),
-    modelUsage,
-    peakActivityHour: peak,
-    streaks: streaksForDates(activeDates),
-  };
 }
 
 function sessionFileRoot(store: LocalSessionStore, sessionId: string): string {
@@ -1443,15 +1475,15 @@ function createSessionHandlers(
       return id ? bridgeSessions(store.getSessionsForScheduledTask(id)) : [];
     },
     getSupportedCommands: async (_event, request) => getSupportedCommands(store, asObject(request)),
-    getSessionsBridgeEnabled: async () => {
-      const prefs = asObject(context.settings.getPreferences());
-      return prefs.sessionsBridgeEnabled !== false;
-    },
-    sessionsBridgeStatus_$store$_getState: async () => {
-      const prefs = asObject(context.settings.getPreferences());
-      const enabled = prefs.sessionsBridgeEnabled !== false;
-      return { enabled, status: enabled ? "ready" : "disabled" };
-    },
+    // 3p has no Anthropic remote sessions bridge — never soft-true ready.
+    getSessionsBridgeEnabled: async () => false,
+    sessionsBridgeStatus_$store$_getState: async () => ({
+      enabled: false,
+      status: "unavailable",
+      conflict: false,
+      dispatchAgentName: null,
+      reason: "sessions_bridge_unavailable",
+    }),
     interactiveAuth_$store$_getState: async () => ({ status: "idle" }),
     getContextUsage: async (_event, id) => {
       const sessionId = asString(id);
@@ -1606,7 +1638,26 @@ function createSessionHandlers(
       setFocusedCodeSession(context, asString(id));
       return true;
     },
-    setFastMode: async () => true,
+    /**
+     * Official setFastMode(sessionId, enabled) residual (c11959232 ge(n, e)).
+     * Persist on session so composer fast-mode picker is not soft-true.
+     * Live CLI flag apply is best-effort via applyFlagSettings when supported.
+     */
+    setFastMode: async (_event, id, enabled) => {
+      const sessionId = asString(id);
+      if (!sessionId) return false;
+      const on = enabled === true;
+      const session = store.update(sessionId, { fastMode: on } as never);
+      if (!session) return false;
+      try {
+        // Best-effort live flag; host store remains authoritative for UI + next spawn.
+        await sessionRunner.applyFlagSettings(sessionId, { fastMode: on });
+      } catch {
+        /* ignore */
+      }
+      dispatchSessionEvent("session_updated", sessionId, session);
+      return true;
+    },
     setAutoFixEnabled: async (_event, id, enabled) => {
       // Official setAutoFixEnabled(sessionId, enabled) residual.
       const sessionId = asString(id);
@@ -1636,20 +1687,71 @@ function createSessionHandlers(
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
       return bridgeSession(session);
     },
-    setAvailableCodeModels: async () => true,
-    setChromePermissionMode: async () => true,
-    setDraftSessionFolders: async () => true,
+    /**
+     * Host→renderer catalog push residual. Product source of truth is CLI/settings catalog;
+     * accept list into preference for diagnostics — not a fake "models applied" claim beyond ack.
+     */
+    setAvailableCodeModels: async (_event, models) => {
+      try {
+        context.settings.setPreference("availableCodeModels", Array.isArray(models) ? models : models ?? null);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    setChromePermissionMode: async (_event, mode) => {
+      try {
+        context.settings.setPreference("chromePermissionMode", asString(mode) ?? mode ?? null);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    setDraftSessionFolders: async (_event, idOrFolders, maybeFolders) => {
+      // Accept (sessionId, folders) or (folders) residual shapes.
+      const sessionId = asString(idOrFolders);
+      const folders = Array.isArray(idOrFolders)
+        ? idOrFolders
+        : Array.isArray(maybeFolders)
+          ? maybeFolders
+          : null;
+      if (sessionId && folders) {
+        const session = store.update(sessionId, {
+          folders: folders.filter((f): f is string => typeof f === "string"),
+          userSelectedFolders: folders.filter((f): f is string => typeof f === "string"),
+        } as never);
+        if (session) dispatchSessionEvent("session_updated", sessionId, session);
+        return Boolean(session);
+      }
+      if (folders) {
+        try {
+          context.settings.setPreference("draftSessionFolders", folders);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      return false;
+    },
+    /**
+     * Anthropic Sessions Bridge residual — product has no remote bridge poller.
+     * Prefer honest empty/disabled over soft-true success that implies bridge is live.
+     */
     setSessionsBridgeEnabled: async (_event, enabled) => {
-      context.settings.setPreference("sessionsBridgeEnabled", enabled !== false);
+      // Persist pref so UI toggles round-trip; do not imply remote bridge is active.
+      context.settings.setPreference("sessionsBridgeEnabled", enabled === true);
       return true;
     },
-    getBridgeConsent: async () => ({ granted: true }),
-    deleteBridgeSession: async () => true,
-    deleteBridgeAgentMemory: async () => true,
-    abandonBridgeEnvironment: async () => true,
-    resetBridge: async () => true,
-    resetBridgeSession: async () => true,
-    kickBridgePoll: async () => true,
+    getBridgeConsent: async () => ({
+      granted: false,
+      reason: "sessions_bridge_unavailable",
+    }),
+    deleteBridgeSession: async () => false,
+    deleteBridgeAgentMemory: async () => false,
+    abandonBridgeEnvironment: async () => false,
+    resetBridge: async () => false,
+    resetBridgeSession: async () => false,
+    kickBridgePoll: async () => false,
     respondToToolPermission: async (_event, requestId, decision, updatedInput, explicitSessionId) => {
       const request = asString(requestId);
       const mode = asString(decision);
@@ -1672,14 +1774,79 @@ function createSessionHandlers(
       });
       return result;
     },
-    respondBridgePermissionPreflight: async () => true,
-    respondDirectoryServers: async () => true,
-    respondPluginSearch: async () => true,
-    respondSlashMenuSkills: async () => true,
-    submitFeedback: async () => ({ ok: true }),
+    // No Anthropic bridge preflight queue in product — honest no-op ack false.
+    respondBridgePermissionPreflight: async () => false,
+    // Directory / plugin / slash reverse-RPC is LocalAgentModeSessions (Cowork) only.
+    // These keys are not in LOCAL_SESSIONS_METHODS; keep residual-honest if ever registered.
+    respondDirectoryServers: async () => false,
+    respondPluginSearch: async () => false,
+    respondSlashMenuSkills: async () => false,
+    /**
+     * Official submitFeedback(sessionId, description) → QOt bag
+     * {feedbackId?, ccshareUrl?, unavailableReason?, error?, ...}.
+     * Requires live SDK query.submitFeedback (subtype submit_feedback).
+     * Product host-loop has no that control channel — never soft-true `{ok:true}`.
+     */
+    submitFeedback: async (_event, sessionId, description) => {
+      const id = asString(sessionId);
+      const desc =
+        asString(description) ??
+        asString(asObject(description).description) ??
+        asString(asObject(description).text);
+      if (!id || !store.getSession(id)) {
+        return {
+          error:
+            "No active Claude Code session. Send a message first, then try /feedback again.",
+        };
+      }
+      if (!desc) {
+        return { error: "Feedback description is required." };
+      }
+      return {
+        error: "Feedback submission is not available for this desktop configuration.",
+        unavailableReason: "feedback_not_available",
+      };
+    },
     submitTranscriptFeedback: async (_event, sessionIdOrInput, input) => submitTranscriptFeedback(sessionIdOrInput, input),
     getTranscriptFeedback: async (_event, sessionId) => getTranscriptFeedback(sessionId),
-    shareSession: async (_event, id) => ({ ok: true, id, localOnly: true }),
+    /**
+     * Official LocalSessions.shareSession(sessionId) → RUe
+     * `{ success, filePath? | error? }` via J6e transcript zip export.
+     * Never soft-true `{ ok: true, localOnly: true }`.
+     */
+    shareSession: async (_event, id) => {
+      const sessionId = asString(id);
+      if (!sessionId) return { success: false, error: "Session not found" };
+      const session = store.getSession(sessionId);
+      if (!session) return { success: false, error: "Session not found" };
+      const cliSessionId = asString(session.cliSessionId);
+      if (!cliSessionId) {
+        return { success: false, error: "Session has no CLI session ID" };
+      }
+      try {
+        // Official SI()/getClaudeConfigDir residual for Code: CLAUDE_CONFIG_DIR || ~/.claude
+        const configDir =
+          process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude");
+        // Product multi-session bag is not per-session metadata file; omit metadataPath.
+        return await exportCoworkCliSessionTranscript(
+          {
+            cliSessionId,
+            projectsDir: path.join(configDir, "projects"),
+            logsDir: app.getPath("logs"),
+          },
+          {
+            appPath: app.getAppPath(),
+            downloadsDir: app.getPath("downloads"),
+            scrubHomedir: homedir(),
+          },
+        );
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
     summarizeSession: async (_event, id) => {
       const sessionId = asString(id);
       if (!sessionId) return { summary: "", title: null };
@@ -1711,8 +1878,12 @@ function createSessionHandlers(
     getAgents: async () => listLocalAgents(),
     createAgent: async (_event, input) => createLocalAgent(input),
     getDirectMcpServerStatuses: async () => configuredMcpServers(context).map(([name, config]) => describeMcpServer(name, config)),
-    authorizeDirectMcpServer: async (_event, serverName) => ({ ok: true, serverName, authorized: true }),
-    disconnectDirectMcpServer: async () => true,
+    // Residual-honest: product has no pending OAuth MCP flow — never soft-true authorize.
+    authorizeDirectMcpServer: async (_event, serverName) => ({
+      ok: false,
+      error: `No pending MCP server named "${String(serverName ?? "")}"`,
+    }),
+    disconnectDirectMcpServer: async () => false,
     getLocalSkillFiles: async (_event, skillRef) => getLocalSkillFiles(skillRef),
     listLocalSkills: async () => listLocalSkills(),
     syncSkills: async () => listLocalSkills(),
@@ -1720,9 +1891,12 @@ function createSessionHandlers(
     saveLocalSkill: async (_event, skillInput, filesInput) => saveLocalSkill(skillInput, filesInput),
     revealLocalSkill: async (_event, skillRef) => revealLocalSkill(skillRef),
     setLocalSkillEnabled: async (_event, skillRef, enabled) => setLocalSkillEnabled(skillRef, enabled),
-    noteCuWindowMentions: async () => true,
+    // CU window mentions are LocalAgentModeSessions/Cowork residual (manager.noteCuWindowMentions).
+    // Code LocalSessions path has no CU inject — residual no-op (not soft-true success).
+    noteCuWindowMentions: async () => undefined,
     triggerInteractiveAuth: async () => ({ ok: false, reason: "interactive_auth_not_required" }),
-    revokeInteractiveAuth: async () => true,
+    // No interactive auth session to revoke in 3p residual path.
+    revokeInteractiveAuth: async () => false,
     mcpListResources: async (_event, serverName) => {
       if (asString(serverName)) {
         const server = mcpServerConfig(context, serverName);
@@ -1742,13 +1916,44 @@ function createSessionHandlers(
       return requestMcpServer({ serverName: server.name, config: server.config, method: "resources/read", params: { uri: resourceUri } });
     },
     mcpCallTool: async (_event, serverName, toolName, input) => {
-      const server = mcpServerConfig(context, serverName);
       const name = asString(toolName) ?? asString(asObject(toolName).name);
-      if (!server) return { ok: false, error: "mcp_server_not_configured", serverName };
       if (!name) return { ok: false, error: "missing_mcp_tool_name", serverName };
+      // Official Gir internal MCP "Claude in Chrome" (LM) — not user mcp-servers.json.
+      // BrowserUse (officialBridgeAdapter) routes list_connected_browsers / select_browser here.
+      try {
+        const {
+          isClaudeInChromeMcpServerName,
+          callClaudeInChromeTool,
+        } = await import("../services/chrome/claudeInChromeMcp");
+        if (isClaudeInChromeMcpServerName(serverName)) {
+          // Live re-read each call — do not freeze prefs into singleton MCP context.
+          // Kir init is async; this route may create the client first.
+          return callClaudeInChromeTool(name, asObject(input), {
+            isEnabled: () => {
+              const prefs = context.settings?.getPreferences?.() ?? {};
+              return prefs.chromeExtensionEnabled !== false;
+            },
+            getPersistedDeviceId: () => {
+              const prefs = context.settings?.getPreferences?.() ?? {};
+              const bag = asObject(prefs.chromeExtension);
+              return typeof bag.pairedDeviceId === "string"
+                ? bag.pairedDeviceId
+                : undefined;
+            },
+          });
+        }
+      } catch (error) {
+        console.warn("[Chrome Extension MCP] mcpCallTool internal route failed", error);
+      }
+      const server = mcpServerConfig(context, serverName);
+      if (!server) return { ok: false, error: "mcp_server_not_configured", serverName };
       return requestMcpServer({ serverName: server.name, config: server.config, method: "tools/call", params: { name, arguments: asObject(input) } });
     },
-    requestFolderTccAccess: async () => ({ granted: true }),
+    // Official nor residual: desktop/documents/downloads status bag (not soft-true granted).
+    requestFolderTccAccess: async () => {
+      const { requestFolderTccAccessResidual } = await import("./coworkLocalAgentResidualHandlers");
+      return requestFolderTccAccessResidual();
+    },
     openOutputsDir: async () => {
       await shell.openPath(store.getOutputsDir());
       return true;
@@ -1890,10 +2095,31 @@ function createSessionHandlers(
         return { valid: false };
       }
     },
-    checkGhAvailable: async () => ({ available: await commandExists("gh") }),
+    // Official checkGhAvailable(cwd): gh auth status --hostname github.com → boolean.
+    checkGhAvailable: async (_event, cwdOrSession) => {
+      const cwd =
+        cwdFromSession(store, cwdOrSession)
+        ?? (typeof cwdOrSession === "string" && cwdOrSession ? cwdOrSession : process.cwd());
+      const gh = await resolveGhPath();
+      if (!gh) return false;
+      try {
+        await execFileAsync(
+          gh,
+          ["auth", "status", "--hostname", "github.com"],
+          { cwd: cwd || process.cwd(), timeout: 5000, maxBuffer: 1024 * 1024 },
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    // Official installGh residual: darwin brew install gh; else open docs / error bag.
     installGh: async () => {
-      await shell.openExternal("https://cli.github.com/");
-      return true;
+      const result = await installGhResidual();
+      if (!result.success) {
+        await shell.openExternal("https://cli.github.com/").catch(() => undefined);
+      }
+      return result;
     },
     getGhIssue: async (_event, cwdOrSession, issue) => {
       const cwd = cwdFromSession(store, cwdOrSession);
@@ -2012,14 +2238,114 @@ function createSessionHandlers(
     },
     createLocalPr: async (_event, cwdOrSession, title, body, options) => {
       const cwd = cwdFromSession(store, cwdOrSession);
-      const args = ["pr", "create"];
-      // Official draft path (c11959232 draft: e / ccr_auto_create_pr_as_draft).
-      const draft = options && typeof options === "object" && (options as { draft?: unknown }).draft === true;
+      if (!cwd) {
+        return { ok: false, success: false, error: CREATE_PR_AUTH_ERROR, stdout: "", stderr: CREATE_PR_AUTH_ERROR, code: 1 };
+      }
+      // Official: if PR already exists for branch, return it instead of re-creating.
+      try {
+        const existingView = await runProcess(
+          cwd,
+          "gh",
+          ["pr", "view", "--json", "number,url"],
+          15000,
+        );
+        if (existingView.ok || existingView.code === 0) {
+          const raw = String(existingView.stdout ?? "").trim();
+          if (raw) {
+            try {
+              const parsed = JSON.parse(raw) as { number?: number; url?: string };
+              if (parsed.number && parsed.url) {
+                return {
+                  ok: true,
+                  success: true,
+                  stdout: parsed.url,
+                  stderr: "",
+                  code: 0,
+                  number: parsed.number,
+                  url: parsed.url,
+                };
+              }
+            } catch {
+              /* fall through to create */
+            }
+          }
+        }
+      } catch {
+        /* fall through */
+      }
+      // Official createLocalPr(A): title required; body||""; optional baseBranch; draft.
+      // Accept bag-first (official kOt) or multi-arg product residual via adapter.
+      const optionsBag =
+        options && typeof options === "object"
+          ? (options as Record<string, unknown>)
+          : asObject(title).title || asObject(title).body || asObject(title).draft !== undefined
+            ? asObject(title)
+            : {};
+      const titleText =
+        asString(title)
+        ?? asString(optionsBag.title)
+        ?? "Update project";
+      let bodyText =
+        asString(body)
+        ?? asString(optionsBag.body)
+        ?? "";
+      // Never pass multi-MB bodies (dirty-tree dumps) into gh — cap residual.
+      if (bodyText.length > 12_000) bodyText = `${bodyText.slice(0, 12_000)}\n…`;
+      const draft =
+        optionsBag.draft === true
+        || (options && typeof options === "object" && (options as { draft?: unknown }).draft === true);
+      const baseBranch =
+        asString(optionsBag.baseBranch)
+        ?? asString(optionsBag.base);
+      const args = ["pr", "create", "--title", titleText, "--body", bodyText || ""];
+      if (baseBranch) args.push("--base", baseBranch);
       if (draft) args.push("--draft");
-      if (asString(title)) args.push("--title", asString(title)!);
-      if (asString(body)) args.push("--body", asString(body)!);
-      if (!asString(title) && !asString(body)) args.push("--fill");
       const created = await runProcess(cwd, "gh", args, 30000);
+      const createdOk =
+        created
+        && typeof created === "object"
+        && (created as { ok?: unknown; success?: unknown }).ok !== false
+        && (created as { success?: unknown }).success !== false
+        && (created as { code?: unknown }).code === 0;
+      if (!createdOk) {
+        const blob = `${created?.stderr ?? ""} ${created?.error ?? ""} ${created?.stdout ?? ""}`;
+        // Official: if stderr already contains a PR URL (already exists), link it.
+        const urlMatch = blob.match(/(https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+)/);
+        if (urlMatch) {
+          return {
+            ok: true,
+            success: true,
+            stdout: urlMatch[1],
+            stderr: "",
+            code: 0,
+            url: urlMatch[1],
+          };
+        }
+        // Official residual error (auth / missing gh / network) — never dump full command+body.
+        return {
+          ok: false,
+          success: false,
+          stdout: "",
+          stderr: CREATE_PR_AUTH_ERROR,
+          error: CREATE_PR_AUTH_ERROR,
+          code: typeof created?.code === "number" ? created.code : 1,
+        };
+      }
+      // Official: parse /pull/(\d+) from stdout; attach number+url.
+      {
+        const out = String(created?.stdout ?? "").trim();
+        const pullMatch = out.match(/\/pull\/(\d+)/);
+        const urlMatch = out.match(/(https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+)/);
+        if (urlMatch) {
+          const number = pullMatch ? Number.parseInt(pullMatch[1]!, 10) : undefined;
+          Object.assign(created, {
+            url: urlMatch[1],
+            number: Number.isFinite(number) ? number : undefined,
+            success: true,
+            ok: true,
+          });
+        }
+      }
       // Best-effort: after create, refresh session.prs so AutoArchive sees the open PR.
       const sessionId =
         asString(cwdOrSession)
@@ -2037,6 +2363,15 @@ function createSessionHandlers(
           }
         } catch {
           /* ignore — create result still returned */
+        }
+        // Official _t ccr_autofix_on_pr_create: seed session.autoFixEnabled after PR open
+        // so CodeAutoFixEngine can watch CI/review without inventing remote CCR path.
+        try {
+          if (isAutofixOnPrCreateFromUserData(app.getPath("userData"))) {
+            store.setAutoFixEnabled(sessionId, true);
+          }
+        } catch {
+          /* ignore — PR create result still returned */
         }
       }
       return created;
@@ -2178,7 +2513,29 @@ function createSessionHandlers(
       const match = configs.map(normalizeSshConfig).find((config) => config?.host === target || config?.hostName === target);
       return match ? { ok: true, host: target, config: match, warning: resolved.stderr || resolved.error } : { ok: false, host: target, error: resolved.stderr || resolved.error };
     },
-    respondToSSHPassword: async () => true,
+    /**
+     * Official respondToSSHPassword residual: feed password into the session SSH/pty prompt.
+     * Product: write to shell pty when session has one; otherwise honest false (no soft-true).
+     */
+    respondToSSHPassword: async (_event, sessionIdOrPayload, passwordMaybe) => {
+      const bag = asObject(sessionIdOrPayload);
+      const sessionId = asString(sessionIdOrPayload) ?? asString(bag.sessionId) ?? asString(bag.id);
+      const password =
+        asString(passwordMaybe)
+        ?? asString(bag.password)
+        ?? asString(bag.response)
+        ?? asString(bag.value)
+        ?? "";
+      if (!sessionId || !password) return false;
+      const entry = ptys.get(sessionId);
+      if (!entry) return false;
+      try {
+        entry.terminal.write(`${password}\n`);
+        return true;
+      } catch {
+        return false;
+      }
+    },
     testSSHConnection: async (_event, host) => {
       const asConfig = sessionSshConfigFromUnknown(host);
       if (asConfig) {
@@ -2219,12 +2576,116 @@ function createSessionHandlers(
       if (!target) return { ok: false, reason: "missing_ssh_host" };
       return runProcess(process.cwd(), "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target, "true"], 10000);
     },
-    ensureBranchPushed: async (_event, cwdOrSession) => gitSuccess(cwdFromSession(store, cwdOrSession), ["push", "-u", "origin", "HEAD"]),
+    /**
+     * Official GitHubPrManager.ensureBranchPushed residual:
+     *   dirty porcelain → auto-commit (message from generateCommitMessage or
+     *   "chore: commit pending changes") → if ahead/no upstream →
+     *   push --set-upstream origin <branch>.
+     * Product: no 1p OAuth commit-message model → fixed residual message.
+     */
+    ensureBranchPushed: async (_event, cwdOrSession) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      if (!cwd) {
+        return {
+          success: false,
+          error: "Could not check git status. Make sure the working directory is a valid git repository.",
+        };
+      }
+      try {
+        const porcelain = await runGit(cwd, ["status", "--porcelain"]);
+        if (!porcelain.ok) {
+          return {
+            success: false,
+            error: "Could not check git status. Make sure the working directory is a valid git repository.",
+          };
+        }
+        if (String(porcelain.stdout ?? "").trim().length > 0) {
+          // Official: generateCommitMessage(A) ?? "chore: commit pending changes"
+          const message = "chore: commit pending changes";
+          const add = await runGit(cwd, ["add", "-A"], 30_000);
+          if (!add.ok) {
+            return { success: false, error: "Could not stage changes for commit." };
+          }
+          const committed = await runGit(cwd, ["commit", "-m", message], 120_000);
+          if (!committed.ok) {
+            const blob = `${committed.stderr ?? ""} ${committed.stdout ?? ""}`;
+            if (blob.includes("nothing to commit") || blob.includes("nothing added to commit")) {
+              /* Official: continue with PR creation */
+            } else {
+              return {
+                success: false,
+                error: String(committed.stderr || committed.stdout || "Could not commit pending changes."),
+              };
+            }
+          }
+        }
+      } catch {
+        return {
+          success: false,
+          error: "Could not check git status. Make sure the working directory is a valid git repository.",
+        };
+      }
+      try {
+        const head = await runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+        const branch = String(head.stdout ?? "").trim();
+        if (!head.ok || !branch || branch === "HEAD") {
+          return { success: false, error: "Could not resolve current branch for push." };
+        }
+        let needsPush = true;
+        try {
+          const upstream = await runGit(cwd, ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]);
+          const up = String(upstream.stdout ?? "").trim();
+          if (upstream.ok && up) {
+            const count = await runGit(cwd, ["rev-list", "--count", `${up}..HEAD`]);
+            needsPush = String(count.stdout ?? "").trim() !== "0";
+          }
+        } catch {
+          needsPush = true;
+        }
+        if (needsPush) {
+          const pushed = await runGit(cwd, ["push", "--set-upstream", "origin", branch], 30_000);
+          if (!pushed.ok) {
+            const msg = `${pushed.stderr ?? ""} ${pushed.stdout ?? ""} ${pushed.error ?? ""}`;
+            const rejected = msg.includes("fetch first") || msg.includes("non-fast-forward");
+            return {
+              success: false,
+              error: rejected
+                ? "Remote branch has changes that are not present locally."
+                : "Could not push branch to remote. Check your git remote configuration and network connection.",
+              errorType: rejected ? "push_rejected" : undefined,
+            };
+          }
+        }
+        return { success: true, branch };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const rejected = msg.includes("fetch first") || msg.includes("non-fast-forward");
+        return {
+          success: false,
+          error: rejected
+            ? "Remote branch has changes that are not present locally."
+            : "Could not push branch to remote. Check your git remote configuration and network connection.",
+          errorType: rejected ? "push_rejected" : undefined,
+        };
+      }
+    },
     commitAllChanges: async (_event, cwdOrSession, message) => {
       const cwd = cwdFromSession(store, cwdOrSession);
-      const add = await runGit(cwd, ["add", "-A"]);
-      if (!add.ok) return { success: false, error: String(add.stderr || add.stdout || "git add failed") };
-      return gitSuccess(cwd, ["commit", "-m", String(message ?? "WIP")]);
+      const add = await runGit(cwd, ["add", "-A"], 30_000);
+      if (!add.ok) return { success: false, error: "Could not stage changes for commit." };
+      const committed = await runGit(cwd, ["commit", "-m", String(message ?? "WIP")], 120_000);
+      if (!committed.ok) {
+        const blob = `${committed.stderr ?? ""} ${committed.stdout ?? ""}`;
+        // Official: nothing to commit → success continue.
+        if (blob.includes("nothing to commit") || blob.includes("nothing added to commit")) {
+          return { success: true };
+        }
+        return {
+          success: false,
+          error: String(committed.stderr || committed.stdout || "Could not commit changes."),
+        };
+      }
+      return { success: true };
     },
     commitWipForBranchSwitch: async (_event, cwdOrSession, branchName) => {
       const cwd = cwdFromSession(store, cwdOrSession);
@@ -2310,10 +2771,51 @@ function createSessionHandlers(
       if (sessionId && stopped) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
       return stopped;
     },
-    stopSessionSummary: async () => true,
-    cancelQueuedMessage: async () => true,
-    enableAutoMerge: async () => true,
-    disableAutoMerge: async () => true,
+    /**
+     * Official stopSessionSummary(sessionId) → boolean (true only if a forked
+     * summary query was aborted). Product summarizeSession is local/sync — nothing
+     * to cancel; never soft-true true.
+     */
+    stopSessionSummary: async (_event, id) => {
+      void id;
+      return false;
+    },
+    // Official LocalSessions.cancelQueuedMessage(sessionId, messageUuid) → boolean
+    cancelQueuedMessage: async (_event, id, messageUuid) => {
+      const sessionId = asString(id);
+      const uuid = asString(messageUuid);
+      if (!sessionId || !uuid) return false;
+      return sessionRunner.cancelQueuedMessage(sessionId, uuid);
+    },
+    /**
+     * Official enableAutoMerge(cwd, prNumber) → { success, error? } (c11959232).
+     * Local residual: `gh pr merge <n> --auto` (not soft-true).
+     */
+    enableAutoMerge: async (_event, cwdOrSession, prNumber) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const n = issueOrPrNumber(prNumber, cwdOrSession);
+      if (!cwd) return { success: false, error: "Could not resolve repository for auto-merge." };
+      if (!n) return { success: false, error: "No PR to toggle auto-merge on." };
+      const result = await runProcess(cwd, "gh", ["pr", "merge", String(n), "--auto"], 30000);
+      if (result.ok || result.code === 0) return { success: true };
+      const err = String(result.stderr || result.error || result.stdout || "Could not update auto-merge setting.");
+      return {
+        success: false,
+        error: err.includes("draft")
+          ? "Draft PRs can't use auto-merge."
+          : err.slice(0, 400) || "Could not update auto-merge setting.",
+      };
+    },
+    disableAutoMerge: async (_event, cwdOrSession, prNumber) => {
+      const cwd = cwdFromSession(store, cwdOrSession);
+      const n = issueOrPrNumber(prNumber, cwdOrSession);
+      if (!cwd) return { success: false, error: "Could not resolve repository for auto-merge." };
+      if (!n) return { success: false, error: "No PR to toggle auto-merge on." };
+      const result = await runProcess(cwd, "gh", ["pr", "merge", String(n), "--disable-auto"], 30000);
+      if (result.ok || result.code === 0) return { success: true };
+      const err = String(result.stderr || result.error || result.stdout || "Could not update auto-merge setting.");
+      return { success: false, error: err.slice(0, 400) || "Could not update auto-merge setting." };
+    },
     releaseWorktree: async (_event, id, options) => {
       const sessionId = asString(id) ?? asString(asObject(id).sessionId);
       if (!sessionId) return false;
@@ -2352,7 +2854,16 @@ function createSessionHandlers(
       const rawTarget = asObject(target);
       return openEditorAtLocation(filePath, editor, line ?? rawTarget.line ?? rawTarget.lineNumber, column ?? rawTarget.column ?? rawTarget.columnNumber);
     },
-    logCliEvent: async () => true,
+    /**
+     * Official logCliEvent(sessionId, eventName, eventData):
+     * MCP notification log_event on ccd_session when present; else debug no-op.
+     * Product host-loop has no ccd_session MCP inject — residual no-op, not soft-true.
+     */
+    logCliEvent: async (_event, sessionId, eventName, eventData) => {
+      void sessionId;
+      void eventName;
+      void eventData;
+    },
   };
 
   const allowedMethods = new Set<string>(allMethods);

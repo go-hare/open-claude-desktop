@@ -52,11 +52,23 @@ export class FeatureStateStore {
     fs.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2));
   }
 
+  /**
+   * Re-read desktop-shell-feature-state.json into memory.
+   * Needed when another FeatureStateStore instance (e.g. MCP create_artifact)
+   * wrote the same file while this handler-held instance stayed warm.
+   */
+  reload(): void {
+    this.state = this.read();
+  }
+
   loadMap<T extends Record<string, unknown> | string | boolean>(key: FeatureStateKey): Map<string, T> {
     return new Map(Object.entries(this.state[key] ?? {}) as Array<[string, T]>);
   }
 
   saveMap<T extends Record<string, unknown> | string | boolean>(key: FeatureStateKey, map: Map<string, T>): void {
+    // Reload first so concurrent writers (MCP yn residual vs featureHandlers bag)
+    // do not clobber sibling keys (spaces/memories/...).
+    this.state = this.read();
     this.state[key] = Object.fromEntries(map.entries());
     this.save();
   }

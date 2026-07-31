@@ -69,6 +69,17 @@ for (const mapFile of ["index.js.map", "index.pre.js.map", "mainWindow.js.map", 
   await fs.rm(path.join(buildTarget, mapFile), { force: true });
 }
 
+// Product vite.main emits build/chunks/*; official shell has no chunks dir.
+// Drop product-only leftovers so audit:original shellVite stays byte-identical.
+const productOnlyBuildEntries = ["chunks"];
+for (const entry of productOnlyBuildEntries) {
+  const target = path.join(buildTarget, entry);
+  if (await exists(target)) {
+    await fs.rm(target, { recursive: true, force: true });
+    console.log(`removed product-only shell leftover: ${path.relative(projectRoot, target)}`);
+  }
+}
+
 // The renderer windows are part of the Electron shell, not the web app payload.
 // Copy all five original windows: main, find-in-page, about, buddy, quick.
 await fs.rm(rendererTarget, { recursive: true, force: true });

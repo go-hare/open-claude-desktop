@@ -38,3 +38,7 @@ scripts/_*.txt
 scripts/_*.mjs
 scripts/_*.ready
 .adversarial-scrub-probe.mjs
+
+# accidental root bundle dump (not product source)
+index.js
+.claude/

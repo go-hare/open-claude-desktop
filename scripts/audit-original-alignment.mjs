@@ -3,6 +3,7 @@ import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { resolveOriginalResources } from "./originalAppPaths.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = path.resolve(projectRoot, "..");
@@ -30,15 +31,8 @@ const decompiledRootCandidates = [
   path.join(workspaceRoot, "claude-ion-react-workbench/claude-ion-react-workbench/decompiled"),
 ].filter(Boolean);
 const decompiledRoot = decompiledRootCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? decompiledRootCandidates[0];
-const originalResourceCandidates = [
-  process.env.CLAUDE_ORIGINAL_RESOURCES,
-  process.env.CLAUDE_ORIGINAL_APP_CONTENTS ? path.join(process.env.CLAUDE_ORIGINAL_APP_CONTENTS, "Resources") : undefined,
-  path.resolve(projectRoot, "../Claudex.app/Contents/Resources"),
-  path.resolve(projectRoot, "../../Claudex.app/Contents/Resources"),
-  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claudex.app/Contents/Resources",
-  "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claudex\\Claudex.app\\Contents\\Resources",
-].filter(Boolean);
-const originalAppResourcesRoot = originalResourceCandidates.find((candidate) => fsSync.existsSync(candidate)) ?? originalResourceCandidates[0];
+
+const originalAppResourcesRoot = resolveOriginalResources();
 const originalIonDistRoot = path.join(originalAppResourcesRoot, "ion-dist");
 const currentIonDistRoot = path.join(projectRoot, "resources/ion-dist");
 const mirrorViteRoot = path.join(mirrorRoot, ".vite");

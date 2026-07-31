@@ -77,6 +77,28 @@ describe("resolveCoworkApplyMcpServersIfIdle", () => {
       servers: { a: 2, b: 1 },
     });
   });
+
+  it("eager tool_search_mode off applies while busy when query exists", () => {
+    expect(
+      resolveCoworkApplyMcpServersIfIdle({
+        hasQuery: true,
+        lifecycleState: "running",
+        servers: { a: 1 },
+        eagerConnectorToolLoad: true,
+      }),
+    ).toEqual({ action: "apply", servers: { a: 1 } });
+  });
+
+  it("eager still defers when no query and busy", () => {
+    expect(
+      resolveCoworkApplyMcpServersIfIdle({
+        hasQuery: false,
+        lifecycleState: "running",
+        servers: { a: 1 },
+        eagerConnectorToolLoad: true,
+      }),
+    ).toEqual({ action: "defer", lifecycleState: "running" });
+  });
 });
 
 describe("mergeCoworkActiveMcpServersAfterRemoteReplace", () => {

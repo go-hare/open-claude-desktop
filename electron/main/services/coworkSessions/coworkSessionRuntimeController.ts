@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import type { CoworkArtifactLocalStoreDeps } from "../coworkRuntime/coworkArtifactLocalStore";
 import {
   appendCoworkMarkTaskCompleteSystemPrompt,
   withCoworkDirectoryMcpServer,
@@ -130,6 +131,19 @@ type CoworkSessionRuntimeControllerOptions = {
    */
   hasMarkTaskComplete?: boolean | ((session: CoworkSessionRuntimeState) => boolean);
   /**
+   * Official hasArtifacts / yn residual. Default true when unset.
+   * When false, create/update/list_artifact tools are not registered.
+   */
+  hasArtifacts?: boolean | ((session: CoworkSessionRuntimeState) => boolean);
+  /**
+   * Local yn store inject (Documents root / optional bag / fs). Disk is source of truth.
+   */
+  artifactStoreDeps?: CoworkArtifactLocalStoreDeps;
+  /**
+   * Official after yn.create/update — emit CoworkArtifacts.onArtifactsChanged.
+   */
+  onArtifactsChanged?: () => void;
+  /**
    * Official Ii().vmEgressPolicy() inject. When set, wins over session
    * egressAllowedDomains (cnA path). Settings → Capabilities residual when unset.
    */
@@ -204,6 +218,9 @@ export class CoworkSessionRuntimeController {
   private readonly setFileDeleteApprovedForMount?: CoworkSessionRuntimeControllerOptions["setFileDeleteApprovedForMount"];
   private readonly onMarkTaskComplete?: CoworkSessionRuntimeControllerOptions["onMarkTaskComplete"];
   private readonly hasMarkTaskComplete?: CoworkSessionRuntimeControllerOptions["hasMarkTaskComplete"];
+  private readonly hasArtifacts?: CoworkSessionRuntimeControllerOptions["hasArtifacts"];
+  private readonly artifactStoreDeps?: CoworkSessionRuntimeControllerOptions["artifactStoreDeps"];
+  private readonly onArtifactsChanged?: CoworkSessionRuntimeControllerOptions["onArtifactsChanged"];
   private readonly getVmEgressPolicy?: CoworkSessionRuntimeControllerOptions["getVmEgressPolicy"];
   private readonly getAllowedWorkspaceFolders?: CoworkSessionRuntimeControllerOptions["getAllowedWorkspaceFolders"];
   private readonly preferSessionNotifications: () => boolean;
@@ -219,6 +236,9 @@ export class CoworkSessionRuntimeController {
     this.getSessionStorageDir = options.getSessionStorageDir;
     this.getVmEgressPolicy = options.getVmEgressPolicy;
     this.hasMarkTaskComplete = options.hasMarkTaskComplete;
+    this.hasArtifacts = options.hasArtifacts;
+    this.artifactStoreDeps = options.artifactStoreDeps;
+    this.onArtifactsChanged = options.onArtifactsChanged;
     this.mountSessionFolder = options.mountSessionFolder;
     this.notifySession = options.notifySession;
     this.now = options.now;
@@ -557,6 +577,13 @@ export class CoworkSessionRuntimeController {
           onMarkTaskComplete: this.onMarkTaskComplete
             ? () => this.onMarkTaskComplete!(session.sessionId)
             : undefined,
+          // Official hasArtifacts / yn residual — create/update/list_artifact tools.
+          hasArtifacts:
+            typeof this.hasArtifacts === "function"
+              ? this.hasArtifacts(session)
+              : this.hasArtifacts !== false,
+          artifactStoreDeps: this.artifactStoreDeps,
+          onArtifactsChanged: this.onArtifactsChanged,
           vmProcessName: session.vmProcessName || session.processName,
         },
       ),

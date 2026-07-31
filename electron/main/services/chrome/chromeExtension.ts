@@ -4,12 +4,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import {
+  CHROME_EXTENSION_IDS_DETECT,
+  CHROME_EXTENSION_LISTING_URL,
+} from "./chromeNativeHost";
 
 const execFileAsync = promisify(execFile);
-const CURRENT_EXTENSION_ID = "fcoeoabgfenejglbffodgkkbkcdhcgfn";
-const LEGACY_EXTENSION_ID = "dihbgbndebgnbjfmelmegjepbnkhlgni";
-const EXTENSION_IDS = [CURRENT_EXTENSION_ID, LEGACY_EXTENSION_ID];
-const EXTERNAL_UPDATE_URL = "https://clients2.google.com/service/update2/crx";
+/** Product + official residual ids for install detect / Preferences cleanup. */
+const EXTENSION_IDS = [...CHROME_EXTENSION_IDS_DETECT];
 
 type BrowserProfileRoot = { name: string; path: string };
 export type ChromeInstallResult = { status: "succeeded" | "skipped" | "error"; error?: string };
@@ -58,13 +60,19 @@ async function extensionFolderHasManifest(extensionFolder: string): Promise<bool
 }
 
 async function browserHasExtension(root: BrowserProfileRoot): Promise<boolean> {
-  for (const profile of await profileNames(root)) {
-    for (const extensionId of EXTENSION_IDS) {
-      const extensionFolder = path.join(root.path, profile, "Extensions", extensionId);
-      if (await extensionFolderHasManifest(extensionFolder)) return true;
+  // Prefer shared residual detector (packed + unpacked Secure Preferences path).
+  try {
+    const { browserHasClaudeChromeExtension } = await import("./chromeNativeHost");
+    return browserHasClaudeChromeExtension(root, EXTENSION_IDS);
+  } catch {
+    for (const profile of await profileNames(root)) {
+      for (const extensionId of EXTENSION_IDS) {
+        const extensionFolder = path.join(root.path, profile, "Extensions", extensionId);
+        if (await extensionFolderHasManifest(extensionFolder)) return true;
+      }
     }
+    return false;
   }
-  return false;
 }
 
 export async function isClaudeChromeExtensionInstalled(): Promise<boolean> {
@@ -92,6 +100,16 @@ function objectAt(root: Record<string, unknown>, key: string): Record<string, un
   return next;
 }
 
+/**
+ * Clear only Chrome's external-uninstall blocklist so a future External
+ * Extension / reinstall can proceed.
+ *
+ * Product path is go-hare unpacked sideload (Secure Preferences path), not
+ * Chrome Web Store External Extensions. Official residual also wipes
+ * settings[id] / install_signature / updateclientdata — that is safe for
+ * store reinstall of a *missing* extension, but destroys a live developer
+ * load (location 4). Never delete settings[id] here.
+ */
 function cleanUninstallState(document: Record<string, unknown>, extensionId: string): boolean {
   let changed = false;
   const extensions = objectAt(document, "extensions");
@@ -100,23 +118,20 @@ function cleanUninstallState(document: Record<string, unknown>, extensionId: str
     extensions.external_uninstalls = externalUninstalls.filter((item) => item !== extensionId);
     changed = true;
   }
-  const settings = objectAt(extensions, "settings");
-  if (extensionId in settings) {
-    delete settings[extensionId];
-    changed = true;
-  }
-  const installSignature = objectAt(extensions, "install_signature");
-  const ids = installSignature.ids;
-  if (Array.isArray(ids) && ids.includes(extensionId)) {
-    installSignature.ids = ids.filter((item) => item !== extensionId);
-    delete installSignature.signature;
-    delete installSignature.expire_date;
-    changed = true;
-  }
-  const apps = objectAt(objectAt(document, "updateclientdata"), "apps");
-  if (extensionId in apps) {
-    delete apps[extensionId];
-    changed = true;
+  // Also clear macs residual for external_uninstalls when present (Secure Preferences).
+  const protection = document.protection;
+  if (protection && typeof protection === "object" && !Array.isArray(protection)) {
+    const macs = (protection as Record<string, unknown>).macs;
+    if (macs && typeof macs === "object" && !Array.isArray(macs)) {
+      const extMacs = (macs as Record<string, unknown>).extensions;
+      if (extMacs && typeof extMacs === "object" && !Array.isArray(extMacs)) {
+        if ("external_uninstalls" in (extMacs as Record<string, unknown>)) {
+          delete (extMacs as Record<string, unknown>).external_uninstalls;
+          delete (protection as Record<string, unknown>).super_mac;
+          changed = true;
+        }
+      }
+    }
   }
   return changed;
 }
@@ -137,23 +152,52 @@ async function cleanChromeProfileUninstallState(): Promise<void> {
 export async function installClaudeChromeExtension(): Promise<ChromeInstallResult> {
   if (process.platform !== "darwin") return { status: "error", error: `Unsupported platform: ${process.platform}. Only macOS is supported.` };
   try {
-    if (await isClaudeChromeExtensionInstalled()) return { status: "skipped" };
+    if (await isClaudeChromeExtensionInstalled()) {
+      // Official residual: still re-sync native host when install is skipped (already present).
+      await reSyncNativeHostAfterInstallChange();
+      return { status: "skipped" };
+    }
+    // Product: go-hare agent-extension is not on Chrome Web Store External Extensions.
+    // Open GitHub listing for sideload / release install; re-sync host manifests for when user loads it.
     await cleanChromeProfileUninstallState();
-    const externalExtensionsDir = path.join(chromeUserDataRoot(), "External Extensions");
-    await fs.mkdir(externalExtensionsDir, { recursive: true });
-    await fs.writeFile(path.join(externalExtensionsDir, `${CURRENT_EXTENSION_ID}.json`), JSON.stringify({ external_update_url: EXTERNAL_UPDATE_URL }, null, 2), "utf8");
+    await openChromeExtensionListing();
+    await reSyncNativeHostAfterInstallChange();
     return { status: "succeeded" };
   } catch (error) {
     return { status: "error", error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-export async function restartChromeForExtension(skipCleanup = false): Promise<boolean> {
+/** Official vrt after install/extension change (Kir order: host path → Oir). */
+async function reSyncNativeHostAfterInstallChange(): Promise<void> {
+  try {
+    const { syncChromeNativeHost } = await import("./chromeNativeHost");
+    await syncChromeNativeHost({
+      userDataPath: app.getPath("userData"),
+      log: (msg) => console.info(msg),
+    });
+  } catch (error) {
+    console.warn(
+      "[Chrome Extension MCP] Native host re-sync after install failed:",
+      error,
+    );
+  }
+}
+
+/**
+ * Official Nrt(skipCleanup): when extension is already installed (install
+ * status Skipped), restart must NOT run uninstall-state cleanup.
+ * Default: detect install first — never wipe prefs for a live extension.
+ */
+export async function restartChromeForExtension(skipCleanup?: boolean): Promise<boolean> {
   if (process.platform !== "darwin") return false;
   try {
+    const skip =
+      skipCleanup === true ||
+      (skipCleanup !== false && (await isClaudeChromeExtensionInstalled()));
     await execFileAsync("/usr/bin/osascript", ["-e", 'tell application "Google Chrome" to quit'], { timeout: 5000 }).catch(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, 3000));
-    if (!skipCleanup) await cleanChromeProfileUninstallState();
+    if (!skip) await cleanChromeProfileUninstallState();
     await execFileAsync("/usr/bin/open", ["-a", "Google Chrome"], { timeout: 5000 });
     return true;
   } catch {
@@ -162,11 +206,24 @@ export async function restartChromeForExtension(skipCleanup = false): Promise<bo
 }
 
 export async function openChromeExtensionListing(): Promise<boolean> {
-  const url = `https://chrome.google.com/webstore/detail/${CURRENT_EXTENSION_ID}`;
-  await shell.openExternal(url);
+  // Product Claudex: go-hare agent-extension releases / install docs.
+  await shell.openExternal(CHROME_EXTENSION_LISTING_URL);
   return true;
 }
 
+/**
+ * Official Fai residual path helper (win32 shared / product userData fallback).
+ * macOS primary manifests live under Chrome/Edge NativeMessagingHosts (HFA).
+ */
 export function chromeNativeHostManifestPath(): string {
-  return path.join(app.getPath("userData"), "ChromeNativeHost", "com.anthropic.claude_browser_extension.json");
+  return path.join(
+    app.getPath("userData"),
+    "ChromeNativeHost",
+    "com.anthropic.claude_browser_extension.json",
+  );
+}
+
+/** Re-export primary sync for install/restart hooks. */
+export async function syncClaudeChromeNativeHost(): Promise<void> {
+  await reSyncNativeHostAfterInstallChange();
 }

@@ -31,10 +31,12 @@ import {
   CoworkDesktopNotificationService,
   createElectronCoworkDesktopNotificationBackend,
 } from "../services/coworkSessions/coworkDesktopNotificationService";
+import { createCoworkMcpCoordinatorInjects } from "../services/coworkSessions/coworkMcpCoordinatorResidual";
 import { CoworkSessionManager } from "../services/coworkSessions/coworkSessionManager";
 import { CoworkSessionPersistence } from "../services/coworkSessions/coworkSessionPersistence";
 import { ScheduledTaskStore } from "../services/scheduledTasks/scheduledTaskStore";
 import { SettingsStore } from "../services/settings/settingsStore";
+import { isEagerConnectorToolLoadFromUserData } from "../services/settings/toolAccessMode";
 import type { DesktopWindowParts } from "../windows/types";
 import type { IpcHandlerContext } from "./context";
 import { registerAppBindingsHandlers } from "./appBindingsHandlers";
@@ -113,8 +115,20 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
     const spaces = new FeatureStateStore().loadMap<Record<string, unknown>>("spaces");
     return spaces.get(spaceId) ?? null;
   };
+  // Residual mcpCoordinator injects: roots registry + createMcpServer/createRemote
+  // from settings MCP bag (not soft no-op, not full createAllServers invent).
+  const mcpCoordinatorInjects = createCoworkMcpCoordinatorInjects({
+    getLocalMcpConfigs: () => settings.getMcpServersConfig(),
+  });
   const localAgentModeSessions = new CoworkSessionManager({
     accountContext: coworkAccount,
+    registerRootsProvider: mcpCoordinatorInjects.registerRootsProvider,
+    unregisterRootsProvider: mcpCoordinatorInjects.unregisterRootsProvider,
+    createMcpServer: mcpCoordinatorInjects.createMcpServer,
+    createRemoteMcpServers: mcpCoordinatorInjects.createRemoteMcpServers,
+    // tool_search_mode "off" → eager setMcpServers (Tools already loaded residual).
+    isEagerConnectorToolLoad: () =>
+      isEagerConnectorToolLoadFromUserData(app.getPath("userData")),
     desktopNotificationService,
     // Residual RSe spaces for DJe project_instructions on start + space rename notify.
     getSpaceName: (spaceId) => {
@@ -235,6 +249,25 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
     resolveHostLoopMode: () => resolveHostLoopMode(),
     // Official vi().requireCoworkFullVmSandbox — settings/env residual until org payload.
     requireCoworkFullVmSandbox,
+    // Official hasArtifacts / yn residual — write Documents/Claude/Artifacts + bag via FeatureState.
+    // getAllWithDiskStatus is bag-first (soft-delete keeps disk orphans off the list).
+    hasArtifacts: true,
+    artifactStoreDeps: {
+      getDocumentsPath: () => app.getPath("documents"),
+      // Fresh store per write so create_artifact rows land in desktop-shell-feature-state.json.
+      featureState: new FeatureStateStore(),
+    },
+    onArtifactsChanged: () => {
+      const mainView = windows.mainView?.webContents;
+      if (mainView && !mainView.isDestroyed()) {
+        dispatchBridgeEvent(
+          mainView,
+          "claude.web",
+          "CoworkArtifacts",
+          "onArtifactsChanged",
+        );
+      }
+    },
     // Official transcript load applies XL via buildVMPathContext.
     transcriptReader: createCoworkTranscriptReader(
       undefined,

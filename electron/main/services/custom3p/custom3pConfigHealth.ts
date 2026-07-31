@@ -21,6 +21,7 @@ import { net } from "electron";
 import {
   type Custom3pEnterpriseConfig,
   type Custom3pInferenceModel,
+  resolveCustom3pProviderEndpoint,
 } from "./custom3pCliEnv";
 import {
   type DeploymentModeResolution,
@@ -299,6 +300,54 @@ async function probeProvider(
         kind: "not_testable",
         message: "Foundry probe requires resource host verification.",
       };
+    case "openai":
+      if (!enterprise.inferenceOpenAIApiKey?.trim()) {
+        return {
+          ok: false,
+          kind: "config",
+          message: "config: inferenceOpenAIApiKey: missing API key",
+        };
+      }
+      if (!enterprise.inferenceOpenAIBaseUrl?.trim()) {
+        return {
+          ok: false,
+          kind: "config",
+          message: "config: inferenceOpenAIBaseUrl: missing base URL",
+        };
+      }
+      // Product multi-vendor: full OpenAI chat probe is out of scope for main-process
+      // residual (gateway uses Anthropic /v1/messages). Surface not_testable, not healthy.
+      return {
+        ok: false,
+        kind: "not_testable",
+        message: "OpenAI-compatible provider is not probed from the main process.",
+      };
+    case "gemini":
+      if (!enterprise.inferenceGeminiApiKey?.trim()) {
+        return {
+          ok: false,
+          kind: "config",
+          message: "config: inferenceGeminiApiKey: missing API key",
+        };
+      }
+      return {
+        ok: false,
+        kind: "not_testable",
+        message: "Gemini provider is not probed from the main process.",
+      };
+    case "grok":
+      if (!enterprise.inferenceGrokApiKey?.trim()) {
+        return {
+          ok: false,
+          kind: "config",
+          message: "config: inferenceGrokApiKey: missing API key",
+        };
+      }
+      return {
+        ok: false,
+        kind: "not_testable",
+        message: "Grok provider is not probed from the main process.",
+      };
     default:
       return {
         ok: false,
@@ -401,8 +450,8 @@ export async function recomputeConfigHealth(userDataPath?: string): Promise<Conf
     } catch {
       endpoint = enterprise.inferenceGatewayBaseUrl;
     }
-  } else if (enterprise.inferenceGatewayBaseUrl) {
-    endpoint = enterprise.inferenceGatewayBaseUrl;
+  } else {
+    endpoint = resolveCustom3pProviderEndpoint(enterprise);
   }
 
   const base: ConfigHealth = {

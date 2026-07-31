@@ -1,13 +1,15 @@
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { getProjectRoot, resolveOriginalIonDist } from "./originalAppPaths.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const root = getProjectRoot();
 const sourceCandidates = [
   process.argv[2] ? path.resolve(process.argv[2]) : undefined,
   process.env.CLAUDE_ORIGINAL_ION_DIST,
-  process.env.CLAUDE_ORIGINAL_RESOURCES ? path.join(process.env.CLAUDE_ORIGINAL_RESOURCES, "ion-dist") : undefined,
+  resolveOriginalIonDist(),
+  path.join(root, "resources/original-claude.app/Contents/Resources/ion-dist"),
+  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app/Contents/Resources/ion-dist",
   path.resolve(root, "../Claudex.app/Contents/Resources/ion-dist"),
   path.resolve(root, "../../Claudex.app/Contents/Resources/ion-dist"),
   "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claudex.app/Contents/Resources/ion-dist",

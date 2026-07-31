@@ -5,7 +5,16 @@ import path from "node:path";
 export type ElectronShellPaths = {
   appRoot: string;
   resourcesRoot: string;
+  /**
+   * Static root for app:// primary SPA (product-web when present, else ion-dist).
+   * Named ionDistRoot for historical installAppProtocolHandler API.
+   */
   ionDistRoot: string;
+  /**
+   * Official residual ion-dist (always resources/ion-dist when present).
+   * Used for setup-desktop-3p / device-code-verify when primary root is product-web.
+   */
+  residualIonDistRoot: string;
   mainWindowPreload: string;
   mainViewPreload: string;
   findInPagePreload: string;
@@ -38,9 +47,41 @@ function resolveResourcesRoot(appRoot: string, resourcesRoot: string): string {
   if (appRoot.endsWith("app.asar")) return path.dirname(appRoot);
 
   const projectResourcesRoot = path.join(appRoot, "resources");
-  if (fs.existsSync(path.join(projectResourcesRoot, "ion-dist"))) return projectResourcesRoot;
+  if (
+    fs.existsSync(path.join(projectResourcesRoot, "product-web", "index.html"))
+    || fs.existsSync(path.join(projectResourcesRoot, "ion-dist"))
+  ) {
+    return projectResourcesRoot;
+  }
 
   return resourcesRoot;
+}
+
+/**
+ * Static root for app://localhost.
+ *
+ * Two product routes (do not collapse):
+ * - Packaged / local app:// → prefer resources/product-web (open-claude-web build).
+ * - Residual ion-dist remains for audit / official asset comparison.
+ * - Dev test still overrides main view with CLAUDE_DESKTOP_MAIN_VIEW_URL=http://…
+ *
+ * CLAUDE_DESKTOP_ION_DIST_ROOT forces an explicit static root when set.
+ */
+function resolveAppStaticRoot(resourcesRoot: string): string {
+  const envRoot = process.env.CLAUDE_DESKTOP_ION_DIST_ROOT?.trim();
+  if (envRoot) return envRoot;
+
+  const productWeb = path.join(resourcesRoot, "product-web");
+  if (fs.existsSync(path.join(productWeb, "index.html"))) return productWeb;
+
+  return path.join(resourcesRoot, "ion-dist");
+}
+
+/** Official residual ion-dist directory (not product-web). */
+function resolveResidualIonDistRoot(resourcesRoot: string): string {
+  const envResidual = process.env.CLAUDE_DESKTOP_RESIDUAL_ION_DIST_ROOT?.trim();
+  if (envResidual) return envResidual;
+  return path.join(resourcesRoot, "ion-dist");
 }
 
 export function resolveElectronShellPaths(appRoot = app.getAppPath(), resourcesRoot = process.resourcesPath): ElectronShellPaths {
@@ -48,7 +89,8 @@ export function resolveElectronShellPaths(appRoot = app.getAppPath(), resourcesR
   return {
     appRoot,
     resourcesRoot: normalizedResourcesRoot,
-    ionDistRoot: path.join(normalizedResourcesRoot, "ion-dist"),
+    ionDistRoot: resolveAppStaticRoot(normalizedResourcesRoot),
+    residualIonDistRoot: resolveResidualIonDistRoot(normalizedResourcesRoot),
     mainWindowPreload: path.join(appRoot, ".vite/build/mainWindow.js"),
     mainViewPreload: path.join(appRoot, ".vite/build/mainView.js"),
     findInPagePreload: path.join(appRoot, ".vite/build/findInPage.js"),

@@ -32,15 +32,37 @@ export type ClaudeSwiftQuickAccessOverlay = {
 export type ClaudeSwiftAddon = EventEmitter & {
   quickAccess?: {
     overlay?: ClaudeSwiftQuickAccessOverlay;
+    /**
+     * Official nr.quickAccess.dictation residual:
+     *   setLanguage(code) / show(mode) / toggle(mode) / stop()
+     * mode: "caps-lock" | "custom" (uit residual).
+     */
     dictation?: {
       setLanguage?: (lang: string) => void;
+      show?: (mode: "caps-lock" | "custom" | string) => void | Promise<void>;
+      toggle?: (mode: "caps-lock" | "custom" | string) => void | Promise<void>;
+      stop?: () => void | Promise<void>;
     };
   };
   /** Official PwA residual target. */
   api?: {
     setCredentials?: (baseUrl: string, cookieHeader: string, orgUuid: string) => void;
   };
-  wakeScheduler?: unknown;
+  /**
+   * Official hkA residual: `(nr?.wakeScheduler) ?? null`.
+   * Native handle for pvi.getApi / scheduleWake / install (NAPIBindings+WakeScheduler).
+   * Product types the residual surface; does not invent methods if native omits them.
+   */
+  wakeScheduler?: {
+    status?: () => Promise<string> | string;
+    requiresSetup?: boolean;
+    approvedThisCycle?: () => boolean;
+    openSettings?: () => void;
+    install?: () => Promise<{ success: boolean; error?: string }>;
+    uninstall?: () => Promise<void> | void;
+    scheduleWake?: (when: unknown) => Promise<number> | number;
+    cancelWakes?: () => Promise<number> | number;
+  };
   midnightOwl?: { setEnabled?: (enabled: boolean) => void };
   hotkey?: unknown;
   vm?: unknown;

@@ -35,6 +35,8 @@ import {
 import { ensureDevSwiftFonts } from "./services/settings/devSwiftFonts";
 import { ensureDevSwiftLocalizations } from "./services/settings/devSwiftLocalizations";
 import { ensureDevSwiftScreenAssets } from "./services/settings/devSwiftScreenAssets";
+import { applyOfficialAppIcon } from "./services/settings/officialAppIcon";
+import { readAccountSettingsFromUserData } from "./services/settings/toolAccessMode";
 
 export type DesktopAppOptions = {
   paths?: ElectronShellPaths;
@@ -113,31 +115,41 @@ function applyProductAppName(): void {
 }
 
 /**
- * Official getMainWindowUrl residual (two layers — do not collapse):
- *   1p Anthropic binary → mN https://claude.ai (ion then /login LoginRoute email form)
- *   3p → app://localhost
- * Product shell always hosts open-claude-web / app:// so LoginDesktop sVt/M5t can run.
+ * Official loadAll residual (app.asar vst):
+ *   Q = new URL(or()) // getMainWindowUrl: 1p claude.ai / 3p app://localhost
+ *   sidebar → /task/new | /epitaxy
+ *   s.webContents.loadURL(Q)
+ * SPA Pos (index-BELzQL5P): isLoading?null : isLoggedOut → Navigate /login
+ * LoginRoute jn: resize(600,600,{center:true}) only after /login mounts.
+ * Shell does NOT create at 600 and does NOT force /login in loadURL.
+ *
+ * Product: always host open-claude-web (app:// / CLAUDE_DESKTOP_MAIN_VIEW_URL).
  * CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW=1 opts into official mN host (rare debug).
  */
 function getInitialMainViewUrlOverride(options: DesktopAppOptions): string {
-  let deploymentMode: "1p" | "3p" = "1p";
-  try {
-    const telemetryMode = options.desktopTelemetryConfig?.deploymentMode;
-    const resolved =
-      telemetryMode === "3p" || telemetryMode === "1p"
-        ? telemetryMode
-        : resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
-    deploymentMode = resolved === "3p" ? "3p" : "1p";
-  } catch {
-    deploymentMode = "1p";
-  }
-
+  const baseUrl = options.baseUrl ?? "app://localhost";
+  // Test/dev: CLAUDE_DESKTOP_MAIN_VIEW_URL=http://localhost:5176
+  // Packaged/default: app://localhost (product-web written into Resources/ion-dist).
   const productMainViewUrl =
     options.initialMainViewUrl ?? process.env.CLAUDE_DESKTOP_MAIN_VIEW_URL;
 
+  let mode: "1p" | "3p" | "dotClaude" = "1p";
+  try {
+    const telemetryMode = options.desktopTelemetryConfig?.deploymentMode;
+    if (telemetryMode === "3p" || telemetryMode === "1p" || telemetryMode === "dotClaude") {
+      mode = telemetryMode;
+    } else {
+      mode = resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
+    }
+  } catch {
+    mode = "1p";
+  }
+
+  // product dotClaude maps to 3p shell for load URL / synthetic account residual.
+  const deploymentMode = mode === "dotClaude" ? "3p" : mode;
   return resolveMainWindowLoadUrl({
     deploymentMode,
-    baseUrl: options.baseUrl ?? "app://localhost",
+    baseUrl,
     productMainViewUrl,
     sidebarMode: options.sidebarMode,
     hasRendererConfig: options.hasRendererConfig ?? true,
@@ -182,14 +194,20 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
   };
 
   const createAndLoadWindow = async () => {
-    const windowState = createWindowStateKeeper({ defaultWidth: 1200, defaultHeight: 800 });
+    const initialMainViewUrl = getInitialMainViewUrlOverride(options);
+    // Official Cbe({defaultWidth:1200,defaultHeight:800}) — always shell defaults.
+    // LoginRoute jn resizes to 600×600 only after SPA mounts /login.
+    const windowState = createWindowStateKeeper({
+      defaultWidth: 1200,
+      defaultHeight: 800,
+    });
     // context is created after window, but close residual needs settings.menuBarEnabled.
     // Wire tray-disabled quit after IPC context exists (see below).
     let shouldQuitWhenTrayDisabled = () => false;
     windows = createDesktopWindow({
       paths,
       baseUrl: options.baseUrl ?? "app://localhost",
-      initialMainViewUrl: getInitialMainViewUrlOverride(options),
+      initialMainViewUrl,
       sidebarMode: options.sidebarMode,
       hasRendererConfig: options.hasRendererConfig ?? true,
       desktopFeatures: options.desktopFeatures,
@@ -256,48 +274,25 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   const initialTarget = extractLaunchTarget(process.argv);
 
   await app.whenReady();
-  // Official Swift FontLoader residual: process.resourcesPath/fonts.
-  // Dev Electron framework Resources has no fonts — symlink project resources/fonts.
-  ensureDevSwiftFonts();
-  // Official Quick Entry share/screenshot residual: Localizable.strings in *.lproj
-  // ("Quickly share content with Claude" / "Send a screenshot of " / permission bar).
-  ensureDevSwiftLocalizations();
-  // Official Quick Entry share residual assets: claude-screen*.png + Assets.car
-  // (QuickScreenshotView strip / NSImage catalog). Dev Electron has none.
-  ensureDevSwiftScreenAssets();
-  // Official BbA: y7() + R0A() timer (1h / 5min) + id(() => I9t().finally(R0A)).
-  // 3p kni short-circuits network; 1p uses /api/desktop/features + fcache.
-  try {
-    const { startCoworkGrowthBookLifecycle } = await import(
-      "./services/coworkHostLoop/coworkGrowthBookLifecycle"
-    );
-    const { COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES } = await import(
-      "./services/coworkHostLoop/coworkGrowthBookFeatures"
-    );
-    // Official N1e residual: 1p uses remote features/fcache; 3p kni short-circuits.
-    // Prefer userData desktop-shell-settings over hard default "3p".
-    const deploymentMode =
-      process.env.CLAUDE_DEPLOYMENT_MODE
-      ?? (options.desktopTelemetryConfig?.deploymentMode as string | undefined)
-      ?? resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
-    await startCoworkGrowthBookLifecycle({
-      getHardcodedFeatures: () =>
-        deploymentMode === "1p" ? null : COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES,
-      getClaudeAiBaseUrl: () =>
-        process.env.CLAUDE_AI_URL?.trim() || "https://claude.ai",
-      getUserDataPath: () => app.getPath("userData"),
-      log: (...args) => console.info(...args),
-    });
-  } catch (error) {
-    console.warn("[growthbook] init residual failed", error);
-  }
+  // Official CFBundleIconFile electron.icns — packaged via forge; dev Electron.app
+  // otherwise shows default Atom Dock icon. Bitmap matches official residual.
+  applyOfficialAppIcon(paths.resourcesRoot);
+
+  // Install app:// *before* long awaits (GrowthBook / Chrome MCP). macOS `activate`
+  // can call createAndLoadWindow mid-bootstrap; without the handler, mainView
+  // loadURL throws ERR_FAILED (-2) loading 'app://localhost'.
   // Product residual: custom3p lists local plugins/dxt/MCP from userData (no Anthropic cloud invent).
   // Official N1e: bootstrap account synthesis gated by deployment mode from
   // userData/desktop-shell-settings applied bag (Hzt/SM). Empty bag → 1p logged-out.
   installAppProtocolHandler({
     ionDistRoot: options.ionDistRoot ?? paths.ionDistRoot,
+    // Official setup-desktop-3p SPA lives in residual ion-dist, not product-web.
+    residualIonDistRoot: paths.residualIonDistRoot,
     custom3p: {
       getUserDataPath: () => app.getPath("userData"),
+      // Account.settings bag (tool_search_mode / artifacts / …) survives restart.
+      readAccountSettings: () =>
+        readAccountSettingsFromUserData(app.getPath("userData")),
       getDeploymentMode: () =>
         resolveDeploymentModeFromUserData(app.getPath("userData")).resolution,
       // Official eMA/u2 residual: bootstrap models come from applied enterprise bag
@@ -357,6 +352,114 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
       },
     },
   });
+
+  // Official Swift FontLoader residual: process.resourcesPath/fonts.
+  // Dev Electron framework Resources has no fonts — symlink project resources/fonts.
+  ensureDevSwiftFonts();
+  // Official Quick Entry share/screenshot residual: Localizable.strings in *.lproj
+  // ("Quickly share content with Claude" / "Send a screenshot of " / permission bar).
+  ensureDevSwiftLocalizations();
+  // Official Quick Entry share residual assets: claude-screen*.png + Assets.car
+  // (QuickScreenshotView strip / NSImage catalog). Dev Electron has none.
+  ensureDevSwiftScreenAssets();
+  // Official residual after ready (app.asar):
+  //   BbA()  — fire-and-forget GrowthBook (does NOT await before vst/loadAll)
+  //   prr(ion-dist) — app:// handler (already installed above)
+  //   Kir / shortcuts …
+  //   await Mai (misc) then vst() + loadAll()
+  // Product used to `await startCoworkGrowthBookLifecycle` here; on 1p / network
+  // fail that blocks window creation for the full fetch timeout (~10s) → slow
+  // launch + long empty frame. Match BbA: start refresh in background.
+  void (async () => {
+    try {
+      const { startCoworkGrowthBookLifecycle } = await import(
+        "./services/coworkHostLoop/coworkGrowthBookLifecycle"
+      );
+      const { COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES } = await import(
+        "./services/coworkHostLoop/coworkGrowthBookFeatures"
+      );
+      // Official N1e residual: 1p uses remote features/fcache; 3p kni short-circuits.
+      const deploymentMode =
+        process.env.CLAUDE_DEPLOYMENT_MODE
+        ?? (options.desktopTelemetryConfig?.deploymentMode as string | undefined)
+        ?? resolveDeploymentModeFromUserData(app.getPath("userData")).resolution.mode;
+      await startCoworkGrowthBookLifecycle({
+        getHardcodedFeatures: () =>
+          deploymentMode === "1p" ? null : COWORK_HARDCODED_MAIN_GROWTHBOOK_FEATURES,
+        getClaudeAiBaseUrl: () =>
+          process.env.CLAUDE_AI_URL?.trim() || "https://claude.ai",
+        getUserDataPath: () => app.getPath("userData"),
+        log: (...args) => console.info(...args),
+      });
+    } catch (error) {
+      console.warn("[growthbook] init residual failed", error);
+    }
+  })();
+
+  // Official Kir residual: native host manifest sync + Claude in Chrome MCP socket client.
+  // Order: host binary access → xir clean non-primary → vrt Oir sync → Jir watch → Gir.
+  // Do not await — same as residual (window must not wait on Chrome host sync).
+  void (async () => {
+    try {
+      const { initializeClaudeInChromeBrowserAutomation } = await import(
+        "./services/chrome/claudeInChromeMcp"
+      );
+      const { SettingsStore } = await import("./services/settings/settingsStore");
+      // Official xn("chromeExtension") residual: isEnabled / getPersistedDeviceId must
+      // re-read SettingsStore each call (not a whenReady snapshot). Singleton MCP
+      // context freezes these closures for the process lifetime.
+      await initializeClaudeInChromeBrowserAutomation({
+        userDataPath: app.getPath("userData"),
+        isEnabled: () => {
+          try {
+            return new SettingsStore().getPreferences().chromeExtensionEnabled !== false;
+          } catch {
+            return true;
+          }
+        },
+        getPersistedDeviceId: () => {
+          try {
+            const current = new SettingsStore().getPreferences();
+            const bag =
+              current.chromeExtension &&
+              typeof current.chromeExtension === "object" &&
+              !Array.isArray(current.chromeExtension)
+                ? (current.chromeExtension as Record<string, unknown>)
+                : {};
+            return typeof bag.pairedDeviceId === "string"
+              ? bag.pairedDeviceId
+              : undefined;
+          } catch {
+            return undefined;
+          }
+        },
+        onExtensionPaired: (deviceId, pairedName) => {
+          try {
+            const store = new SettingsStore();
+            const current = store.getPreferences();
+            const prev =
+              current.chromeExtension &&
+              typeof current.chromeExtension === "object" &&
+              !Array.isArray(current.chromeExtension)
+                ? (current.chromeExtension as Record<string, unknown>)
+                : {};
+            store.setPreference("chromeExtension", {
+              ...prev,
+              pairedDeviceId: deviceId,
+              pairedDeviceName: pairedName,
+            });
+          } catch (error) {
+            console.warn("[Chrome Extension MCP] persist paired device failed", error);
+          }
+        },
+        log: (msg) => console.info(msg),
+      });
+    } catch (error) {
+      console.warn("[Chrome Extension MCP] Kir init residual failed", error);
+    }
+  })();
+
+  // Create + load main window immediately (official vst + loadAll after protocol).
   await runtime.createAndLoadWindow();
 
   if (initialTarget.deepLink || initialTarget.extensionPath || initialTarget.filePaths.length > 0) {

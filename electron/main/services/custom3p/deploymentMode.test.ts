@@ -85,6 +85,50 @@ it("N1e: gateway with api key → 3p active", () => {
   expect(r.degraded).toBe(false);
 });
 
+it("N1e: openai/gemini/grok credentials gate degraded", () => {
+  expect(
+    hasUsableThirdPartyCredentials({
+      inferenceProvider: "openai",
+      inferenceOpenAIApiKey: "sk",
+    }),
+  ).toBe(false);
+  expect(
+    hasUsableThirdPartyCredentials({
+      inferenceProvider: "openai",
+      inferenceOpenAIApiKey: "sk",
+      inferenceOpenAIBaseUrl: "https://api.openai.com/v1",
+    }),
+  ).toBe(true);
+  expect(
+    hasUsableThirdPartyCredentials({
+      inferenceProvider: "gemini",
+      inferenceGeminiApiKey: "g",
+    }),
+  ).toBe(true);
+  expect(
+    hasUsableThirdPartyCredentials({
+      inferenceProvider: "grok",
+      inferenceGrokApiKey: "x",
+    }),
+  ).toBe(true);
+
+  const degraded = resolveDeploymentMode({
+    enterprise: { inferenceProvider: "openai" },
+  });
+  expect(degraded.mode).toBe("3p");
+  expect(degraded.degraded).toBe(true);
+
+  const active = resolveDeploymentMode({
+    enterprise: {
+      inferenceProvider: "openai",
+      inferenceOpenAIApiKey: "sk",
+      inferenceOpenAIBaseUrl: "https://api.openai.com/v1",
+    },
+  });
+  expect(active.mode).toBe("3p");
+  expect(active.degraded).toBe(false);
+});
+
 it("resolveDeploymentModeFromUserData: empty userData → 1p", () => {
   const dir = tempUserData();
   const snap = resolveDeploymentModeFromUserData(dir);

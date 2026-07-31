@@ -15,6 +15,7 @@ import { getLocalSessionEnvironmentSync } from "./localSessionEnvironmentStore";
 import type { LocalSession, LocalSessionStore, LocalToolPermissionRequest } from "./localSessionStore";
 import { resolveSshRemoteCwd, spawnClaudeOverSsh } from "./sshCliSpawn";
 import { getClaudePreviewCliMcpConfigCache, setClaudePreviewSessionCwd } from "../launch/claudePreviewHostRegistry";
+import { asMcpServerMap, toCliMcpConfigWire } from "./mcpConfigWire";
 
 type RunnerCallbacks = {
   onEvent: (event: Record<string, unknown>) => void;
@@ -36,6 +37,8 @@ type RunnerCallbacks = {
 
 type ActiveTurn = {
   child: ChildProcessWithoutNullStreams;
+  /** Outer user uuid already written to CLI stdin for this turn (cancel too-late). */
+  activeUserUuid?: string;
   pendingControlResponses: Map<string, PendingControlResponse>;
   pendingPermissions: Map<string, LocalToolPermissionRequest>;
   stderr: string[];
@@ -116,6 +119,11 @@ function pushListOption(args: string[], flag: string, value: unknown): void {
 function pushJsonOption(args: string[], flag: string, value: unknown): void {
   const text = jsonValue(value);
   if (text) args.push(flag, text);
+}
+
+function pushCliMcpConfig(args: string[], value: unknown): void {
+  const wire = toCliMcpConfigWire(value);
+  if (wire) pushJsonOption(args, "--mcp-config", wire);
 }
 
 function claudeBinaryName(): string {
@@ -407,7 +415,8 @@ function buildClaudeArgs(
   pushStringOption(args, "--agent", request.agent ?? sessionRaw.agent);
   pushJsonOption(args, "--agents", request.agents ?? sessionRaw.agents);
   // Official InternalMcp Claude Preview (voA) for ccd: inject when Launch enabled.
-  // CLI cannot load SDK instances → host HTTP bridge config (serializable).
+  // CLI cannot load SDK instances → host HTTP bridge config (serializable bare map).
+  // Wire format for --mcp-config must wrap as { mcpServers } (parseMcpConfig residual).
   // SSH residual: official isEnabled requires !isSSH — skip for ssh sessions.
   const previewCliMcp =
     session.sshConfig
@@ -417,17 +426,12 @@ function buildClaudeArgs(
     request.mcpServers
     ?? sessionRaw.mcpServers
     ?? undefined;
-  const mergedMcp =
-    previewCliMcp
-      ? {
-          ...(typeof baseMcp === "object" && baseMcp && !Array.isArray(baseMcp)
-            ? (baseMcp as Record<string, unknown>)
-            : {}),
-          ...previewCliMcp,
-        }
-      : baseMcp;
-  pushJsonOption(args, "--mcp-config", mergedMcp);
-  pushJsonOption(args, "--mcp-config", request.remoteMcpServers ?? sessionRaw.remoteMcpServers);
+  const mergedMcpServers = {
+    ...asMcpServerMap(baseMcp),
+    ...asMcpServerMap(previewCliMcp),
+  };
+  pushCliMcpConfig(args, mergedMcpServers);
+  pushCliMcpConfig(args, request.remoteMcpServers ?? sessionRaw.remoteMcpServers);
   pushListOption(args, "--allowedTools", request.enabledMcpTools ?? request.allowedTools ?? sessionRaw.enabledMcpTools);
   pushListOption(args, "--disallowedTools", request.disallowedTools ?? sessionRaw.disallowedTools);
   pushListOption(args, "--tools", request.tools ?? sessionRaw.tools);
@@ -956,7 +960,14 @@ export class ClaudeCliRunner {
       return false;
     }
 
-    const turn: ActiveTurn = { child, pendingControlResponses: new Map(), pendingPermissions: new Map(), stderr: [], sawAssistantText: false };
+    const turn: ActiveTurn = {
+      activeUserUuid: seededUuid,
+      child,
+      pendingControlResponses: new Map(),
+      pendingPermissions: new Map(),
+      stderr: [],
+      sawAssistantText: false,
+    };
     this.active.set(sessionId, turn);
 
     const stdout = readline.createInterface({ input: child.stdout });
@@ -986,6 +997,30 @@ export class ClaudeCliRunner {
     });
 
     return true;
+  }
+
+  /**
+   * Official LocalSessionManager.cancelQueuedMessage residual (app.asar):
+   *   no active query → false
+   *   deferredSends / inputStream.remove(uuid) → true
+   *   else query.cancelAsyncMessage(uuid)
+   *   on success: splice messageBuffer by uuid
+   *
+   * Product Code CLI is one-turn-at-a-time (no deferredSends stream). Cancel only
+   * succeeds for live-tail optimistic user rows that were never the active stdin
+   * prompt (mid-turn queue UI residual). Active-turn uuid is too-late → false.
+   */
+  cancelQueuedMessage(sessionId: string, messageUuid: string): boolean {
+    const uuid = typeof messageUuid === "string" ? messageUuid.trim() : "";
+    if (!sessionId || !uuid) return false;
+    const turn = this.active.get(sessionId);
+    if (turn?.activeUserUuid === uuid) {
+      // Already on stdin — official cancelAsyncMessage path not available on print CLI.
+      return false;
+    }
+    const removed = this.store.removeLiveEventByUuid(sessionId, uuid);
+    if (removed) this.callbacks.onSessionUpdated(sessionId);
+    return removed;
   }
 
   stop(sessionId: string): boolean {

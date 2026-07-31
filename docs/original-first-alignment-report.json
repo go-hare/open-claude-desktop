@@ -1,20 +1,21 @@
 {
-  "generated_at": "2026-07-08T09:27:59.805Z",
+  "generated_at": "2026-07-30T05:07:42.507Z",
   "policy": {
     "standard": "original-first alignment: no guessed JS/CSS/font/component structure",
-    "original_js_css_fonts": "resources/ion-dist must stay byte-for-byte identical to Claude-Deepseek.app/Contents/Resources/ion-dist",
-    "electron_shell_resources": "all original .vite build/renderer files must match except source-owned main entry rebuild outputs",
+    "original_js_css_fonts": "resources/ion-dist must stay byte-for-byte identical to Claudex.app/Contents/Resources/ion-dist",
+    "electron_shell_resources": "all original .vite build/renderer files must match byte-for-byte",
     "component_library": "renderer components come from original compiled chunks; new source UI libraries are forbidden unless declared by original package.json with matching version",
-    "source_main_process": "main-process TypeScript may be reconstructed, but every user-visible shell function needs original evidence or must be marked inferred in docs"
+    "route_manifest": "optional evidence only; byte-for-byte .vite and ion-dist alignment are the hard gates",
+    "source_main_process": "main-process output must come from original extracted .vite/build/index.js and index.pre.js in code-1:1 mode"
   },
   "paths": {
-    "project_root": "D:\\work\\py\\claude\\open-claude-desktop-worktree",
-    "original_ion_dist": "D:\\BaiduNetdiskDownload\\Claude code 汉化mac桌面版\\Claude-Deepseek\\Claude-Deepseek.app\\Contents\\Resources\\ion-dist",
-    "current_ion_dist": "D:\\work\\py\\claude\\open-claude-desktop-worktree\\resources\\ion-dist",
-    "original_vite_mirror": "D:\\work\\py\\claude\\claude-ion-react-workbench\\electron-shell-source\\app-asar\\.vite",
-    "current_vite": "D:\\work\\py\\claude\\open-claude-desktop-worktree\\.vite",
-    "route_manifest": "D:\\work\\py\\claude\\claude-ion-react-workbench\\docs\\route-manifest.json",
-    "decompiled_root": "D:\\work\\py\\claude\\claude-ion-react-workbench\\decompiled"
+    "project_root": "/Users/apple/work-py/hare-code/open-claude-desktop",
+    "original_ion_dist": "/Users/apple/work-py/hare-code/open-claude-desktop/resources/original-claude.app/Contents/Resources/ion-dist",
+    "current_ion_dist": "/Users/apple/work-py/hare-code/open-claude-desktop/resources/ion-dist",
+    "original_vite_mirror": "/Users/apple/work-py/hare-code/electron-shell-source/app-asar/.vite",
+    "current_vite": "/Users/apple/work-py/hare-code/open-claude-desktop/.vite",
+    "route_manifest": "/Users/apple/work-py/hare-code/docs/route-manifest.json",
+    "decompiled_root": "/Users/apple/work-py/hare-code/decompiled"
   },
   "checks": {
     "ion_dist": {
@@ -33,11 +34,8 @@
       "missing": [],
       "extra": [],
       "changed": [],
-      "allowed_changed": [
-        "build/index.js",
-        "build/index.pre.js"
-      ],
-      "exact": false,
+      "allowed_changed": [],
+      "exact": true,
       "aligned_with_allowlist": true
     },
     "fonts": {
@@ -131,8 +129,8 @@
         }
       },
       "current_package": {
-        "name": "claude-deepseek-desktop",
-        "version": "1.6608.2-deepseek.0",
+        "name": "claudex-desktop",
+        "version": "1.6608.2-claudex.0",
         "ui_libraries": {
           "@phosphor-icons/react": "2.1.4",
           "@tailwindcss/forms": "^0.5.3",
@@ -149,35 +147,7 @@
       "current_ui_version_mismatches": []
     },
     "routes": {
-      "manifest_exists": true,
-      "route_count": 176,
-      "chunk_route_count": 152,
-      "chunk_routes_with_assets": 152,
-      "chunk_routes_with_decompiled_source": 152,
-      "key_routes": [
-        {
-          "path": "desktop_landing",
-          "chunk": "assets/v1/c71860c77-o4uW2kNW.js",
-          "chunk_exists": true,
-          "decompiled": "claude-ion-react-workbench\\decompiled\\c71860c77-o4uW2kNW\\deobfuscated.js",
-          "decompiled_exists": true
-        },
-        {
-          "path": "setup-desktop-3p",
-          "chunk": "assets/v1/c71860c77-BOaDa5w5.js",
-          "chunk_exists": true,
-          "decompiled": "claude-ion-react-workbench\\decompiled\\c71860c77-BOaDa5w5\\deobfuscated.js",
-          "decompiled_exists": true
-        },
-        {
-          "path": "device-code-verify",
-          "chunk": "assets/v1/c2ab4f27a-BT9l0ItR.js",
-          "chunk_exists": true,
-          "decompiled": "claude-ion-react-workbench\\decompiled\\c2ab4f27a-BT9l0ItR\\deobfuscated.js",
-          "decompiled_exists": true
-        }
-      ],
-      "missing_chunk_assets": []
+      "manifest_exists": false
     },
     "component_token_evidence": {
       "React": [

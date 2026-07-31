@@ -1,12 +1,12 @@
 # Electron 壳功能对齐审计
 
-生成时间：2026-07-08T09:28:32.535Z
+生成时间：2026-07-30T03:37:54.254Z
 
 ## 结论
 
 - 原包 build 壳入口镜像：完整
 - 当前 build 壳入口：完整
-- 当前 preload invoke 通道是否与原包完全一致：是
+- 当前 preload invoke 通道是否与原包完全一致：否
 - packaged app.asar 的 .vite/build + .vite/renderer 条目是否与原包一致：未检测
 - 当前原包 runtime native/node modules 是否完整：是
 - packaged 原包 runtime native/node modules 是否完整：否

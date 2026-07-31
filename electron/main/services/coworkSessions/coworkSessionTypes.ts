@@ -158,6 +158,11 @@ export interface CoworkRuntimeQuery extends AsyncIterable<CoworkSdkMessage> {
    * host-loop after addUserSelectedFolder.
    */
   applyFlagSettings?(settings: CoworkFlagSettings): Promise<void>;
+  /**
+   * Official Query.cancelAsyncMessage(uuid) — cancel an in-flight async user
+   * message when it has already left the local deferred/inputStream queues.
+   */
+  cancelAsyncMessage?(uuid: string): Promise<boolean>;
   close(): void;
   interrupt(): Promise<void>;
   setModel(model: string): Promise<void>;
@@ -174,6 +179,8 @@ export interface CoworkRuntimeInputStream {
   done(): void;
   enqueue(message: CoworkSdkUserMessage): void;
   hasPending(): boolean;
+  /** Official inputStream.remove(uuid) for cancelQueuedMessage. */
+  remove?(uuid: string): boolean;
 }
 
 export type CoworkQueuedStartMessage = {

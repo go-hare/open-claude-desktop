@@ -14,6 +14,7 @@ import { respondCoworkSlashMenuSkills } from "../services/coworkRuntime/coworkSk
 import type { IpcHandlerContext } from "./context";
 import { assertCoworkIpcOrigin } from "./coworkIpcOrigin";
 import { parseCoworkSendMessageArgs } from "./coworkSendMessageContract";
+import { createCoworkLocalAgentResidualHandlers } from "./coworkLocalAgentResidualHandlers";
 import { createCoworkSessionWorkspaceHandlers } from "./coworkSessionWorkspaceHandlers";
 import type { InterfaceHandlers, IpcHandler } from "./registerIpc";
 import { registerInterfaceHandlers } from "./registerIpc";
@@ -171,6 +172,23 @@ export function createCoworkSessionHandlers(manager: CoworkSessionManager): Inte
         request.messageUuid,
         request.toolStates,
       );
+    }),
+    /**
+     * Official LocalAgentModeSessions.cancelQueuedMessage(sessionId, messageUuid).
+     * Same residual as LocalSessions — drop deferred/inputStream uuid before too-late.
+     */
+    cancelQueuedMessage: secured(async (_event, id, messageUuid) => {
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error(
+          'Argument "sessionId" at position 0 to method "cancelQueuedMessage" in interface "LocalAgentModeSessions" failed to pass validation',
+        );
+      }
+      if (typeof messageUuid !== "string" || messageUuid.length === 0) {
+        throw new Error(
+          'Argument "messageUuid" at position 1 to method "cancelQueuedMessage" in interface "LocalAgentModeSessions" failed to pass validation',
+        );
+      }
+      return manager.cancelQueuedMessage(id, messageUuid);
     }),
     setModel: secured(async (_event, id, model) =>
       manager.setModel(sessionId(id), sessionId(model)),
@@ -390,18 +408,102 @@ export function registerCoworkSessionsHandlers(context: IpcHandlerContext): void
     {
       ...createCoworkSessionHandlers(context.localAgentModeSessions),
       ...createCoworkSessionWorkspaceHandlers(context),
+      // Skills / bridge / TCC / direct-MCP / interactiveAuth / mcp resources residuals.
+      ...createCoworkLocalAgentResidualHandlers(context),
       // Official Dispatch Ht (cc989143e): Xe.get/setSessionsBridgeEnabled on LocalAgentModeSessions.
+      // 3p product has no Anthropic remote sessions bridge — prefs may round-trip, but
+      // never soft-true "ready"/live poll. Status stays unavailable while bridge is absent.
       getSessionsBridgeEnabled: async () => {
-        const prefs = context.settings.getPreferences();
-        return prefs.sessionsBridgeEnabled !== false;
+        // Honest runtime: bridge is not available in 3p residual, regardless of pref.
+        return false;
       },
       setSessionsBridgeEnabled: async (_event, enabled) => {
-        context.settings.setPreference("sessionsBridgeEnabled", enabled !== false);
+        // Persist pref for UI toggle round-trip only; does not activate remote bridge.
+        context.settings.setPreference("sessionsBridgeEnabled", enabled === true);
         return true;
       },
       sessionsBridgeStatus_$store$_getState: async () => {
-        const enabled = context.settings.getPreferences().sessionsBridgeEnabled !== false;
-        return { enabled, status: enabled ? "ready" : "disabled" };
+        // Official getInitialSessionsBridgeStatusState also carries conflict/dispatchAgentName.
+        // Product: no poller → never report ready (even if pref true).
+        return {
+          enabled: false,
+          status: "unavailable",
+          conflict: false,
+          dispatchAgentName: null,
+          reason: "sessions_bridge_unavailable",
+        };
+      },
+      /**
+       * Official BrowserUse / Gir internal MCP route:
+       * mcpCallTool("Claude in Chrome", list_connected_browsers|select_browser|…).
+       * Not user mcp-servers.json — socket client residual (no OAuth bridge invent).
+       */
+      mcpCallTool: async (_event, serverName, toolName, input) => {
+        const name =
+          typeof toolName === "string" && toolName.length > 0
+            ? toolName
+            : typeof toolName === "object" &&
+                toolName !== null &&
+                typeof (toolName as { name?: unknown }).name === "string"
+              ? (toolName as { name: string }).name
+              : null;
+        if (!name) {
+          return { ok: false, error: "missing_mcp_tool_name", serverName };
+        }
+        try {
+          const {
+            isClaudeInChromeMcpServerName,
+            callClaudeInChromeTool,
+          } = await import("../services/chrome/claudeInChromeMcp");
+          if (isClaudeInChromeMcpServerName(serverName)) {
+            // Live re-read each call — do not freeze prefs into singleton MCP context.
+            // BrowserUse hits LocalAgentModeSessions.mcpCallTool; may race Kir init.
+            return callClaudeInChromeTool(
+              name,
+              typeof input === "object" && input !== null
+                ? (input as Record<string, unknown>)
+                : {},
+              {
+                isEnabled: () => {
+                  const prefs = context.settings.getPreferences();
+                  return prefs.chromeExtensionEnabled !== false;
+                },
+                getPersistedDeviceId: () => {
+                  const prefs = context.settings.getPreferences();
+                  const bag =
+                    prefs.chromeExtension &&
+                    typeof prefs.chromeExtension === "object" &&
+                    !Array.isArray(prefs.chromeExtension)
+                      ? (prefs.chromeExtension as Record<string, unknown>)
+                      : {};
+                  return typeof bag.pairedDeviceId === "string"
+                    ? bag.pairedDeviceId
+                    : undefined;
+                },
+                onExtensionPaired: (deviceId, pairedName) => {
+                  const prefs = context.settings.getPreferences();
+                  const prev =
+                    prefs.chromeExtension &&
+                    typeof prefs.chromeExtension === "object" &&
+                    !Array.isArray(prefs.chromeExtension)
+                      ? (prefs.chromeExtension as Record<string, unknown>)
+                      : {};
+                  context.settings.setPreference("chromeExtension", {
+                    ...prev,
+                    pairedDeviceId: deviceId,
+                    pairedDeviceName: pairedName,
+                  });
+                },
+              },
+            );
+          }
+        } catch (error) {
+          console.warn(
+            "[Chrome Extension MCP] LocalAgentModeSessions.mcpCallTool failed",
+            error,
+          );
+        }
+        return { ok: false, error: "mcp_server_not_configured", serverName };
       },
     },
     "claude.web.LocalAgentModeSessions",
