@@ -193,3 +193,6 @@ Web 侧对应：`open-claude-web/src/adapters/desktopBridge/`、`features/*`。
 | [`docs/package-and-test.md`](docs/package-and-test.md) | 打包 / 测试 / dual-root / smoke 全规范 |
 | [`../open-claude-web/README.md`](../open-claude-web/README.md) | 产品 SPA 说明与开发命令 |
 | `docs/electron-shell-*.md` / `*.json` | 壳覆盖、功能 gap、bundle 对齐报告 |
+
+## 链接
+- [((https://linux.do/))](https://linux.do/) — linux.do 社区
