@@ -37,6 +37,7 @@ import { CoworkSessionPersistence } from "../services/coworkSessions/coworkSessi
 import { ScheduledTaskStore } from "../services/scheduledTasks/scheduledTaskStore";
 import { SettingsStore } from "../services/settings/settingsStore";
 import { isEagerConnectorToolLoadFromUserData } from "../services/settings/toolAccessMode";
+import type { WindowStateKeeper } from "../lifecycle/windowState";
 import type { DesktopWindowParts } from "../windows/types";
 import type { IpcHandlerContext } from "./context";
 import { registerAppBindingsHandlers } from "./appBindingsHandlers";
@@ -52,7 +53,10 @@ import { registerStoreStateHandlers } from "./storeStateHandlers";
 import { registerWebMiscHandlers } from "./webMiscHandlers";
 import { registerWindowHandlers } from "./windowHandlers";
 
-export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandlerContext {
+export function createDefaultIpcContext(
+  windows: DesktopWindowParts,
+  options?: { windowState?: WindowStateKeeper },
+): IpcHandlerContext {
   const coworkAccount = new CoworkAccountContext({
     loadBootstrapIdentity: loadCoworkBootstrapIdentity,
   });
@@ -288,6 +292,8 @@ export function createDefaultIpcContext(windows: DesktopWindowParts): IpcHandler
     localAgentModeSessions,
     scheduledTasks: new ScheduledTaskStore(),
     settings,
+    // Official n5 for F1t resetMainWindowBounds (got/jsA mode change).
+    windowState: options?.windowState,
   };
 }
 

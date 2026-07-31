@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-30T06:03:30.471Z",
+  "generated_at": "2026-07-31T13:29:04.364Z",
   "packaged": true,
   "signal": "SIGKILL",
   "marker": {
@@ -19,8 +19,8 @@
       "帮助"
     ],
     "ipcHandlers": {
-      "total": 553,
-      "real": 553,
+      "total": 577,
+      "real": 577,
       "fallback": 0,
       "byOwner": {
         "claude.web.WindowControl": 6,
@@ -34,7 +34,7 @@
         "claude.web.FindInPageProvider": 2,
         "claude.web.LocalSessions": 129,
         "claude.web.LocalSessionEnvironment": 2,
-        "claude.web.LocalAgentModeSessions": 38,
+        "claude.web.LocalAgentModeSessions": 62,
         "claude.web.LocalAgentModeSessions.store": 4,
         "claude.web.CCDScheduledTasks": 9,
         "claude.web.CoworkScheduledTasks": 9,
@@ -103,8 +103,8 @@
     }
   },
   "ipcHandlers": {
-    "total": 553,
-    "real": 553,
+    "total": 577,
+    "real": 577,
     "fallback": 0,
     "byOwner": {
       "claude.web.WindowControl": 6,
@@ -118,7 +118,7 @@
       "claude.web.FindInPageProvider": 2,
       "claude.web.LocalSessions": 129,
       "claude.web.LocalSessionEnvironment": 2,
-      "claude.web.LocalAgentModeSessions": 38,
+      "claude.web.LocalAgentModeSessions": 62,
       "claude.web.LocalAgentModeSessions.store": 4,
       "claude.web.CCDScheduledTasks": 9,
       "claude.web.CoworkScheduledTasks": 9,

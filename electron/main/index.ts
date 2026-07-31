@@ -234,7 +234,8 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
 
     windowState.manage(windows.mainWindow);
     installWindowStateEventDispatch(windows);
-    const context = createDefaultIpcContext(windows);
+    // Official OOe(r) + pot/got F1t: keep n5 on IPC context for resetMainWindowBounds.
+    const context = createDefaultIpcContext(windows, { windowState });
     // Official win32: close quits when !gi("menuBarEnabled").
     shouldQuitWhenTrayDisabled = () =>
       shouldQuitOnMainWindowClose({

@@ -419,8 +419,10 @@ export function registerCoworkSessionsHandlers(context: IpcHandlerContext): void
       },
       setSessionsBridgeEnabled: async (_event, enabled) => {
         // Persist pref for UI toggle round-trip only; does not activate remote bridge.
+        // Return value is effective runtime enabled (always false in 3p residual) —
+        // never soft-true success that implies Anthropic sessions bridge is live.
         context.settings.setPreference("sessionsBridgeEnabled", enabled === true);
-        return true;
+        return false;
       },
       sessionsBridgeStatus_$store$_getState: async () => {
         // Official getInitialSessionsBridgeStatusState also carries conflict/dispatchAgentName.

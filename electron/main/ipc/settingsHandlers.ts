@@ -35,7 +35,6 @@ import {
   recheckConfigHealth as recheckCustom3pConfigHealth,
 } from "../services/custom3p/custom3pConfigHealth";
 import { custom3pBootstrapState, custom3pLoginDesktopStatus } from "../services/custom3p/custom3pStatus";
-import { resolveAnthropicMainWindowUrl } from "../windows/routeMode";
 import {
   deleteInstalledExtension,
   ensureExtensionFolders,
@@ -1159,34 +1158,84 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         // Official got: mode !== "3p" process relaunch after write.
         // Product soft SPA host (open-claude-web):
         //   - "3p" / "dotClaude": write only (renderer soft-leaves to Cowork)
-        //   - "clear": write only (renderer soft-leaves to /login after signed-out
-        //     interstitial). Process kill here made countdown-end wait for full
-        //     relaunch (~seconds) and flashed chooser mid-exit.
-        //   - "1p": official hai getMainWindowUrl → mN https://claude.ai (real Anthropic
-        //     login). Prior product only relaunched into product SPA → Sign in card
-        //     looked dead (chooser remount). Navigate mainView to mN first, then relaunch.
+        //   - "clear": write-only when already on product app:// (renderer soft-leaves
+        //     to /login after signed-out interstitial). Process kill made countdown
+        //     wait for full relaunch and flashed chooser mid-exit.
+        //     BUT if mainView is Anthropic mN host (after NQt("1p")), residual LoginRoute
+        //     jn can stick on d2t variant "chooser" with onDone=clear — write-only clear
+        //     never tears that host down. Reload product LoginDesktop (app://…/login).
+        //   - "1p": official got → jsA + clear session + relaunch only (no soft loadURL).
+        //     Cold start loads mN via resolveMainWindowLoadUrl(persisted 1p).
         if (mode === "1p") {
-          // Official loadAll: or() + pathname /task/new — not marketing https://claude.ai/
-          const sidebarMode = settings.getPreferences()?.sidebarMode;
-          const anthropicUrl = resolveAnthropicMainWindowUrl(
-            sidebarMode === "code" || sidebarMode === "epitaxy"
-              ? "epitaxy"
-              : sidebarMode === "task"
-                ? "task"
-                : "chat",
-          );
+          // Official got(e,A) residual (app.asar):
+          //   await jsA(e)
+          //   if e !== "3p": clear session credentials + relaunchApp(); return
+          //   // only "3p" may soft loadURL(CUSTOM_3P_ORIGIN) without relaunch
+          // jsA when mode changes: F1t resetMainWindowBounds =
+          //   n5.unmanage() + unlink userData/window-state.json
+          // Must unmanage BEFORE exit: close/closed handlers otherwise re-save
+          // LoginRoute 600×600 into window-state and next cold start stays small.
+          // Also reset in-memory keeper to Cbe defaults so any late save cannot
+          // re-persist chooser bounds after unlink.
+          // Do NOT soft loadURL(mN) before exit — double-paints Anthropic Sign In.
+          // Cold start: Cbe({defaultWidth:1200,defaultHeight:800}) + mN via
+          // resolveMainWindowLoadUrl(persisted 1p); opacity 0 until shell did-finish-load.
           try {
-            const wc = context.windows.mainView?.webContents;
-            if (wc && !wc.isDestroyed()) {
-              void wc.loadURL(anthropicUrl);
-            }
+            context.windowState?.unmanage();
+            context.windowState?.resetStateToDefault();
           } catch {
-            /* relaunch still reloads with persisted 1p → resolveMainWindowLoadUrl mN+path */
+            /* continue unlink */
+          }
+          try {
+            const stateFile = path.join(app.getPath("userData"), "window-state.json");
+            await fs.unlink(stateFile).catch(() => {});
+          } catch {
+            /* relaunch still uses Cbe defaults when state missing / invalid */
           }
           setImmediate(() => {
             app.relaunch();
             app.exit(0);
           });
+        } else if (mode === "clear") {
+          // Residual LoginRoute jn (c632): d2t chooser onDone → ce("clear")/NQt("clear").
+          // Official process relaunch lands on void chooser. Product: if still on
+          // Anthropic host (or non-app URL), load product SPA /login so Cancel/onDone
+          // always returns to sign-in options (M5t / AnthropicEntry).
+          try {
+            const wc = context.windows.mainView?.webContents;
+            if (wc && !wc.isDestroyed()) {
+              const current = (() => {
+                try {
+                  return wc.getURL();
+                } catch {
+                  return "";
+                }
+              })();
+              const onProductApp =
+                current.startsWith("app://")
+                || current.startsWith("http://localhost")
+                || current.startsWith("https://localhost")
+                || current.startsWith("http://127.0.0.1")
+                || current.startsWith("https://127.0.0.1");
+              if (!onProductApp) {
+                const productBase =
+                  process.env.CLAUDE_DESKTOP_MAIN_VIEW_URL?.trim() || "app://localhost";
+                let loginUrl = "app://localhost/login";
+                try {
+                  const base = new URL(productBase);
+                  base.pathname = "/login";
+                  base.search = "";
+                  base.hash = "";
+                  loginUrl = base.toString();
+                } catch {
+                  loginUrl = "app://localhost/login";
+                }
+                void wc.loadURL(loginUrl);
+              }
+            }
+          } catch {
+            /* renderer soft-nav /login still handles product-app clear */
+          }
         }
         return true;
       },
