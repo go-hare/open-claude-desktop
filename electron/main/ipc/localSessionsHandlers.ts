@@ -17,7 +17,11 @@ import {
   saveLocalSkill,
   setLocalSkillEnabled,
 } from "../services/localSessions/localAgentAssets";
-import type { LocalSessionStore } from "../services/localSessions/localSessionStore";
+import {
+  LocalSessionStore,
+  type LocalSession,
+} from "../services/localSessions/localSessionStore";
+import { CoworkTrustedFolders } from "../services/coworkSessions/coworkTrustedFolders";
 import { parseEffortFlagSettings } from "../services/localSessions/claudeCliRunner";
 import { getOfficialCodeStats } from "../services/localSessions/codeStatsAggregation";
 import { getSupportedCommands } from "../services/localSessions/supportedCommands";
@@ -1080,7 +1084,26 @@ function createSessionHandlers(
    * ~/.claude/projects/*.jsonl here — that is on-demand getTranscript only.
    * CLI sessions enter the list via desktop start/import (importCliSession), not bulk scan.
    */
-  const listStoredSessions = (): unknown[] => store.getAll(true);
+  /**
+   * Official residual: trusted dirs live in preferences `localAgentModeTrustedFolders`
+   * (CoworkTrustedFolders), same bag as LocalAgentModeSessions. Never invent a
+   * sidebar session titled "Trusted folders" (old LocalSessionStore bug).
+   */
+  const trustedFolders = new CoworkTrustedFolders(context.settings);
+  // One-shot: lift legacy per-session trustedFolders + drop ghost trust sessions.
+  for (const legacy of store.getTrustedFolders()) {
+    trustedFolders.add(legacy);
+  }
+  store.purgeGhostTrustedFoldersSessions();
+
+  /**
+   * Durable store only. Ghost "Trusted folders" trust-storage rows never list.
+   * CLI sessions enter via desktop start/import (importCliSession), not bulk scan.
+   */
+  const listStoredSessions = (): unknown[] =>
+    store
+      .getAll(true)
+      .filter((session: LocalSession) => !LocalSessionStore.isGhostTrustedFoldersSession(session));
 
   const sendCodeMessage: IpcHandler = async (_event, id, text, images, permissionMode, messageUuid, options) => {
     const sessionId = asString(id);
@@ -1452,18 +1475,27 @@ function createSessionHandlers(
     addTrustedFolder: async (_event, folder) => {
       const target = asString(folder);
       if (!target) return false;
-      store.addTrustedFolder(target);
+      // Preferences bag — not a synthetic Code session (see CoworkTrustedFolders).
+      trustedFolders.add(target);
       return true;
     },
     removeTrustedFolder: async (_event, folder) => {
       const target = asString(folder);
       if (!target) return false;
-      store.removeTrustedFolder(target);
+      trustedFolders.remove(target);
+      store.removeTrustedFolder(target); // legacy session field cleanup
       return true;
     },
-    getTrustedFolders: async () => store.getTrustedFolders(),
-    isFolderTrusted: async (_event, folder) => Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)),
-    checkTrust: async (_event, folder) => ({ trusted: Boolean(asString(folder) && store.getTrustedFolders().includes(asString(folder)!)), sources: [] }),
+    getTrustedFolders: async () => trustedFolders.getAll(),
+    isFolderTrusted: async (_event, folder) => {
+      const target = asString(folder);
+      return Boolean(target && trustedFolders.isTrusted(target));
+    },
+    checkTrust: async (_event, folder) => {
+      const target = asString(folder);
+      const trusted = Boolean(target && trustedFolders.isTrusted(target));
+      return { trusted, sources: trusted ? ["preferences"] : [] };
+    },
     checkPty: async (_event, sessionId) => checkPtyAlive(asString(sessionId) ?? ""),
     checkRemoteTrust: async (_event, sshConfigRaw, folder) => {
       const sshConfig = sessionSshConfigFromUnknown(sshConfigRaw);
@@ -1497,7 +1529,8 @@ function createSessionHandlers(
     saveTrust: async (_event, folder) => {
       const target = asString(folder);
       if (!target) return false;
-      store.addTrustedFolder(target);
+      // Official residual: preferences localAgentModeTrustedFolders — never a sidebar session.
+      trustedFolders.add(target);
       return true;
     },
     getSessionsForScheduledTask: async (_event, scheduledTaskId) => {

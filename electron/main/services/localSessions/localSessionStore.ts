@@ -1318,21 +1318,55 @@ export class LocalSessionStore {
     return session;
   }
 
-  addTrustedFolder(folder: string): void {
-    const session = this.getAll(true)[0] ?? this.start({ title: "Trusted folders" });
-    session.trustedFolders = [...new Set([...(session.trustedFolders ?? []), folder])];
-    session.updatedAt = nowIso();
-    this.save();
+  /**
+   * @deprecated Trust is preferences (`localAgentModeTrustedFolders` via
+   * `CoworkTrustedFolders`), not a sidebar session. Kept only to migrate
+   * legacy per-session `trustedFolders` arrays. Never create a session here —
+   * product bug: empty list + first trust → synthetic title "Trusted folders"
+   * polluted Code 最近.
+   */
+  addTrustedFolder(_folder: string): void {
+    // no-op — LocalSessions handlers use CoworkTrustedFolders
   }
 
   removeTrustedFolder(folder: string): void {
+    let changed = false;
     for (const session of this.sessions.values()) {
-      session.trustedFolders = (session.trustedFolders ?? []).filter((item) => item !== folder);
+      const next = (session.trustedFolders ?? []).filter((item) => item !== folder);
+      if (next.length !== (session.trustedFolders ?? []).length) {
+        session.trustedFolders = next;
+        changed = true;
+      }
     }
-    this.save();
+    if (changed) this.save();
   }
 
+  /** Legacy paths embedded on sessions (for one-shot migrate → preferences). */
   getTrustedFolders(): string[] {
     return [...new Set(Array.from(this.sessions.values()).flatMap((session) => session.trustedFolders ?? []))];
+  }
+
+  /**
+   * Ghost residual of the old store bug: empty session whose only purpose was
+   * holding `trustedFolders`, titled "Trusted folders".
+   */
+  static isGhostTrustedFoldersSession(session: LocalSession): boolean {
+    if (session.title !== "Trusted folders") return false;
+    const messages = session.messages ?? [];
+    const transcript = session.transcript ?? [];
+    return messages.length === 0 && transcript.length === 0;
+  }
+
+  /** Drop ghost trust-storage sessions from the sidebar list. */
+  purgeGhostTrustedFoldersSessions(): number {
+    let removed = 0;
+    for (const [id, session] of [...this.sessions.entries()]) {
+      if (!LocalSessionStore.isGhostTrustedFoldersSession(session)) continue;
+      this.sessions.delete(id);
+      this.liveBuffers.delete(id);
+      removed += 1;
+    }
+    if (removed > 0) this.save();
+    return removed;
   }
 }
