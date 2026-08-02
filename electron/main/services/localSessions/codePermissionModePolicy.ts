@@ -53,7 +53,8 @@ export function normalizeCodePermissionMode(mode: string | null | undefined): st
 export function availableCodePermissionModes(
   bypassPermissionsModeEnabled: boolean,
 ): string[] {
-  const modes = ["default", "acceptEdits", "plan"];
+  // Official Os includes auto when the product surface offers it (plan-exit trust residual).
+  const modes = ["default", "acceptEdits", "plan", "auto"];
   if (bypassPermissionsModeEnabled === true) {
     modes.push("bypassPermissions");
   }

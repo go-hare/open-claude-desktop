@@ -31,6 +31,8 @@ const CODE_TRANSCRIPT_TYPES = new Set([
   "assistant",
   "auth_status",
   "prompt_suggestion",
+  // CLI residual: enqueue task-notification XML (task-id + tool-use-id) — Tasks + stdin lifecycle.
+  "queue-operation",
   "rate_limit_event",
   "result",
   "stream_event",
@@ -53,7 +55,7 @@ const TRANSCRIPT_CACHE_CAPACITY = 8;
 const METADATA_HEAD_BYTES = 512 * 1024;
 const METADATA_TAIL_BYTES = 256 * 1024;
 
-type AgentStat = { mtimeMs: number; size: number };
+type AgentStat = { mtimeMs: number; size: number; parentToolUseId?: string };
 
 /**
  * Official diskTranscriptCache entry shape:
@@ -255,8 +257,9 @@ export function stripThinkingBlocks(event: unknown): unknown | null {
 }
 
 /**
- * Official Utr residual — agent sub-transcript rows kept only when they carry
- * tool_use / tool_result content (assistant or user).
+ * Official Utr residual — agent sub-transcript tool rows (tool_use / tool_result).
+ * Product also keeps assistant text + user prompt strings so OfficialSubagentPane
+ * can stream more than bare tool chips (still filtered by parent_tool_use_id).
  */
 export function isAgentToolMessage(event: unknown): boolean {
   const record = asRecord(event);
@@ -270,11 +273,111 @@ export function isAgentToolMessage(event: unknown): boolean {
   });
 }
 
-function extractAgentId(event: JsonlRecord): string | undefined {
+/** Agent sidechain rows worth merging into the main transcript for the subagent pane. */
+function isAgentMergeMessage(event: unknown): boolean {
+  if (isAgentToolMessage(event)) return true;
+  const record = asRecord(event);
+  if (record.type === "assistant") {
+    const stripped = stripThinkingBlocks(record);
+    if (!stripped) return false;
+    const content = asRecord(stripped.message).content;
+    if (typeof content === "string") return content.trim().length > 0;
+    if (!Array.isArray(content)) return false;
+    return content.some((block) => {
+      const type = asRecord(block).type;
+      return type === "text" || type === "tool_use" || type === "tool_result";
+    });
+  }
+  if (record.type === "user") {
+    const content = asRecord(record.message).content;
+    if (typeof content === "string") return content.trim().length > 0;
+    if (!Array.isArray(content)) return false;
+    return content.some((block) => {
+      const type = asRecord(block).type;
+      return type === "text" || type === "tool_result";
+    });
+  }
+  return false;
+}
+
+type AgentLaunch = { agentId: string; parentToolUseId?: string };
+
+/**
+ * Discover async Agent/Task launches from main transcript rows.
+ * Real CLI: user tool_result carries toolUseResult.agentId + tool_use_id on the block.
+ * Legacy residual: toolUseResult.agentId may sit on the assistant row.
+ */
+function extractAgentLaunch(event: JsonlRecord): AgentLaunch | undefined {
+  // queue-operation residual: <task-id>agentId</task-id><tool-use-id>call-…</tool-use-id>
+  if (asString(event.type) === "queue-operation") {
+    const body = asString(event.content) ?? "";
+    if (!body.includes("<task-notification>")) return undefined;
+    const agentId = body.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
+    const parentToolUseId = body.match(/<tool-use-id>([^<]+)<\/tool-use-id>/)?.[1];
+    if (!agentId || !/^[a-zA-Z0-9_-]+$/.test(agentId)) return undefined;
+    return { agentId, parentToolUseId };
+  }
+
   const result = asRecord(event.toolUseResult);
   const agentId = asString(result.agentId);
-  if (agentId && /^[a-zA-Z0-9_-]+$/.test(agentId)) return agentId;
-  return undefined;
+  if (!agentId || !/^[a-zA-Z0-9_-]+$/.test(agentId)) return undefined;
+
+  let parentToolUseId =
+    asString(result.toolUseId)
+    ?? asString(result.tool_use_id)
+    ?? asString(event.tool_use_id)
+    ?? asString(event.toolUseId);
+
+  const content = asRecord(event.message).content;
+  if (!parentToolUseId && Array.isArray(content)) {
+    for (const block of content) {
+      const record = asRecord(block);
+      if (record.type === "tool_result") {
+        parentToolUseId = asString(record.tool_use_id) ?? asString(record.toolUseId);
+        if (parentToolUseId) break;
+      }
+    }
+  }
+  return { agentId, parentToolUseId };
+}
+
+function extractAgentId(event: JsonlRecord): string | undefined {
+  return extractAgentLaunch(event)?.agentId;
+}
+
+/**
+ * Current CLI layout: `{projectDir}/{cliSessionId}/subagents/agent-{id}.jsonl`
+ * Legacy residual (older Desktop): `{projectDir}/agent-{id}.jsonl`
+ */
+function agentJsonlCandidates(projectDir: string, cliSessionId: string, agentId: string): string[] {
+  return [
+    join(projectDir, cliSessionId, "subagents", `agent-${agentId}.jsonl`),
+    join(projectDir, `agent-${agentId}.jsonl`),
+  ];
+}
+
+async function resolveAgentJsonlPath(
+  projectDir: string,
+  cliSessionId: string,
+  agentId: string,
+): Promise<string | null> {
+  for (const filePath of agentJsonlCandidates(projectDir, cliSessionId, agentId)) {
+    try {
+      const stat = await lstat(filePath);
+      if (stat.isFile()) return filePath;
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+/** Stamp parent_tool_use_id so OfficialSubagentPane (dr/eke) can filter by tool use id. */
+function stampAgentParent(event: unknown, parentToolUseId?: string): unknown {
+  if (!parentToolUseId) return event;
+  const record = asRecord(event);
+  if (asString(record.parent_tool_use_id) || asString(record.parentToolUseId)) return event;
+  return { ...record, parent_tool_use_id: parentToolUseId };
 }
 
 function eventTimestamp(event: unknown): string | undefined {
@@ -295,7 +398,7 @@ function sortByTimestamp(events: unknown[]): void {
 async function parseMainChunk(
   content: string,
   into: unknown[],
-  agentIds: Set<string>,
+  agentLaunches: Map<string, string | undefined>,
 ): Promise<void> {
   for await (const line of iterateLines(content)) {
     let parsed: unknown;
@@ -315,12 +418,24 @@ async function parseMainChunk(
       into.push(record);
     }
 
-    const agentId = extractAgentId(record);
-    if (agentId) agentIds.add(agentId);
+    const launch = extractAgentLaunch(record);
+    if (launch) {
+      // Prefer first non-empty parent tool id; fill parent if an earlier row only had agentId.
+      const previous = agentLaunches.get(launch.agentId);
+      if (!agentLaunches.has(launch.agentId)) {
+        agentLaunches.set(launch.agentId, launch.parentToolUseId);
+      } else if (!previous && launch.parentToolUseId) {
+        agentLaunches.set(launch.agentId, launch.parentToolUseId);
+      }
+    }
   }
 }
 
-async function parseAgentChunk(content: string, into: unknown[]): Promise<void> {
+async function parseAgentChunk(
+  content: string,
+  into: unknown[],
+  parentToolUseId?: string,
+): Promise<void> {
   for await (const line of iterateLines(content)) {
     let parsed: unknown;
     try {
@@ -328,25 +443,36 @@ async function parseAgentChunk(content: string, into: unknown[]): Promise<void> 
     } catch {
       continue;
     }
-    if (isAgentToolMessage(parsed)) into.push(parsed);
+    if (!isAgentMergeMessage(parsed)) continue;
+    const record = asRecord(parsed);
+    // Keep tool rows as-is; strip thinking on assistant text rows so the pane is readable.
+    const event =
+      record.type === "assistant" && !isAgentToolMessage(parsed)
+        ? stripThinkingBlocks(record) ?? parsed
+        : parsed;
+    into.push(stampAgentParent(event, parentToolUseId));
   }
 }
 
 async function loadAgentFile(
   projectDir: string,
+  cliSessionId: string,
   agentId: string,
-): Promise<{ agentId: string; stat?: AgentStat; agentMsgs: unknown[] }> {
-  const filePath = join(projectDir, `agent-${agentId}.jsonl`);
+  parentToolUseId?: string,
+): Promise<{ agentId: string; stat?: AgentStat; agentMsgs: unknown[]; filePath?: string }> {
+  const filePath = await resolveAgentJsonlPath(projectDir, cliSessionId, agentId);
+  if (!filePath) return { agentId, agentMsgs: [] };
   try {
     const stat = await lstat(filePath);
     if (!stat.isFile()) return { agentId, agentMsgs: [] };
     const window = await readByteWindow(filePath, 0, stat.size);
     const agentMsgs: unknown[] = [];
-    await parseAgentChunk(window.content, agentMsgs);
+    await parseAgentChunk(window.content, agentMsgs, parentToolUseId);
     return {
       agentId,
-      stat: { mtimeMs: stat.mtimeMs, size: window.bytesConsumed },
+      stat: { mtimeMs: stat.mtimeMs, size: window.bytesConsumed, parentToolUseId },
       agentMsgs,
+      filePath,
     };
   } catch {
     return { agentId, agentMsgs: [] };
@@ -402,11 +528,13 @@ export async function readCodeTranscript(
   if (cached && cached.projectDir === projectDir) {
     const agentChecks = await Promise.all(
       Array.from(cached.agentStats, async ([agentId, prev]) => {
+        const filePath = await resolveAgentJsonlPath(projectDir, cliSessionId, agentId);
+        if (!filePath) return { agentId, prev, cur: undefined as Awaited<ReturnType<typeof lstat>> | undefined, filePath: null as string | null };
         try {
-          const cur = await lstat(join(projectDir, `agent-${agentId}.jsonl`));
-          return { agentId, prev, cur };
+          const cur = await lstat(filePath);
+          return { agentId, prev, cur, filePath };
         } catch {
-          return { agentId, prev, cur: undefined as Awaited<ReturnType<typeof lstat>> | undefined };
+          return { agentId, prev, cur: undefined as Awaited<ReturnType<typeof lstat>> | undefined, filePath };
         }
       }),
     );
@@ -433,32 +561,35 @@ export async function readCodeTranscript(
       try {
         const messages = cached.messages.slice();
         const agentStats = new Map(cached.agentStats);
-        const newAgentIds = new Set<string>();
+        const newAgentLaunches = new Map<string, string | undefined>();
 
         const delta = await readByteWindow(mainPath, cached.mainSize, mainStat.size);
-        await parseMainChunk(delta.content, messages, newAgentIds);
+        await parseMainChunk(delta.content, messages, newAgentLaunches);
         const mainSize = cached.mainSize + delta.bytesConsumed;
 
         // Agents already known: only parse growth; drop from "new" set.
-        for (const known of agentStats.keys()) newAgentIds.delete(known);
+        for (const known of agentStats.keys()) newAgentLaunches.delete(known);
 
+        // Parent tool ids already stamped on prior agent rows — keep undefined for growth
+        // so we don't invent a wrong parent; subagent filter already has prior stamped rows.
         const grown = await Promise.all(
-          agentChecks.map(async ({ agentId, prev, cur }) => {
-            if (!cur) return;
+          agentChecks.map(async ({ agentId, prev, cur, filePath }) => {
+            if (!cur || !filePath) return;
             if (cur.size === prev.size) {
-              agentStats.set(agentId, { mtimeMs: cur.mtimeMs, size: prev.size });
+              agentStats.set(agentId, {
+                mtimeMs: cur.mtimeMs,
+                size: prev.size,
+                parentToolUseId: prev.parentToolUseId,
+              });
               return;
             }
-            const chunk = await readByteWindow(
-              join(projectDir, `agent-${agentId}.jsonl`),
-              prev.size,
-              cur.size,
-            );
+            const chunk = await readByteWindow(filePath, prev.size, cur.size);
             const extra: unknown[] = [];
-            await parseAgentChunk(chunk.content, extra);
+            await parseAgentChunk(chunk.content, extra, prev.parentToolUseId);
             agentStats.set(agentId, {
               mtimeMs: cur.mtimeMs,
               size: prev.size + chunk.bytesConsumed,
+              parentToolUseId: prev.parentToolUseId,
             });
             return extra;
           }),
@@ -468,9 +599,11 @@ export async function readCodeTranscript(
         }
 
         let agentsComplete = true;
-        if (newAgentIds.size > 0) {
+        if (newAgentLaunches.size > 0) {
           const loaded = await Promise.all(
-            Array.from(newAgentIds, (id) => loadAgentFile(projectDir, id)),
+            Array.from(newAgentLaunches, ([id, parentToolUseId]) =>
+              loadAgentFile(projectDir, cliSessionId, id, parentToolUseId),
+            ),
           );
           for (const { agentId, stat, agentMsgs } of loaded) {
             if (!stat) {
@@ -516,13 +649,15 @@ export async function readCodeTranscript(
   }
 
   const messages: unknown[] = [];
-  const agentIds = new Set<string>();
-  await parseMainChunk(mainWindow.content, messages, agentIds);
+  const agentLaunches = new Map<string, string | undefined>();
+  await parseMainChunk(mainWindow.content, messages, agentLaunches);
 
   const agentStats = new Map<string, AgentStat>();
-  if (agentIds.size > 0) {
+  if (agentLaunches.size > 0) {
     const loaded = await Promise.all(
-      Array.from(agentIds, (id) => loadAgentFile(projectDir, id)),
+      Array.from(agentLaunches, ([id, parentToolUseId]) =>
+        loadAgentFile(projectDir, cliSessionId, id, parentToolUseId),
+      ),
     );
     for (const { agentId, stat, agentMsgs } of loaded) {
       if (stat) agentStats.set(agentId, stat);
@@ -533,7 +668,7 @@ export async function readCodeTranscript(
   sortByTimestamp(messages);
 
   // Official only caches when every discovered agent file loaded successfully.
-  if (agentStats.size === agentIds.size) {
+  if (agentStats.size === agentLaunches.size) {
     rememberTranscript(cliSessionId, {
       projectDir,
       mainMtimeMs: mainStat.mtimeMs,

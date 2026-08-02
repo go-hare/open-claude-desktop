@@ -29,6 +29,7 @@ it("forwards stream events raw, buffers canonical messages, and exposes failures
   const session = runningSession();
   session.query = query;
   const onQueryCompleted = vi.fn();
+  const save = vi.fn();
   const runtime = new CoworkQueryRuntime({
     emit: (event) => events.push(event),
     isCurrent: () => true,
@@ -36,11 +37,16 @@ it("forwards stream events raw, buffers canonical messages, and exposes failures
     onClosed: () => undefined,
     onQueryCompleted,
     query,
-    save: () => undefined,
+    save,
     session,
   });
   const running = runtime.run();
-  const streamEvent = { event: { delta: "partial" }, type: "stream_event" };
+  // Non-delta stream_event emits immediately (official coalesce path).
+  const streamEvent = {
+    type: "stream_event",
+    parent_tool_use_id: null,
+    event: { type: "message_start", message: { id: "msg_1" } },
+  };
   query.push(streamEvent);
   query.push({ error: "rate_limit", type: "assistant", uuid: "assistant-1" });
   query.push({ is_error: true, result: "rate limited", type: "result" });
@@ -57,11 +63,79 @@ it("forwards stream events raw, buffers canonical messages, and exposes failures
     "assistant",
     "result",
   ]);
+  // Official: stream_event never saveSession; durable messages do.
+  expect(save.mock.calls.length).toBeGreaterThan(0);
   expect(session).toMatchObject({
     error: "rate limited",
     lifecycleState: "idle",
   });
   expect(onQueryCompleted).toHaveBeenCalledWith(session.sessionId);
+});
+
+it("coalesces consecutive text_delta stream_events and does not save on stream_event", async () => {
+  // Official LocalAgentModeSessionManager: Mtr=16ms coalesce + no saveSession for stream_event.
+  vi.useFakeTimers();
+  const events: CoworkSessionEvent[] = [];
+  const saves: number[] = [];
+  const query = new TestCoworkQuery();
+  const session = runningSession();
+  session.query = query;
+  const runtime = new CoworkQueryRuntime({
+    emit: (event) => events.push(event),
+    isCurrent: () => true,
+    now: () => 200,
+    onClosed: () => undefined,
+    query,
+    save: () => {
+      saves.push(Date.now());
+    },
+    session,
+  });
+  const running = runtime.run();
+  const savesBefore = saves.length;
+  query.push({
+    type: "stream_event",
+    parent_tool_use_id: null,
+    uuid: "se-1",
+    event: {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "Hel" },
+    },
+  });
+  query.push({
+    type: "stream_event",
+    parent_tool_use_id: null,
+    uuid: "se-2",
+    event: {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "lo" },
+    },
+  });
+  // Still inside coalesce window — no message emit yet for deltas.
+  await Promise.resolve();
+  const streamMessagesBeforeFlush = events.filter((e) => e.type === "message");
+  expect(streamMessagesBeforeFlush).toHaveLength(0);
+  expect(saves.length).toBe(savesBefore);
+  expect(session.messageBuffer).toEqual([]);
+
+  await vi.advanceTimersByTimeAsync(16);
+  await Promise.resolve();
+
+  const streamMessages = events.filter((e) => e.type === "message");
+  expect(streamMessages).toHaveLength(1);
+  const merged = streamMessages[0] as { message: { event?: { delta?: { text?: string } } } };
+  expect(merged.message.event?.delta?.text).toBe("Hello");
+  expect(saves.length).toBe(savesBefore);
+  expect(session.messageBuffer).toEqual([]);
+
+  query.push({ type: "assistant", uuid: "a1", message: { role: "assistant", content: [] } });
+  query.push({ type: "result", subtype: "success", is_error: false });
+  query.finish();
+  await running;
+  vi.useRealTimers();
+  expect(session.messageBuffer.map((m) => m.type)).toEqual(["assistant", "result"]);
 });
 
 it("reports a running stream that ends without a result", async () => {

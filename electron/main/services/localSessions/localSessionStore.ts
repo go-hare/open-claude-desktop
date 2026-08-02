@@ -134,6 +134,13 @@ export type LocalSession = {
    * Official seenCommentIds residual: map of `${repo}#${prNumber}` → comment ids.
    */
   seenCommentIds?: Record<string, string[]>;
+  /**
+   * Host-owned densable SDK task bookends (system task_started / task_progress /
+   * task_notification). CLI stream-json emits them on stdout but does **not** write
+   * them into session jsonl — after clearLiveBuffer / reload, Tasks (Jp) would lose
+   * lifecycle without this sidecar. Kept small; not full transcript.
+   */
+  taskBookends?: unknown[];
 };
 
 /** Official session.prs entry subset (number + state + optional url/title/repo). */
@@ -310,6 +317,65 @@ function messageIdentity(value: unknown): string | undefined {
   if (anthropicId) return anthropicId;
   if (typeof nested.uuid === "string" && nested.uuid.length > 0) return nested.uuid;
   return undefined;
+}
+
+/** densable SDK task bookend subtypes retained host-side for Jp Tasks reload. */
+const TASK_BOOKEND_SUBTYPES = new Set(["task_started", "task_progress", "task_notification"]);
+/** Cap host-owned bookends so code-sessions.json stays small. */
+const MAX_TASK_BOOKENDS = 200;
+
+function isTaskBookendEvent(event: unknown): boolean {
+  const raw = asRecord(event);
+  if (raw.type !== "system") return false;
+  const subtype = typeof raw.subtype === "string" ? raw.subtype : "";
+  return TASK_BOOKEND_SUBTYPES.has(subtype);
+}
+
+function taskBookendKey(event: unknown): string | undefined {
+  const raw = asRecord(event);
+  const taskId =
+    (typeof raw.task_id === "string" && raw.task_id)
+    || (typeof raw.taskId === "string" && raw.taskId)
+    || "";
+  const subtype = typeof raw.subtype === "string" ? raw.subtype : "";
+  if (!taskId || !subtype) {
+    const uuid = outerEventUuid(event);
+    return uuid ? `uuid:${uuid}` : undefined;
+  }
+  // One slot per lifecycle stage per task so process-exit host-exit residual +
+  // CLI dual-emit bookend collapse (uuid differs). task_progress latest-wins.
+  if (subtype === "task_progress") return `progress:${taskId}`;
+  return `${subtype}:${taskId}`;
+}
+
+function eventTimestampIso(event: unknown): string {
+  const raw = asRecord(event);
+  return typeof raw.timestamp === "string" ? raw.timestamp : "";
+}
+
+function mergeTranscriptWithTaskBookends(base: unknown[], bookends: unknown[]): unknown[] {
+  if (bookends.length === 0) return base;
+  const seenUuid = new Set(
+    base.map((event) => outerEventUuid(event)).filter((id): id is string => Boolean(id)),
+  );
+  const seenKey = new Set(
+    base.filter(isTaskBookendEvent).map((event) => taskBookendKey(event)).filter((k): k is string => Boolean(k)),
+  );
+  const missing = bookends.filter((event) => {
+    const uuid = outerEventUuid(event);
+    if (uuid && seenUuid.has(uuid)) return false;
+    const key = taskBookendKey(event);
+    if (key && seenKey.has(key)) return false;
+    return true;
+  });
+  if (missing.length === 0) return base;
+  // Stable interleave by ISO timestamp when present so started < notification.
+  return [...base, ...missing].sort((left, right) => {
+    const a = eventTimestampIso(left);
+    const b = eventTimestampIso(right);
+    if (a && b && a !== b) return a.localeCompare(b);
+    return 0;
+  });
 }
 
 /**
@@ -519,10 +585,14 @@ export class LocalSessionStore {
           if (outer && onDisk.has(outer)) return false;
           return true;
         });
-        return [...fromDisk, ...liveEvents];
+        // Layer host-owned task bookends (SDK stream-only) under live tail.
+        return mergeTranscriptWithTaskBookends(
+          [...fromDisk, ...liveEvents],
+          session.taskBookends ?? [],
+        );
       }
     }
-    return liveEvents;
+    return mergeTranscriptWithTaskBookends(liveEvents, session.taskBookends ?? []);
   }
 
   /**
@@ -809,7 +879,8 @@ export class LocalSessionStore {
       userSelectedFolders: folders,
       model: input.model,
       effort: input.effort,
-      permissionMode: input.permissionMode,
+      // Always seed a mode so spawn never sees undefined while Mode pill shows a value.
+      permissionMode: input.permissionMode ?? "default",
       sourceBranch: input.sourceBranch,
       useWorktree: input.useWorktree,
       worktreeName: input.worktreeName,
@@ -937,13 +1008,52 @@ export class LocalSessionStore {
     if (!outer || !this.liveBuffers.get(id)?.some((item) => outerEventUuid(item) === outer)) {
       this.appendLiveEvent(id, event);
     }
+    // Host-owned task bookends: SDK system task_* never land in CLI jsonl, so keep a
+    // small sidecar for Tasks pane after clearLiveBuffer / app reload.
+    if (isTaskBookendEvent(event)) {
+      this.rememberTaskBookend(session, event);
+    }
     session.updatedAt = timestamp;
     session.lastActivityAt = timestamp;
     this.save();
     return session;
   }
 
-  setRunning(id: string, isRunning: boolean, runtime?: Partial<LocalSessionRuntime>): LocalSession | null {
+  /**
+   * Persist densable task_started / task_progress / task_notification for Jp reload.
+   * Progress collapses to one row per task_id; others dedupe by uuid or subtype+task_id.
+   */
+  private rememberTaskBookend(session: LocalSession, event: unknown): void {
+    const key = taskBookendKey(event);
+    const list = Array.isArray(session.taskBookends) ? [...session.taskBookends] : [];
+    if (key) {
+      const index = list.findIndex((item) => taskBookendKey(item) === key);
+      if (index >= 0) list.splice(index, 1);
+    } else {
+      const uuid = outerEventUuid(event);
+      if (uuid) {
+        const index = list.findIndex((item) => outerEventUuid(item) === uuid);
+        if (index >= 0) list.splice(index, 1);
+      }
+    }
+    list.push(event);
+    while (list.length > MAX_TASK_BOOKENDS) list.shift();
+    session.taskBookends = list;
+  }
+
+  /**
+   * Host session.isRunning drives web isResponding (main spinner).
+   * densable: parent stream-json `result` may arrive while CLI still holds stdin for
+   * open task_started bookends (stop_task). UI must settle (isRunning=false) then;
+   * process-exit path still clears the live buffer. Mid-bookend settle must
+   * **preserveLiveBuffer** so task bookends / unflushed rows are not dropped.
+   */
+  setRunning(
+    id: string,
+    isRunning: boolean,
+    runtime?: Partial<LocalSessionRuntime>,
+    options?: { preserveLiveBuffer?: boolean },
+  ): LocalSession | null {
     const session = this.sessions.get(id);
     if (!session) return null;
     const timestamp = nowIso();
@@ -958,7 +1068,8 @@ export class LocalSessionStore {
     }
     // Turn ended → the CLI has flushed these events into the jsonl; drop the in-memory tail
     // so the next getTranscript reads from disk alone (single source of truth, like official).
-    if (!isRunning) this.clearLiveBuffer(id);
+    // Exception: parent-result UI settle while stoppable tasks still open (preserveLiveBuffer).
+    if (!isRunning && !options?.preserveLiveBuffer) this.clearLiveBuffer(id);
     session.updatedAt = timestamp;
     session.lastActivityAt = timestamp;
     this.save();
@@ -1129,6 +1240,8 @@ export class LocalSessionStore {
       // Sliced content stays in the live tail (memory) — not persisted to userData.
       messages: [],
       transcript: [],
+      // Bookends already interleaved into the sliced live transcript; avoid double-merge.
+      taskBookends: [],
       isRunning: false,
       stopped: false,
       runtime: { kind: "local", finishedAt: timestamp },
@@ -1157,6 +1270,8 @@ export class LocalSessionStore {
       // Sliced content stays in the live tail (memory) — not persisted to userData.
       messages: [],
       transcript: [],
+      // Bookends already interleaved into the sliced live transcript; avoid double-merge.
+      taskBookends: [],
       updatedAt: timestamp,
       lastActivityAt: timestamp,
       isRunning: false,
@@ -1184,6 +1299,7 @@ export class LocalSessionStore {
     if (!session) return false;
     session.messages = [];
     session.transcript = [];
+    session.taskBookends = [];
     this.clearLiveBuffer(id);
     session.updatedAt = nowIso();
     this.save();

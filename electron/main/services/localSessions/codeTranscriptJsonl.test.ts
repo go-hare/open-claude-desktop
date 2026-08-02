@@ -40,8 +40,12 @@ function writeAgentJsonl(
   cwd: string,
   agentId: string,
   lines: unknown[],
+  options?: { sessionId?: string; legacyRoot?: boolean },
 ): string {
-  const dir = path.join(configDir, "projects", mangleCodeProjectDir(cwd));
+  const projectDir = path.join(configDir, "projects", mangleCodeProjectDir(cwd));
+  const dir = options?.legacyRoot || !options?.sessionId
+    ? projectDir
+    : path.join(projectDir, options.sessionId, "subagents");
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, `agent-${agentId}.jsonl`);
   fs.writeFileSync(filePath, lines.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
@@ -204,44 +208,100 @@ it("readCodeTranscript: merges agent-*.jsonl tool rows by timestamp (official)",
     },
     {
       type: "assistant",
-      timestamp: "2026-07-27T01:00:02.000Z",
-      message: { role: "assistant", content: [{ type: "text", text: "done" }] },
-      toolUseResult: { agentId: "sub1" },
-    },
-  ]);
-  writeAgentJsonl(configDir, cwd, "sub1", [
-    {
-      type: "assistant",
-      timestamp: "2026-07-27T01:00:01.000Z",
+      timestamp: "2026-07-27T01:00:00.500Z",
       message: {
         role: "assistant",
-        content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }],
+        content: [{ type: "tool_use", id: "call_agent_1", name: "Agent", input: { description: "explore" } }],
       },
     },
     {
       type: "user",
-      timestamp: "2026-07-27T01:00:01.500Z",
+      timestamp: "2026-07-27T01:00:02.000Z",
       message: {
         role: "user",
-        content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
+        content: [{ type: "tool_result", tool_use_id: "call_agent_1", content: "launched" }],
       },
-    },
-    // non-tool agent chatter is dropped (Utr)
-    {
-      type: "assistant",
-      timestamp: "2026-07-27T01:00:01.200Z",
-      message: { role: "assistant", content: [{ type: "text", text: "noise" }] },
+      toolUseResult: { agentId: "sub1", status: "async_launched" },
     },
   ]);
+  // Current CLI: {sessionId}/subagents/agent-*.jsonl
+  writeAgentJsonl(
+    configDir,
+    cwd,
+    "sub1",
+    [
+      {
+        type: "assistant",
+        timestamp: "2026-07-27T01:00:01.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }],
+        },
+      },
+      {
+        type: "user",
+        timestamp: "2026-07-27T01:00:01.500Z",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
+        },
+      },
+      // assistant text is kept (subagent pane) and stamped with parent_tool_use_id
+      {
+        type: "assistant",
+        timestamp: "2026-07-27T01:00:01.200Z",
+        message: { role: "assistant", content: [{ type: "text", text: "noise" }] },
+      },
+    ],
+    { sessionId: "sess-agent" },
+  );
 
   const events = await readCodeTranscript("sess-agent", cwd, configDir);
   expect(events.map((e) => (e as { type: string; timestamp?: string }).timestamp)).toEqual([
     "2026-07-27T01:00:00.000Z",
+    "2026-07-27T01:00:00.500Z",
     "2026-07-27T01:00:01.000Z",
+    "2026-07-27T01:00:01.200Z",
     "2026-07-27T01:00:01.500Z",
     "2026-07-27T01:00:02.000Z",
   ]);
-  expect(events).toHaveLength(4);
+  const agentRows = events.filter((e) => (e as { parent_tool_use_id?: string }).parent_tool_use_id === "call_agent_1");
+  expect(agentRows).toHaveLength(3);
+});
+
+it("readCodeTranscript: still finds legacy project-root agent-*.jsonl", async () => {
+  const configDir = tempDir("code-tr-config-");
+  const cwd = "D:\\agents-legacy";
+  writeCliJsonl(configDir, cwd, "sess-legacy", [
+    {
+      type: "user",
+      cwd,
+      timestamp: "2026-07-27T01:00:00.000Z",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "call_legacy", content: "x" }],
+      },
+      toolUseResult: { agentId: "leg1" },
+    },
+  ]);
+  writeAgentJsonl(
+    configDir,
+    cwd,
+    "leg1",
+    [
+      {
+        type: "assistant",
+        timestamp: "2026-07-27T01:00:01.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }],
+        },
+      },
+    ],
+    { legacyRoot: true },
+  );
+  const events = await readCodeTranscript("sess-legacy", cwd, configDir);
+  expect(events.some((e) => (e as { parent_tool_use_id?: string }).parent_tool_use_id === "call_legacy")).toBe(true);
 });
 
 it("readCodeTranscript: caches by mtime/size; incremental append on same inode growth", async () => {

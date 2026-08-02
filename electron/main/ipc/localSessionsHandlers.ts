@@ -38,6 +38,7 @@ import {
   availableCodePermissionModes,
   clampCodePermissionMode,
 } from "../services/localSessions/codePermissionModePolicy";
+import { resolveDefaultPermissionMode } from "../services/localSessions/codeDefaultPermissionMode";
 import { CodeAutoArchiveEngine } from "../services/localSessions/codeAutoArchiveEngine";
 import { CodeAutoFixEngine } from "../services/localSessions/codeAutoFixEngine";
 import { isAutofixOnPrCreateFromUserData } from "../services/settings/toolAccessMode";
@@ -1092,12 +1093,21 @@ function createSessionHandlers(
     } : undefined;
     const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text, "user", messageRaw) : null;
     if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-    if (sessionId && session && typeof text === "string") sessionRunner.runTurn(sessionId, text, {
-      images,
-      messageUuid: asString(messageUuid),
-      permissionMode: asString(permissionMode),
-      userSelectedFiles,
-    });
+    if (sessionId && session && typeof text === "string") {
+      // Prefer explicit send mode; otherwise host session.permissionMode (web often omits).
+      // Omit key when neither is set so runTurn/buildClaudeArgs uses session fallback cleanly.
+      const explicitMode = asString(permissionMode);
+      const sessionMode =
+        typeof session.permissionMode === "string" && session.permissionMode.length > 0
+          ? session.permissionMode
+          : undefined;
+      sessionRunner.runTurn(sessionId, text, {
+        images,
+        messageUuid: asString(messageUuid),
+        ...(explicitMode || sessionMode ? { permissionMode: explicitMode ?? sessionMode } : {}),
+        userSelectedFiles,
+      });
+    }
     return bridgeSession(sessionId ? store.getSession(sessionId) ?? session : session);
   };
 
@@ -1326,7 +1336,18 @@ function createSessionHandlers(
       if (session.useWorktree || session.worktreeName) {
         await store.ensureWorktreeResolved(session.id);
       }
-      if (prompt || userSelectedFiles.length > 0) sessionRunner.runTurn(session.id, prompt, request);
+      if (prompt || userSelectedFiles.length > 0) {
+        // Re-read store so clamped permissionMode on the session is what spawn sees
+        // (request may omit mode; web start still puts it on startInput when present).
+        const live = store.getSession(session.id) ?? session;
+        sessionRunner.runTurn(session.id, prompt, {
+          ...request,
+          permissionMode:
+            asString(request.permissionMode)
+            ?? (typeof live.permissionMode === "string" ? live.permissionMode : undefined),
+          userSelectedFiles: userSelectedFiles.length > 0 ? userSelectedFiles : undefined,
+        });
+      }
       const scheduledTaskId = asString(request.scheduledTaskId);
       if (scheduledTaskId) {
         const task = context.scheduledTasks.recordRun(scheduledTaskId);
@@ -1399,12 +1420,21 @@ function createSessionHandlers(
       if (ok && sessionId) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
       return ok;
     },
-    stopTask: async (_event, id) => {
+    // Official densable Host Tasks Stop: control_request stop_task only — never session stop.
+    // UI echoPending is web Xr residual; durable bookend is CLI dual-emit on stdout.
+    stopTask: async (_event, id, taskId) => {
       const sessionId = asString(id);
-      if (sessionId) sessionRunner.stop(sessionId);
-      const ok = sessionId ? store.stop(sessionId) : false;
-      if (ok && sessionId) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
-      return ok;
+      const targetTaskId = asString(taskId);
+      if (!sessionId || !targetTaskId) {
+        return { ok: false, status: "failed", error: "sessionId and taskId are required" };
+      }
+      const result = await sessionRunner.stopTask(sessionId, targetTaskId);
+      // No host-stop invent; no session_stopped. CLI task_notification closes bookends.
+      return {
+        ok: result.status === "informed",
+        status: result.status,
+        ...(result.error ? { error: result.error } : {}),
+      };
     },
     searchSessions: async (_event, query) => store.search(String(query ?? "")),
     addDirectories: async (_event, id, directories) => {
@@ -1585,7 +1615,21 @@ function createSessionHandlers(
      * Official default for new Code draft is always "default".
      * bypassPermissionsModeEnabled only gates whether bypass is selectable — not the default.
      */
-    getDefaultPermissionMode: async () => "default",
+    /**
+     * Official CCD getDefaultPermissionMode(cwd):
+     *   bsA(cwd) settings merge → permissions.defaultMode (grt)
+     *   unset/invalid → null (UI seeds "default")
+     * Product was hardcoding "default" so new-session Mode always showed 询问权限
+     * even when ~/.claude/settings.json had permissions.defaultMode.
+     * Not "last Mode pill" persistence — that is per-session only.
+     */
+    getDefaultPermissionMode: async (_event, cwd) => {
+      const bypassOk =
+        asObject(context.settings.getPreferences()).bypassPermissionsModeEnabled === true;
+      return resolveDefaultPermissionMode(asString(cwd), {
+        bypassPermissionsModeEnabled: bypassOk,
+      });
+    },
     /** Modes the Code composer may offer (Os residual + bypass pref gate). */
     getAvailablePermissionModes: async () => {
       const bypassOk =
@@ -1599,32 +1643,53 @@ function createSessionHandlers(
     },
     setPermissionMode: async (_event, id, mode) => {
       const sessionId = asString(id);
+      if (!sessionId) return null;
+      const existing = store.getSession(sessionId);
+      if (!existing) return null;
       const bypassOk =
         asObject(context.settings.getPreferences()).bypassPermissionsModeEnabled === true;
       // Official clamp: bypass without pref → acceptEdits (app.asar residual).
       const nextMode = clampCodePermissionMode(String(mode ?? "default"), bypassOk);
-      // Persist host first so Mode pill / next --permission-mode see the value even if
-      // the active CLI turn rejects control_request (no turn / stdin closed).
-      const session = sessionId ? store.update(sessionId, { permissionMode: nextMode }) : null;
-      if (sessionId && session) {
-        // Active turn: official print.ts set_permission_mode → system/status fan-out.
-        // Best-effort — store update above is authoritative for UI + next spawn.
-        try {
-          await sessionRunner.setPermissionMode(sessionId, nextMode);
-        } catch {
-          // ignore — host mode still updated
-        }
-        const bridged = bridgeSession(session);
-        dispatchSessionEvent("session_updated", sessionId, session);
-        // Official ion Mode pill: permission_mode_changed → be(s.permissionMode).
+
+      // Official CCD residual (app.asar LocalSessions.setPermissionMode):
+      //   cli_informed = !!session.query
+      //   if (query) await query.setPermissionMode(mode) — must succeed before store
+      //   fail → do not paint success; product: emit permission_mode_change_failed + null
+      //   no query → host-only (next spawn/runTurn carries --permission-mode)
+      let cliResult: Awaited<ReturnType<typeof sessionRunner.setPermissionMode>>;
+      try {
+        cliResult = await sessionRunner.setPermissionMode(sessionId, nextMode);
+      } catch (error) {
+        cliResult = {
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      if (cliResult.status === "failed") {
         dispatchBridgeSessionEvent({
-          type: "permission_mode_changed",
+          type: "permission_mode_change_failed",
           sessionId,
           permissionMode: nextMode,
-          session: bridged,
+          error: cliResult.error,
+          session: bridgeSession(existing),
         });
+        // Do not update store / do not emit permission_mode_changed — Mode pill stays prior.
+        return null;
       }
-      return bridgeSession(session);
+
+      const session = store.update(sessionId, { permissionMode: nextMode });
+      if (!session) return null;
+      const bridged = bridgeSession(session);
+      dispatchSessionEvent("session_updated", sessionId, session);
+      // Official ion Mode pill: permission_mode_changed → be(s.permissionMode).
+      dispatchBridgeSessionEvent({
+        type: "permission_mode_changed",
+        sessionId,
+        permissionMode: nextMode,
+        session: bridged,
+        cli_informed: cliResult.status === "informed",
+      });
+      return bridged;
     },
     setModel: async (_event, id, model) => {
       const sessionId = asString(id);

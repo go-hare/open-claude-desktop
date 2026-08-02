@@ -101,6 +101,141 @@ it("getTranscript: reads jsonl from disk and appends the live tail while running
   });
 });
 
+it("taskBookends: system task_* survive clearLiveBuffer / turn end for Tasks reload", async () => {
+  const configDir = tempDir("code-task-bookends-");
+  await withConfigDir(configDir, async () => {
+    const { store, filePath } = makeStore();
+    const session = store.start({ prompt: "run agent", cwd: "D:\\proj", messageUuid: "user-1" });
+    store.setCliSessionId(session.id, "cli-book");
+    writeCliJsonl("D:\\proj", "cli-book", [
+      {
+        type: "user",
+        uuid: "user-1",
+        timestamp: "2026-08-01T11:00:00.000Z",
+        message: { role: "user", content: "run agent" },
+      },
+      {
+        type: "assistant",
+        uuid: "asst-1",
+        timestamp: "2026-08-01T11:00:01.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      },
+    ]);
+
+    store.appendTranscriptEvent(session.id, {
+      type: "system",
+      subtype: "task_started",
+      task_id: "tid-agent",
+      task_type: "local_agent",
+      description: "Worker",
+      uuid: "book-start",
+      timestamp: "2026-08-01T11:00:02.000Z",
+    });
+    store.appendTranscriptEvent(session.id, {
+      type: "system",
+      subtype: "task_notification",
+      task_id: "tid-agent",
+      status: "completed",
+      summary: "done",
+      uuid: "book-end",
+      timestamp: "2026-08-01T11:00:10.000Z",
+    });
+
+    // Turn end drops live buffer; bookends must still appear via host sidecar.
+    store.setRunning(session.id, false);
+    expect(store.getLiveEvents(session.id)).toHaveLength(0);
+    const settled = (await store.getTranscript(session.id)) as Array<{
+      type?: string;
+      subtype?: string;
+      task_id?: string;
+      status?: string;
+    }>;
+    const bookends = settled.filter((event) => event.type === "system" && (event.subtype === "task_started" || event.subtype === "task_notification"));
+    expect(bookends).toHaveLength(2);
+    expect(bookends.map((event) => event.subtype)).toEqual(["task_started", "task_notification"]);
+    expect(bookends[1]?.status).toBe("completed");
+
+    // Persisted to userData sessions file (small sidecar, not full transcript).
+    const disk = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+      sessions: Array<{ id: string; taskBookends?: unknown[] }>;
+    };
+    const row = disk.sessions.find((item) => item.id === session.id);
+    expect(Array.isArray(row?.taskBookends)).toBe(true);
+    expect(row?.taskBookends).toHaveLength(2);
+  });
+});
+
+it("taskBookends: process-exit host-exit residual collapses with later CLI task_notification", async () => {
+  const configDir = tempDir("code-task-host-exit-");
+  await withConfigDir(configDir, async () => {
+    const { store, filePath } = makeStore();
+    const session = store.start({ prompt: "run agent", cwd: "D:\\proj", messageUuid: "user-stop" });
+    store.setCliSessionId(session.id, "cli-stop");
+    writeCliJsonl("D:\\proj", "cli-stop", [
+      {
+        type: "user",
+        uuid: "user-stop",
+        timestamp: "2026-08-01T12:00:00.000Z",
+        message: { role: "user", content: "run agent" },
+      },
+    ]);
+
+    store.appendTranscriptEvent(session.id, {
+      type: "system",
+      subtype: "task_started",
+      task_id: "tid-stop",
+      task_type: "local_agent",
+      description: "Worker",
+      uuid: "book-start-stop",
+      timestamp: "2026-08-01T12:00:01.000Z",
+    });
+    // Process-exit residual only (host-exit-*). Stop button does not invent host-stop.
+    store.appendTranscriptEvent(session.id, {
+      type: "system",
+      subtype: "task_notification",
+      task_id: "tid-stop",
+      status: "stopped",
+      summary: "Process exited",
+      uuid: "host-exit-tid-stop",
+      timestamp: "2026-08-01T12:00:05.000Z",
+    });
+    // CLI dual-emit (or late drain) richer bookend — same task_id key collapses.
+    store.appendTranscriptEvent(session.id, {
+      type: "system",
+      subtype: "task_notification",
+      task_id: "tid-stop",
+      status: "stopped",
+      summary: "Agent stopped by user",
+      uuid: "cli-stop-bookend",
+      timestamp: "2026-08-01T12:00:05.200Z",
+    });
+
+    store.setRunning(session.id, false);
+    const settled = (await store.getTranscript(session.id)) as Array<{
+      type?: string;
+      subtype?: string;
+      task_id?: string;
+      status?: string;
+      summary?: string;
+      uuid?: string;
+    }>;
+    const notifications = settled.filter(
+      (event) => event.type === "system" && event.subtype === "task_notification" && event.task_id === "tid-stop",
+    );
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.uuid).toBe("cli-stop-bookend");
+    expect(notifications[0]?.summary).toBe("Agent stopped by user");
+
+    const disk = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+      sessions: Array<{ id: string; taskBookends?: Array<{ uuid?: string; subtype?: string }> }>;
+    };
+    const row = disk.sessions.find((item) => item.id === session.id);
+    const notifBookends = (row?.taskBookends ?? []).filter((item) => item.subtype === "task_notification");
+    expect(notifBookends).toHaveLength(1);
+    expect(notifBookends[0]?.uuid).toBe("cli-stop-bookend");
+  });
+});
+
 it("getTranscript: intentional same-text re-send keeps second live user (new uuid)", async () => {
   const configDir = tempDir("code-live-resend-");
   await withConfigDir(configDir, async () => {

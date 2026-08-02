@@ -42,10 +42,32 @@ type CoworkQueryRuntimeOptions = {
 };
 
 const maximumBufferedMessages = 1_100;
+/** Official LocalAgentModeSessionManager Mtr residual — stream delta coalesce window. */
+const STREAM_DELTA_COALESCE_MS = 16;
+
+type PendingStreamDelta = {
+  base: CoworkSdkMessage;
+  field: "text" | "partial_json" | "thinking";
+  index: number;
+  parentToolUseId: unknown;
+  parts: string[];
+  timer: ReturnType<typeof setTimeout>;
+};
 
 function messageString(message: CoworkSdkMessage, key: string) {
   const value = message[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function asMessageRecord(message: CoworkSdkMessage): Record<string, unknown> {
+  return message as Record<string, unknown>;
+}
+
+function streamEventInner(message: CoworkSdkMessage): Record<string, unknown> | null {
+  const event = asMessageRecord(message).event;
+  return typeof event === "object" && event !== null
+    ? (event as Record<string, unknown>)
+    : null;
 }
 
 function resultError(message: CoworkSdkMessage): string {
@@ -76,6 +98,11 @@ export class CoworkQueryRuntime {
   private readonly save: (session: CoworkSessionRuntimeState) => void;
   private readonly session: CoworkSessionRuntimeState;
   private readonly translateMessage?: CoworkQueryRuntimeOptions["translateMessage"];
+  /**
+   * Official session.pendingStreamDelta (LocalAgentModeSessionManager).
+   * Held on the runtime instance so disk session JSON never persists timers/parts.
+   */
+  private pendingStreamDelta: PendingStreamDelta | null = null;
 
   constructor(options: CoworkQueryRuntimeOptions) {
     this.emit = options.emit;
@@ -147,7 +174,8 @@ export class CoworkQueryRuntime {
       console.debug(
         `[APIError] Suppressing abort error for interrupted session ${this.session.sessionId}`,
       );
-      if (message.type !== "stream_event") this.bufferMessage(message);
+      this.flushPendingStreamDelta();
+      this.bufferMessage(message);
       this.session.lastActivityAt = this.now();
       this.emit({
         message,
@@ -157,8 +185,16 @@ export class CoworkQueryRuntime {
       this.save(this.session);
       return;
     }
-    if (message.type !== "stream_event") this.bufferMessage(message);
+    // Official LocalAgentModeSessionManager:
+    //   stream_event → coalesceOrEmitStreamEvent; never messageBuffer; never saveSession
+    //   other → flushPendingStreamDelta; push buffer; emit; save (result handled separately)
     this.session.lastActivityAt = this.now();
+    if (message.type === "stream_event") {
+      this.coalesceOrEmitStreamEvent(message);
+      return;
+    }
+    this.flushPendingStreamDelta();
+    this.bufferMessage(message);
     this.emit({
       message,
       sessionId: this.session.sessionId,
@@ -166,6 +202,104 @@ export class CoworkQueryRuntime {
     });
     if (message.type === "result") this.handleResult(message);
     else this.save(this.session);
+  }
+
+  /**
+   * Official coalesceOrEmitStreamEvent (app.asar LocalAgentModeSessionManager):
+   * consecutive content_block_delta text/partial_json/thinking with same
+   * (field, index, parent_tool_use_id) merge for Mtr=16ms before emit.
+   * Non-delta stream events flush + emit immediately. Never durable-buffer.
+   */
+  private coalesceOrEmitStreamEvent(message: CoworkSdkMessage): void {
+    const event = streamEventInner(message);
+    const delta =
+      event && typeof event.delta === "object" && event.delta !== null
+        ? (event.delta as Record<string, unknown>)
+        : null;
+    let field: PendingStreamDelta["field"] | undefined;
+    let part: string | undefined;
+    let index = 0;
+    if (event?.type === "content_block_delta" && delta) {
+      index = typeof event.index === "number" ? event.index : 0;
+      if (delta.type === "text_delta" && typeof delta.text === "string") {
+        field = "text";
+        part = delta.text;
+      } else if (
+        delta.type === "input_json_delta"
+        && typeof delta.partial_json === "string"
+      ) {
+        field = "partial_json";
+        part = delta.partial_json;
+      } else if (
+        delta.type === "thinking_delta"
+        && typeof delta.thinking === "string"
+      ) {
+        field = "thinking";
+        part = delta.thinking;
+      }
+    }
+    if (field === undefined || typeof part !== "string") {
+      this.flushPendingStreamDelta();
+      this.emitStreamMessage(message);
+      return;
+    }
+    const parentToolUseId = asMessageRecord(message).parent_tool_use_id;
+    const pending = this.pendingStreamDelta;
+    if (
+      pending
+      && pending.field === field
+      && pending.index === index
+      && pending.parentToolUseId === parentToolUseId
+    ) {
+      pending.parts.push(part);
+      return;
+    }
+    this.flushPendingStreamDelta();
+    this.pendingStreamDelta = {
+      base: message,
+      field,
+      index,
+      parentToolUseId,
+      parts: [part],
+      timer: setTimeout(() => {
+        this.flushPendingStreamDelta();
+      }, STREAM_DELTA_COALESCE_MS),
+    };
+  }
+
+  private flushPendingStreamDelta(): void {
+    const pending = this.pendingStreamDelta;
+    if (!pending) return;
+    this.pendingStreamDelta = null;
+    clearTimeout(pending.timer);
+    const base = asMessageRecord(pending.base);
+    const baseEvent =
+      typeof base.event === "object" && base.event !== null
+        ? (base.event as Record<string, unknown>)
+        : {};
+    const baseDelta =
+      typeof baseEvent.delta === "object" && baseEvent.delta !== null
+        ? (baseEvent.delta as Record<string, unknown>)
+        : {};
+    const merged: CoworkSdkMessage = {
+      ...base,
+      event: {
+        ...baseEvent,
+        delta: {
+          ...baseDelta,
+          [pending.field]: pending.parts.join(""),
+        },
+      },
+    };
+    this.emitStreamMessage(merged);
+  }
+
+  private emitStreamMessage(message: CoworkSdkMessage): void {
+    this.emit({
+      message,
+      sessionId: this.session.sessionId,
+      type: "message",
+    });
   }
 
   private handlePromptSuggestion(message: CoworkSdkMessage): void {
@@ -222,6 +356,8 @@ export class CoworkQueryRuntime {
   }
 
   private handleResult(message: CoworkSdkMessage): void {
+    // Official: non-stream path flushes pending delta before durable result handling.
+    this.flushPendingStreamDelta();
     const failed = isFailedResult(message);
     // Official failed-result interrupt short-circuit (p = is_error path):
     //   if _turnInterruptRequested || lifecycleState!=="running":
@@ -301,6 +437,7 @@ export class CoworkQueryRuntime {
   }
 
   private handleStreamEnd(): void {
+    this.flushPendingStreamDelta();
     if (this.session.lifecycleState !== "running") return;
     // Official interrupt short-circuit: do not surface "ended unexpectedly"
     // when user interrupted and stream closed without a result message.
@@ -335,6 +472,7 @@ export class CoworkQueryRuntime {
   }
 
   private handleStreamError(error: unknown): void {
+    this.flushPendingStreamDelta();
     if (
       ["idle", "stopping", "archived"].includes(this.session.lifecycleState)
     ) {

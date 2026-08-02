@@ -16,6 +16,13 @@ import type { LocalSession, LocalSessionStore, LocalToolPermissionRequest } from
 import { resolveSshRemoteCwd, spawnClaudeOverSsh } from "./sshCliSpawn";
 import { getClaudePreviewCliMcpConfigCache, setClaudePreviewSessionCwd } from "../launch/claudePreviewHostRegistry";
 import { asMcpServerMap, toCliMcpConfigWire } from "./mcpConfigWire";
+import {
+  applyStoppableTaskBookendEvent,
+  canContinueActiveTurnOnStdin,
+  canDetachDrainedActiveTurn,
+  resolveTurnPermissionMode,
+  shouldEndStdinAfterResult,
+} from "./claudeCliTurnLifecycle";
 
 type RunnerCallbacks = {
   onEvent: (event: Record<string, unknown>) => void;
@@ -41,6 +48,15 @@ type ActiveTurn = {
   activeUserUuid?: string;
   pendingControlResponses: Map<string, PendingControlResponse>;
   pendingPermissions: Map<string, LocalToolPermissionRequest>;
+  /**
+   * densable Tasks Stop residual: system task_started bookend task_ids only.
+   * Keeps child stdin open after parent `result` so stop_task control_request works
+   * while CLI is still in waiting_for_agents (bash/monitor/agent).
+   * dual-emit CLI closes these via system task_notification — do not track Agent tool_use ids.
+   */
+  openStoppableTasks: Set<string>;
+  /** Parent stream-json `result` already seen — may still hold stdin for workers. */
+  sawResult: boolean;
   stderr: string[];
   sawAssistantText: boolean;
 };
@@ -259,6 +275,16 @@ function normalizePermissionMode(value: string | undefined): string | undefined 
 }
 
 /**
+ * Result of informing the live CLI (or noting there is no active turn).
+ * Official CCD: store updates only after query.setPermissionMode succeeds when
+ * session.query is present; no query → host-only (cli_informed:false).
+ */
+export type SetPermissionModeCliResult =
+  | { status: "no_turn" }
+  | { status: "informed" }
+  | { status: "failed"; error: string };
+
+/**
  * Official CLI 2.7.14 --effort: low|medium|high|xhigh|max|ultracode.
  * Do not collapse xhigh→max or drop ultracode (host fidelity for Effort slider).
  */
@@ -396,7 +422,11 @@ function buildClaudeArgs(
   if (model) args.push("--model", model);
 
   // Official clamp (app.asar): bypassPermissions && !gi("bypassPermissionsModeEnabled") → acceptEdits.
-  let permissionMode = normalizePermissionMode(stringValue(request.permissionMode) ?? session.permissionMode);
+  // Host session.permissionMode is authoritative when web omits mode on send/start.
+  // Do not let empty request.permissionMode invent "default" over store bypass.
+  let permissionMode = normalizePermissionMode(
+    resolveTurnPermissionMode(request.permissionMode, session.permissionMode),
+  );
   if (permissionMode === "bypassPermissions" && options.bypassPermissionsModeEnabled !== true) {
     permissionMode = "acceptEdits";
   }
@@ -888,9 +918,56 @@ export class ClaudeCliRunner {
     const session = this.store.getSession(sessionId);
     const text = prompt.trim();
     if (!session || !text) return false;
-    if (this.active.has(sessionId)) {
-      this.emitError(sessionId, "claude_session_already_running");
-      return false;
+
+    // Prefer explicit request.messageUuid (web createMessageUuid / start seed). Fall back to
+    // the live-tail user seed uuid so CLI echo shares identity when home start omitted it.
+    const requestUuid = stringValue(request.messageUuid) ?? stringValue(request.uuid);
+    const seededUuid = (() => {
+      if (requestUuid) return requestUuid;
+      for (const event of this.store.getLiveEvents(sessionId)) {
+        const record = asRecord(event);
+        if (stringValue(record.type) !== "user") continue;
+        const eventText =
+          stringValue(record.text)
+          ?? contentText(asRecord(record.message).content)
+          ?? stringValue(asRecord(record.message).content);
+        if ((eventText ?? "").trim() !== text) continue;
+        return stringValue(record.uuid) ?? stringValue(record.messageUuid) ?? stringValue(record.id);
+      }
+      return undefined;
+    })();
+
+    // densable multi-turn residual: parent result may clear isRunning while CLI still
+    // holds the same stdin for open bookends / waiting_for_agents. Next user line must
+    // continue on that stdin — not spawn a second child (claude_session_already_running).
+    const existingTurn = this.active.get(sessionId);
+    if (existingTurn) {
+      if (
+        canContinueActiveTurnOnStdin({
+          sawResult: existingTurn.sawResult,
+          stdinDestroyed: existingTurn.child.stdin.destroyed,
+          stdinWritableEnded: existingTurn.child.stdin.writableEnded,
+        })
+      ) {
+        return this.continueActiveTurn(sessionId, existingTurn, text, request, seededUuid);
+      }
+      // Stdin already ended after result (no open bookends) but close not yet fired —
+      // detach so a fresh spawn can start. close handler is idempotent.
+      if (
+        canDetachDrainedActiveTurn({
+          sawResult: existingTurn.sawResult,
+          openStoppableTaskCount: existingTurn.openStoppableTasks.size,
+          stdinDestroyed: existingTurn.child.stdin.destroyed,
+          stdinWritableEnded: existingTurn.child.stdin.writableEnded,
+        })
+      ) {
+        this.clearPendingControlResponses(existingTurn);
+        this.clearPendingPermissions(sessionId, existingTurn);
+        if (this.active.get(sessionId) === existingTurn) this.active.delete(sessionId);
+      } else {
+        this.emitError(sessionId, "claude_session_already_running");
+        return false;
+      }
     }
 
     const executable = defaultClaudeExecutable();
@@ -927,24 +1004,6 @@ export class ClaudeCliRunner {
     });
     this.callbacks.onSessionUpdated(sessionId);
 
-    // Prefer explicit request.messageUuid (web createMessageUuid / start seed). Fall back to
-    // the live-tail user seed uuid so CLI echo shares identity when home start omitted it.
-    const requestUuid = stringValue(request.messageUuid) ?? stringValue(request.uuid);
-    const seededUuid = (() => {
-      if (requestUuid) return requestUuid;
-      for (const event of this.store.getLiveEvents(sessionId)) {
-        const record = asRecord(event);
-        if (stringValue(record.type) !== "user") continue;
-        const eventText =
-          stringValue(record.text)
-          ?? contentText(asRecord(record.message).content)
-          ?? stringValue(asRecord(record.message).content);
-        if ((eventText ?? "").trim() !== text) continue;
-        return stringValue(record.uuid) ?? stringValue(record.messageUuid) ?? stringValue(record.id);
-      }
-      return undefined;
-    })();
-
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawnClaudeForSession(session, executable, args, resolveCwd(session));
@@ -963,8 +1022,10 @@ export class ClaudeCliRunner {
     const turn: ActiveTurn = {
       activeUserUuid: seededUuid,
       child,
+      openStoppableTasks: new Set(),
       pendingControlResponses: new Map(),
       pendingPermissions: new Map(),
+      sawResult: false,
       stderr: [],
       sawAssistantText: false,
     };
@@ -976,24 +1037,60 @@ export class ClaudeCliRunner {
       turn.stderr.push(data.toString("utf8"));
       if (turn.stderr.join("").length > 16_000) turn.stderr = [turn.stderr.join("").slice(-16_000)];
     });
-    child.on("error", (error) => this.finishWithError(sessionId, spawnLabel, error));
+    child.on("error", (error) => {
+      // Only if this child is still the active turn (may have been detached after endInput).
+      if (this.active.get(sessionId)?.child === child) {
+        this.finishWithError(sessionId, spawnLabel, error);
+      }
+    });
     child.on("close", (code, signal) => {
       stdout.close();
       const current = this.active.get(sessionId);
-      this.active.delete(sessionId);
-      this.clearPendingControlResponses(current);
-      this.clearPendingPermissions(sessionId, current);
-      const stderr = current?.stderr.join("").trim();
-      if (code && code !== 0) this.emitError(sessionId, stderr || `claude exited with code ${code}`);
-      this.store.setRunning(sessionId, false, {
-        kind: spawnKind,
-        executable: spawnLabel,
-        lastExitCode: code,
-        lastError: code ? stderr : undefined,
-        finishedAt: nowIso(),
-      });
-      this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
-      this.callbacks.onSessionUpdated(sessionId);
+      // After endInput detach / stop(), a newer turn may already own active.
+      // Only settle when this closing child is still the mapped turn.
+      const ownsActive = current?.child === child;
+      if (ownsActive && current) {
+        this.active.delete(sessionId);
+        this.clearPendingControlResponses(current);
+        this.clearPendingPermissions(sessionId, current);
+        // Process gone: any still-open task_started bookends will never get CLI
+        // task_notification. Emit host residual stopped so Tasks pane leaves Running.
+        // (stop() may already have emitted host-exit and cleared the set.)
+        if (current.openStoppableTasks.size > 0) {
+          this.emitHostStoppedBookends(sessionId, [...current.openStoppableTasks], "Process exited");
+          current.openStoppableTasks.clear();
+        }
+        const stderr = current.stderr.join("").trim();
+        if (code && code !== 0) this.emitError(sessionId, stderr || `claude exited with code ${code}`);
+        this.store.setRunning(sessionId, false, {
+          kind: spawnKind,
+          executable: spawnLabel,
+          lastExitCode: code,
+          lastError: code ? stderr : undefined,
+          finishedAt: nowIso(),
+        });
+        this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
+        this.callbacks.onSessionUpdated(sessionId);
+        return;
+      }
+      // Detached drain: process exited after we already released active / settled UI.
+      // Do not clobber a newer turn's isRunning or delete its active entry.
+      if (code && code !== 0) {
+        const stderr = current?.child === child ? current.stderr.join("").trim() : "";
+        // Only surface orphan exit errors when no newer turn is live.
+        if (!this.active.has(sessionId)) {
+          this.emitError(sessionId, stderr || `claude exited with code ${code}`);
+          this.store.setRunning(sessionId, false, {
+            kind: spawnKind,
+            executable: spawnLabel,
+            lastExitCode: code,
+            lastError: stderr || `claude exited with code ${code}`,
+            finishedAt: nowIso(),
+          });
+          this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
+          this.callbacks.onSessionUpdated(sessionId);
+        }
+      }
     });
 
     return true;
@@ -1030,6 +1127,12 @@ export class ClaudeCliRunner {
     this.clearPendingPermissions(sessionId, turn);
     this.clearPendingControlResponses(turn);
     if (turn) {
+      // Process will never dual-emit task_notification after SIGTERM. Emit host-exit-*
+      // **before** active.delete — otherwise close sees no turn and Tasks stay Running.
+      if (turn.openStoppableTasks.size > 0) {
+        this.emitHostStoppedBookends(sessionId, [...turn.openStoppableTasks], "Process exited");
+        turn.openStoppableTasks.clear();
+      }
       try {
         if (!turn.child.killed) {
           // Prefer tree-kill style: SIGTERM the process group when possible.
@@ -1056,6 +1159,46 @@ export class ClaudeCliRunner {
     this.callbacks.onEvent({ type: "stopped", sessionId });
     this.callbacks.onSessionUpdated(sessionId);
     return true;
+  }
+
+  /**
+   * Official densable Host Tasks Stop (ion Xr + Query.stopTask):
+   *   control_request { subtype: "stop_task", task_id } only.
+   * → CLI kills that background task and dual-emits system/task_notification(stopped).
+   * Must NOT call session stop().
+   *
+   * Do **not** invent host-stop transcript bookends here (product residual removed):
+   * - Web Xr residual: echoPending(system/task_notification stopped) on informed success.
+   * - Durable bookend + openStoppableTasks close: CLI dual-emit on stdout → stream
+   *   handler applyStoppableTaskBookendEvent → tryEndStdinAfterGates.
+   * Process-exit-only residual remains emitHostStoppedBookends (host-exit-*).
+   *
+   * Active print turn ≈ session.query; without a live stdin we cannot inform CLI.
+   */
+  async stopTask(
+    sessionId: string,
+    taskId: string,
+  ): Promise<{ status: "informed" | "no_turn" | "failed"; error?: string }> {
+    const id = typeof taskId === "string" ? taskId.trim() : "";
+    if (!sessionId || !id) {
+      return { status: "failed", error: "sessionId and taskId are required" };
+    }
+    const turn = this.active.get(sessionId);
+    if (!turn) return { status: "no_turn" };
+    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
+      return { status: "failed", error: "CLI stdin closed" };
+    }
+    const response = await this.sendControlRequest(turn, {
+      subtype: "stop_task",
+      task_id: id,
+    });
+    // handleControlResponse resolves success payload (often {}) or null on error/timeout.
+    if (response === null) {
+      return { status: "failed", error: "stop_task control_request failed or timed out" };
+    }
+    // densable: informed only. Leave openStoppableTasks until CLI task_notification
+    // (or process-exit host-exit residual) so endInput stays gated correctly.
+    return { status: "informed" };
   }
 
   findSessionIdForPermission(requestId: string): string | null {
@@ -1126,6 +1269,10 @@ export class ClaudeCliRunner {
       }
     }
     this.resolvePendingPermission(resolvedSessionId, turn, pending);
+    // Parent result may have arrived while this can_use_tool was outstanding
+    // (sensitive file under bypass). Gates just dropped — end stdin if idle so
+    // CLI can exit and host isRunning clears (composer unsticks).
+    this.tryEndStdinAfterGates(turn);
     return { ok: true, requestId, decision };
   }
 
@@ -1164,21 +1311,33 @@ export class ClaudeCliRunner {
   }
 
   /**
-   * Push permission mode into an active CLI turn via control_request set_permission_mode
-   * (print.ts). CLI onChangeAppState then enqueues system/status which we persist + fan out.
-   * When no turn is active, host store alone is enough — next runTurn uses --permission-mode.
+   * Official CCD residual (app.asar LocalSessions.setPermissionMode):
+   *   const cli_informed = !!session.query;
+   *   if (session.query) await query.setPermissionMode(mode); // must succeed before store
+   *   else host-only (next spawn/runTurn carries --permission-mode)
+   *
+   * Product stream-json: active turn ≈ session.query. Distinguishes no_turn vs failed
+   * so the host does not paint bypass when CLI still runs default.
    */
-  async setPermissionMode(sessionId: string, mode: string): Promise<boolean> {
+  async setPermissionMode(sessionId: string, mode: string): Promise<SetPermissionModeCliResult> {
     const permissionMode = normalizePermissionMode(mode);
-    if (!permissionMode) return false;
+    if (!permissionMode) {
+      return { status: "failed", error: "invalid permission mode" };
+    }
     const turn = this.active.get(sessionId);
-    if (!turn) return false;
-    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) return false;
+    // Official cli_informed:false — no active query; host store + next runTurn is enough.
+    if (!turn) return { status: "no_turn" };
+    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
+      return { status: "failed", error: "CLI stdin closed" };
+    }
     const response = await this.sendControlRequest(turn, {
       subtype: "set_permission_mode",
       mode: permissionMode,
     });
-    return response !== null;
+    if (response === null) {
+      return { status: "failed", error: "set_permission_mode control_request failed or timed out" };
+    }
+    return { status: "informed" };
   }
 
   /**
@@ -1249,17 +1408,26 @@ export class ClaudeCliRunner {
       // live buffer) — no userData copy. Track sawAssistantText for the result-event gate.
       if (turn) turn.sawAssistantText = true;
     }
-    // Never close stdin while a can_use_tool control_request is outstanding — that
-    // kills the CLI mid-approval and the UI then gets no_active_turn on Allow/Deny.
-    if (
-      event.type === "result"
-      && turn
-      && turn.pendingPermissions.size === 0
-      && !turn.child.stdin.destroyed
-      && !turn.child.stdin.writableEnded
-    ) {
-      turn.child.stdin.end();
+    // densable Tasks Stop residual: bookend task_id set gates endInput (not tool_use ids).
+    if (turn) applyStoppableTaskBookendEvent(turn.openStoppableTasks, event);
+    if (turn && event.type === "result") {
+      turn.sawResult = true;
+      // Parent result = main turn content done. Keep CLI process/stdin open while
+      // openStoppableTasks (stop_task residual), but clear host isRunning so web
+      // isResponding / main spinner settle (Tasks pane tracks bookends separately).
+      // preserveLiveBuffer: process may still emit task_notification / jsonl flush.
+      this.store.setRunning(
+        sessionId,
+        false,
+        { kind: "claude-cli" },
+        { preserveLiveBuffer: true },
+      );
+      this.callbacks.onSessionUpdated(sessionId);
     }
+
+    // endInput after first result when: no can_use_tool + no open stoppable task bookends.
+    // Keeps stop_task channel alive while CLI waiting_for_agents (bash/monitor/agent).
+    if (turn) this.tryEndStdinAfterGates(turn);
     // session_updated only for lifecycle/meta (not each assistant/user content line).
     // stream_event never; assistant/user content is already onEvent(message).
     const eventType = stringValue(event.type);
@@ -1268,6 +1436,7 @@ export class ClaudeCliRunner {
       && eventType !== "stream_event"
       && eventType !== "assistant"
       && eventType !== "user"
+      && eventType !== "result"
     ) {
       this.callbacks.onSessionUpdated(sessionId);
     }
@@ -1360,7 +1529,13 @@ export class ClaudeCliRunner {
     if (!pending) return true;
     turn.pendingControlResponses.delete(requestId);
     clearTimeout(pending.timer);
-    pending.resolve(stringValue(response.subtype) === "success" ? response.response ?? null : null);
+    // Success with empty body (stop_task sends {}) must not look like failure —
+    // only error/timeout paths resolve null for callers (setPermissionMode / stopTask).
+    pending.resolve(
+      stringValue(response.subtype) === "success"
+        ? (response.response !== undefined ? response.response : {})
+        : null,
+    );
     return true;
   }
 
@@ -1473,6 +1648,121 @@ export class ClaudeCliRunner {
     this.callbacks.onSessionUpdated(sessionId);
   }
 
+  /**
+   * densable multi-turn residual: write the next user line on the **same** CLI
+   * stdin after parent `result` (process still open for bookends / waiting_for_agents).
+   * Re-opens host isRunning for the follow-up main turn; resets sawResult so a new
+   * parent result can settle the spinner again.
+   */
+  private continueActiveTurn(
+    sessionId: string,
+    turn: ActiveTurn,
+    text: string,
+    request: Record<string, unknown>,
+    seededUuid: string | undefined,
+  ): boolean {
+    const session = this.store.getSession(sessionId);
+    if (!session) return false;
+    const spawnKind = session.sshConfig ? "claude-cli-ssh" : "claude-cli";
+    const spawnLabel = session.sshConfig
+      ? `ssh://${session.sshConfig.host}:${resolveSshRemoteCwd(session)}`
+      : defaultClaudeExecutable();
+    try {
+      turn.child.stdin.write(
+        userInputLine(
+          promptWithSelectedFiles(text, request.userSelectedFiles),
+          seededUuid,
+          request.images,
+        ),
+      );
+    } catch (error) {
+      this.finishWithError(sessionId, spawnLabel, error);
+      return false;
+    }
+    turn.activeUserUuid = seededUuid;
+    turn.sawResult = false;
+    turn.sawAssistantText = false;
+    this.store.setRunning(sessionId, true, {
+      kind: spawnKind,
+      executable: spawnLabel,
+      startedAt: nowIso(),
+      lastError: undefined,
+      lastExitCode: null,
+    });
+    this.callbacks.onSessionUpdated(sessionId);
+    return true;
+  }
+
+  /**
+   * After parent `result`, end stdin once:
+   * - no outstanding can_use_tool, and
+   * - no open system task_started bookends (densable Tasks Stop residual).
+   * Called from stream handler and after permission resolve/cancel.
+   *
+   * After endInput, detach drained active turns so the next user send can spawn
+   * a fresh process without waiting for process close (or racing already_running).
+   */
+  private tryEndStdinAfterGates(turn: ActiveTurn): void {
+    if (!turn.sawResult) return;
+    if (
+      !shouldEndStdinAfterResult({
+        pendingPermissionCount: turn.pendingPermissions.size,
+        openStoppableTaskCount: turn.openStoppableTasks.size,
+        stdinDestroyed: turn.child.stdin.destroyed,
+        stdinWritableEnded: turn.child.stdin.writableEnded,
+      })
+    ) {
+      return;
+    }
+    try {
+      turn.child.stdin.end();
+    } catch {
+      // stdin may race-close; ignore
+    }
+    // endInput done — process may linger until exit. Detach active so next send
+    // can spawn; close handler no-ops when active already deleted.
+    for (const [sessionId, active] of this.active) {
+      if (active !== turn) continue;
+      if (
+        canDetachDrainedActiveTurn({
+          sawResult: turn.sawResult,
+          openStoppableTaskCount: turn.openStoppableTasks.size,
+          stdinDestroyed: turn.child.stdin.destroyed,
+          stdinWritableEnded: turn.child.stdin.writableEnded,
+        })
+      ) {
+        this.clearPendingControlResponses(turn);
+        this.clearPendingPermissions(sessionId, turn);
+        this.active.delete(sessionId);
+      }
+      break;
+    }
+  }
+
+  /**
+   * Process-exit residual only: when the CLI child dies with open task_started
+   * bookends, it will never dual-emit task_notification. Emit host-exit-* so
+   * Tasks leave Running + taskBookends persist. Not used on Stop button path
+   * (that is control_request only + web Xr echoPending + CLI dual-emit).
+   */
+  private emitHostStoppedBookends(sessionId: string, taskIds: string[], summary: string): void {
+    for (const taskId of taskIds) {
+      const id = typeof taskId === "string" ? taskId.trim() : "";
+      if (!id) continue;
+      const event = {
+        type: "system",
+        subtype: "task_notification",
+        task_id: id,
+        status: "stopped",
+        summary,
+        uuid: `host-exit-${id}`,
+        timestamp: nowIso(),
+      };
+      this.store.appendTranscriptEvent(sessionId, event);
+      this.callbacks.onEvent({ type: "message", sessionId, message: event });
+    }
+  }
+
   private cancelPendingPermission(sessionId: string, requestId: string): void {
     const turn = this.active.get(sessionId);
     const pending = turn?.pendingPermissions.get(requestId) ?? this.store.getSession(sessionId)?.pendingToolPermissions?.find((item) => item.requestId === requestId);
@@ -1480,6 +1770,7 @@ export class ClaudeCliRunner {
     this.store.clearPendingToolPermission(sessionId, requestId);
     if (pending) this.callbacks.onEvent({ type: "tool_permission_resolved", sessionId, request: pending });
     this.callbacks.onSessionUpdated(sessionId);
+    if (turn) this.tryEndStdinAfterGates(turn);
   }
 
   private clearPendingPermissions(sessionId: string, turn?: ActiveTurn): void {
@@ -1508,6 +1799,10 @@ export class ClaudeCliRunner {
     this.active.delete(sessionId);
     this.clearPendingControlResponses(current);
     this.clearPendingPermissions(sessionId, current);
+    if (current && current.openStoppableTasks.size > 0) {
+      this.emitHostStoppedBookends(sessionId, [...current.openStoppableTasks], "Process exited");
+      current.openStoppableTasks.clear();
+    }
     const message = error instanceof Error ? error.message : String(error);
     this.emitError(sessionId, message);
     this.store.setRunning(sessionId, false, { kind: "claude-cli", executable, lastError: message, finishedAt: nowIso() });

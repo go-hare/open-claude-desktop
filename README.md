@@ -1,198 +1,191 @@
 # Claudex Desktop
 
-Electron 桌面壳（产品名 **Claudex**），按官方 Claude Desktop `app.asar` / residual 资源重建。主 UI 由姊妹仓库 **[open-claude-web](../open-claude-web)** 提供。
+**Claudex** 是 Claude Desktop 的开源桌面端重建：Electron 壳 + 自带 Claude Code CLI，日常写代码、跑会话、接第三方推理都能用。
 
-| 仓库 | 职责 |
+> 非 Anthropic 官方产品。Claude / Claude Desktop / Claude Code 商标与权利归 Anthropic；本仓库仅供学习研究与自托管使用。
+
+| 项目 | 说明 |
 |------|------|
-| **open-claude-desktop**（本仓库） | 主进程、preload、IPC、协议、会话/CLI/MCP、打包与 dual-root 资源 |
-| **open-claude-web** | 产品 SPA（Login / Cowork / Code / Settings / Artifacts…） |
+| 定位 | macOS / Windows 桌面 App（产品名 **Claudex**） |
+| 配套前端 | [open-claude-web](https://github.com/go-hare/open-claude-web)（主界面 SPA） |
+| 配套 CLI 思路 | 可与 [go-hare/claude-code-1](https://github.com/go-hare/claude-code-1) 等自托管链路配合 |
+| 仓库 | https://github.com/go-hare/open-claude-desktop |
+| 版本 | 见 `package.json`（当前如 `1.6608.2-claudex.0`） |
 
-官方对照（本机路径，见 `CLAUDE.md`）：
+两个仓库要一起用：
 
-- App residual：`…/Claude-Deepseek.app/Contents`
-- 前端 residual：`…/Resources/ion-dist`
-
-目标是 **1:1 residual 对齐**，不是“看起来差不多”的近似壳。
+| 仓库 | 干什么 |
+|------|--------|
+| **本仓库** open-claude-desktop | 窗口、菜单、会话进程、CLI、MCP、打包 |
+| **open-claude-web** | 登录页、侧栏、Cowork / Code 主界面、设置 |
 
 ---
 
-## 架构一览
+## 能干什么
+
+| 模块 | 说明 |
+|------|------|
+| 桌面壳 | 独立 App 窗口，不是浏览器里凑合打开 |
+| Code 会话 | 本机拉起自带 Claude Code CLI，写代码、改仓库 |
+| Cowork | 协作式会话入口（默认本机执行，不强制虚拟机） |
+| 第三方推理 | 菜单里配置 Base URL / Key / 模型列表，多套配置可切换 |
+| 用已有 CLI 配置 | 可选直接沿用本机 `~/.claude`（不拷贝、不改写） |
+| MCP | 扩展工具与会话侧能力（按桌面配置加载） |
+| Artifacts 等 | 随功能开关与桌面能力暴露（有则可用） |
+
+一句话：**桌面里像 Claude Desktop 那样开会话；推理可以走官方登录路径，也可以走自托管 / 网关。**
+
+---
+
+## 环境要求
+
+- **Node.js ≥ 22**
+- 建议两仓库**并列**放：
 
 ```text
-Claudex Desktop
-├─ electron/main/**          产品主进程（TypeScript）
-├─ electron/preload/**       preload / bridges（含 LocalAgentModeSessions 等）
-├─ resources/
-│  ├─ product-web/           产品主 SPA（open-claude-web 构建产物）
-│  ├─ ion-dist/              官方 residual SPA（setup-desktop-3p 等，非主 UI）
-│  ├─ claude-code-bin/       自带 Claude Code CLI
-│  └─ original-runtime…     原包 native / node 运行时
-├─ app.asar (.vite/build)    产品 main + 对齐后的 shell 入口
-└─ custom schemes            cowork-artifact / cowork-file / app:// …
+somewhere/
+  open-claude-desktop/
+  open-claude-web/
 ```
-
-### 两条加载路线（禁止混用）
-
-| 场景 | 命令 | 主视图 | Web |
-|------|------|--------|-----|
-| **打包** | `npm run package` → `npm run package:open` | `app://localhost` | dual-root：`product-web` + residual `ion-dist` |
-| **开发 / 测试** | `npm run dev` | `http://localhost:5176` | open-claude-web Vite（`CLAUDE_DESKTOP_MAIN_VIEW_URL`） |
-
-- 打包默认 **不得** 打开 `https://claude.ai`（1p 官方 mN 仅 debug：`CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW=1`）。
-- residual `ion-dist` 只服务对照 + `/setup-desktop-3p`、`/device-code-verify` 等；**主 UI 永远是 `product-web` / Vite**。
-- 完整规范：[`docs/package-and-test.md`](docs/package-and-test.md)。
-
-### 部署模式（1p / 3p / dotClaude）
-
-| 模式 | 含义（产品诚实口径） |
-|------|----------------------|
-| **1p** | 无 3p activation → bootstrap `account: null`（logged-out）；不伪造 Anthropic OAuth 成功 |
-| **3p** | configLibrary applied bag 有 `inferenceProvider` 等 → 合成 3p 账号；缺 key/url 为 degraded |
-| **dotClaude** | 直读用户 `~/.claude` CLI 配置（只读）；不迁移进 configLibrary |
-
-- 多配置主源：`userData/configLibrary/`（官方 wrA residual），不是 `~/.claude/settings.json`。
-- 默认会话路径：**host-loop 本机**；Local Code 永远本机 spawn CLI。VM / dual-exec 代码保留，不作为默认阻塞。
-
-### 登录窗尺寸 residual
-
-- LoginRoute：主窗 `resize(600,600,{center})`，离开后 `1200×800`（不是独立小窗，也不是默认真全屏）。
-- 持久化 `window-state` 可恢复 maximize / fullScreen；冷启动默认仍是 1200×800 级。
 
 ---
 
-## 快速开始
+## 快速开始（开发）
 
-**要求：** Node `>=22`。
+两个终端：
 
 ```bash
-# 建议目录布局：两仓库并列
-#   …/open-claude-desktop
-#   …/open-claude-web
+# 终端 1：界面
+cd open-claude-web
+npm install
+npm run dev
+# → http://127.0.0.1:5176
 
+# 终端 2：桌面
 cd open-claude-desktop
 npm install
+npm run dev
 ```
 
-### 开发（双终端）
+首次进入可能看到登录 / 模式选择：
+
+- 配好第三方推理 → 走网关那一套  
+- 或选本机已有 `~/.claude`  
+- 1p 路径下不会假装已经登录成功（没有假 OAuth）
+
+---
+
+## 打包成 App
+
+在 **本机对应平台** 上打本机包（在 Mac 上打 Mac 包，在 Windows 上打 Windows 包）：
 
 ```bash
-# 终端 1：产品 web
-cd ../open-claude-web && npm install && npm run dev   # http://127.0.0.1:5176
-
-# 终端 2：桌面壳
-cd open-claude-desktop && npm run dev
-# 默认 CLAUDE_DESKTOP_MAIN_VIEW_URL=http://localhost:5176
-```
-
-### 打包并打开
-
-```bash
+cd open-claude-desktop
 npm run package
-npm run package:open                 # 默认独立 userData（.package-user-data）
-npm run package:open -- --no-isolated # 与 dev 共享默认 userData（可能抢单实例）
-npm run package:open -- --kill-dev    # 先结束本仓库 dev Electron
 ```
 
-| 平台 | 产物 | 可执行 |
-|------|------|--------|
-| macOS | `out/Claudex-darwin-<arch>/Claudex.app` | `Contents/MacOS/Claude` |
-| Windows | `out/Claudex-win32-<arch>/` | `Claudex.exe` |
-
-**Host-native：** 在 mac 打 mac 包，在 Windows 打 win 包。不要指望在 mac 上直接得到可用的 win32 运行包。
-
-### Smoke
+打开刚打好的包：
 
 ```bash
-npm run smoke              # 开发壳 + 隔离 userData；默认注入 :5176
-npm run smoke:packaged     # 打包二进制；不注入 MAIN_VIEW_URL，走 app://
+npm run package:open
+```
+
+常见产物位置：
+
+| 平台 | 路径 |
+|------|------|
+| macOS | `out/Claudex-darwin-<arch>/Claudex.app` |
+| Windows | `out/Claudex-win32-<arch>/Claudex.exe` |
+
+可选：把 `.app` 打成 zip 方便分发（自行 `ditto` / 压缩即可）。
+
+冒烟（可选）：
+
+```bash
+npm run smoke            # 开发壳
+npm run smoke:packaged   # 已打包二进制
 ```
 
 ---
 
-## 常用脚本
+## 常用命令
 
-| 脚本 | 作用 |
+| 命令 | 作用 |
 |------|------|
-| `npm run dev` | 开发启动（默认连 Vite :5176） |
-| `npm run build` | 主进程 + preload + 原包壳资源 + runtime + CLI 拷贝 + residual 审计 |
-| `npm run package` | 产品打包流水线（restore main → product-web → forge → align → audit） |
-| `npm run package:open` | 启动已打包应用 |
-| `npm run build:product-web` | 构建 `../open-claude-web` → `resources/product-web` |
-| `npm run restore:product-main` | 在 copy original shell 后重建产品 main，避免 asar 变成官方 1p loader |
+| `npm run dev` | 开发启动（连 web 的 5176） |
+| `npm run package` | 完整产品打包 |
+| `npm run package:open` | 启动打包结果 |
+| `npm run build:product-web` | 只重建界面进 `resources/product-web` |
 | `npm run smoke` / `smoke:packaged` | 启动冒烟 |
-| `npm run audit:shell` / `audit:bundle` / `verify:alignment` | 壳 / 包 / 对齐审计 |
-| `npm run sync:residual` | 可选：同步官方 residual → `resources/original-claude.app` + `ion-dist` |
-
-打包流水线细节见 `scripts/package-product.mjs` 与 [`docs/package-and-test.md`](docs/package-and-test.md)。
-
-环境变量（节选）：
-
-| 变量 | 用途 |
-|------|------|
-| `CLAUDE_DESKTOP_MAIN_VIEW_URL` | 开发主视图 URL（打包路径禁止设置） |
-| `CLAUDE_PRODUCT_WEB_ROOT` | 覆盖 open-claude-web 路径 |
-| `CLAUDE_PRODUCT_WEB_SKIP_BUILD=1` | 跳过 web 构建（复用已有 dist） |
-| `CLAUDE_PRODUCT_WEB_STRICT=1` | product-web 走完整 `npm run build`（含 tsc） |
-| `CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW=1` | debug：强制官方 1p mN 主视图 |
 
 ---
 
-## 源码地图
+## 配置说明（正常人版）
+
+### 第三方推理
+
+菜单里的「配置第三方推理…」：
+
+- 多套配置存在应用自己的 **userData** 配置库里  
+- 选中的那一套会在启动 CLI 时注入环境（Base URL、Key、模型等）  
+- **不是**去改你的 `~/.claude/settings.json` 当主配置源
+
+### 用本机 Claude CLI 配置
+
+若选择 **dotClaude / 沿用 ~/.claude**：
+
+- 只读你已有的 CLI 配置  
+- 不迁移、不复制进桌面配置库  
+- 适合已经在终端里配好代理 / 模型的人
+
+### 默认怎么跑会话
+
+- **Code / 日常会话：本机跑 CLI**，不默认开虚拟机  
+- 虚拟机相关代码在仓库里保留，但是可选路径，不是开箱必走
+
+---
+
+## 边界（务必看）
+
+- **不是** Anthropic 官方客户端，也不能保证与商店版二进制 100% 一致  
+- 不会伪造官方 OAuth 登录成功、订阅、加余额等云端链路  
+- 部分云端能力（远端 Sessions 等）会诚实关掉或空数据，而不是假数据骗 UI  
+- 打包请在目标平台本机构建；跨平台交叉编译出「能跑的 win 包」不要指望  
+- 版本以 `package.json` / 实际构建产物为准  
+- 适合：自托管、二次开发、对照学习桌面 Agent 架构  
+- 不适合：当官方合规替代品、硬刚企业审计口径
+
+---
+
+## 目录大概长什么样
 
 ```text
-electron/main/
-  index.ts / lifecycle / windows / protocol / menu
-  ipc/                 IPC 注册（sessions、settings、features、window…）
-  services/
-    coworkSessions/    Cowork 会话、MCP inject residual、host-loop
-    localSessions/     Local Code / CLI spawn
-    custom3p/          deploymentMode、configLibrary、CLI env
-    mcp/               MCP runtime
-    settings/          preferences、supportedFeatures
-electron/preload/
-  bridges/webBridge.ts  暴露给 web 的 bridge 面
-shared/                主进程与 preload 共享类型/常量
-scripts/               构建、打包、审计、smoke
-docs/                  打包规范与审计报告
+open-claude-desktop/
+  electron/main/      # 主进程：窗口、IPC、会话、CLI
+  electron/preload/   # 给前端的 bridge
+  resources/          # 自带 CLI、打包用前端、运行时资源
+  scripts/            # 开发 / 打包 / 冒烟脚本
+  docs/               # 打包与测试等补充说明
 ```
 
-Web 侧对应：`open-claude-web/src/adapters/desktopBridge/`、`features/*`。
+界面源码在姊妹仓库 **open-claude-web**。
+
+更细的工程约定写在 [`CLAUDE.md`](CLAUDE.md)；打包细节见 [`docs/package-and-test.md`](docs/package-and-test.md)。
 
 ---
 
-## 诚实边界（产品 delta）
+## 相关链接
 
-以下 **有意不做假**，与官方 1p 云端行为不同：
-
-- 不为 3p 伪造 Anthropic OAuth / Subscribe / AddCredits 成功链路。
-- rate-limit 横幅保留官方 **action 槽位结构**，CTA 仅 residual-honest：`dismiss` / `reset limits`（若 bootstrap 允许）/ `Open Setup`（config degraded）。
-- Sessions Bridge / 部分远端 Anthropic 能力：诚实 empty / disabled，不 soft-true 骗 UI。
-- mcpCoordinator：**inject residual**（roots + create/reconcile 等），不是完整官方 `createAllServers` 克隆。
-- dual-exec / VM 代码保留；默认产品路径仍是 host-loop。
-
----
-
-## 验证清单（上线前）
-
-1. **开发链路**：web `:5176` + `npm run dev` 能进登录/主壳，无空白主视图。
-2. **打包链路**：`npm run package` 成功；`audit:bundle` dual-root OK（`product-web` ≠ `spa-dev`，residual `ion-dist` 仍在）。
-3. **打包启动**：`npm run package:open`（isolated）冷启动；无 deploymentMode 时登录窗约 **600×600**。
-4. **Smoke**：`npm run smoke:packaged` 返回 ok（主窗可见、`app://` 主视图）。
-5. **功能抽样**：3p Setup / host-loop 会话 / rate-limit 横幅 CTA / Artifacts 列表与打开（feature 开时）。
-6. UI 变更必须对照官方 `ion-dist` JS（见双方 `CLAUDE.md`），改完用**桌面实际启动**验证，不能只靠 tsc。
-
-历史审计快照与数字会随构建变化，以当次 `audit:*` / `smoke:*` 输出为准。更细的对齐笔记见 `docs/` 与 web 仓库 `docs/official-alignment-map.md`。
-
----
-
-## 相关文档
-
-| 文档 | 内容 |
+| 链接 | 说明 |
 |------|------|
 | [`CLAUDE.md`](CLAUDE.md) | 1:1 residual 硬规则、host-loop、3p/configLibrary、登录 residual |
 | [`docs/package-and-test.md`](docs/package-and-test.md) | 打包 / 测试 / dual-root / smoke 全规范 |
 | [`../open-claude-web/README.md`](../open-claude-web/README.md) | 产品 SPA 说明与开发命令 |
 | `docs/electron-shell-*.md` / `*.json` | 壳覆盖、功能 gap、bundle 对齐报告 |
+| https://github.com/go-hare/open-claude-desktop | 本仓库（桌面壳） |
+| https://github.com/go-hare/open-claude-web | 主界面 SPA |
+| https://github.com/go-hare/claude-code-1 | 配套 Claude Code 方向 |
+| https://github.com/go-hare/agent-extension | 浏览器扩展（Claude in Chrome 方向） |
+| [linux.do](https://linux.do/) | linux.do 社区 |
 
-## 链接
-- [((https://linux.do/))](https://linux.do/) — linux.do 社区
+欢迎 star / issue / PR。有问题请尽量带上：系统与架构、是 `dev` 还是 `package`、日志片段、复现步骤。

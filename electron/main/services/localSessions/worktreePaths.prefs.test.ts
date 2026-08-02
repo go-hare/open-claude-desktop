@@ -60,16 +60,18 @@ describe("clampCodePermissionMode (official bypassPermissionsModeEnabled residua
 });
 
 describe("availableCodePermissionModes", () => {
-  it("omits bypass when disabled", () => {
+  it("omits bypass when disabled (includes auto residual)", () => {
     expect(availableCodePermissionModes(false)).toEqual([
       "default",
       "acceptEdits",
       "plan",
+      "auto",
     ]);
   });
 
   it("includes bypass when enabled", () => {
     expect(availableCodePermissionModes(true)).toContain("bypassPermissions");
+    expect(availableCodePermissionModes(true)).toContain("auto");
   });
 });
 
