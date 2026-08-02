@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-02T02:57:59.242Z",
+  "generated_at": "2026-08-02T07:25:53.430Z",
   "project_root": "/Users/apple/work-py/hare-code/open-claude-desktop",
   "original_app": "/Users/apple/work-py/hare-code/open-claude-desktop/resources/original-claude.app",
   "packaged_app": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app",
@@ -8,7 +8,7 @@
     "packaged_exists": true,
     "generated_deepseek_executable_exists": false,
     "original_sha256": "4a53a36e6b113b881433c4576adb1120d34670b49521abbc4660d597c33ce478",
-    "packaged_sha256": "5f1c3cf51ab456a894ee977ae9e4dff14084558c124df5258c19ccc228d9abba",
+    "packaged_sha256": "36453969d2741eacafbe36dedff023084b854530395a2ecdf7170b132af5aabd",
     "hash_aligned": false,
     "hash_ok_after_product_codesign": true
   },
@@ -85,10 +85,10 @@
   },
   "asar": {
     "original_sha256": "a7f105ee5e073c37bb27b3a2129614074dd00a557c86e1ea39b9c390de75edc3",
-    "packaged_sha256": "767d60768f94d536000b2cb727f25d62bc53577ed708dac51d5c1ae807e12777",
+    "packaged_sha256": "baa64f5ec6e0dd55b9db8255329c024d71701d6094b2db2c36a3370ff44d67e8",
     "intentionally_rebuilt": true,
-    "packaged_header_sha256": "9ddaecffffadad7046f930bd566bbcd1250a2591f3bddc24f96ff699b265f4b4",
-    "plist_integrity_hash": "9ddaecffffadad7046f930bd566bbcd1250a2591f3bddc24f96ff699b265f4b4",
+    "packaged_header_sha256": "66f7f5371df61258b107c408f62c605f5324c8f96f03de7a4aa92c84b00701ba",
+    "plist_integrity_hash": "66f7f5371df61258b107c408f62c605f5324c8f96f03de7a4aa92c84b00701ba",
     "plist_integrity_matches_packaged_asar": true,
     "contains_smoke_user_data": false,
     "missing_runtime_node_modules_entries": [],
