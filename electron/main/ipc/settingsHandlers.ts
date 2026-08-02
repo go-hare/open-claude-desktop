@@ -501,6 +501,21 @@ async function choosePath(context: IpcHandlerContext, mode: "file" | "directory"
       ? ["openFile", ...(allowMultiSelections ? ["multiSelections" as const] : [])]
       : ["openDirectory", ...(allowMultiSelections ? ["multiSelections" as const] : [])],
   });
+  // macOS residual: after native open dialog, keyboard focus can stick off the
+  // product webContents (composer looks focused but keystrokes never arrive).
+  // Re-front main + focus the product view so Code/Cowork TipTap can type again.
+  try {
+    const main = context.windows.mainWindow;
+    if (main && !main.isDestroyed()) {
+      if (main.isMinimized()) main.restore();
+      main.show();
+      main.focus();
+    }
+    const wc = context.windows.mainView?.webContents;
+    if (wc && !wc.isDestroyed()) wc.focus();
+  } catch {
+    /* ignore focus races during shutdown */
+  }
   return result.canceled ? [] : result.filePaths;
 }
 
