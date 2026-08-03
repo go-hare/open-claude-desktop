@@ -14,12 +14,6 @@
       "size": 93069024,
       "sha256": "b59454f4eaf78d1990d1e851ba2fe27ecc82044537296ff38fb8ff66435bf0cb",
       "version": "2.7.24 (Claude Code)"
-    },
-    "claude.exe": {
-      "from": "platforms/win32-x64/claude.exe",
-      "size": 147862528,
-      "sha256": "549b39b0469fc28c8a7c6ee9000e5203cf69b7c01c2b4d298992d7a7c279aff9",
-      "version": "2.7.24 (Claude Code)"
     }
   },
   "vendor": {
@@ -37,55 +31,8 @@
       "size": 93614368,
       "sha256": "fd7cdcea5b157d5951043601e07d0d4f196401e9c9d68c478e17117bcadf1c5a",
       "version": "2.7.24 (Claude Code)"
-    },
-    "darwin-x64": {
-      "binary": "claude",
-      "path": "platforms/darwin-x64/claude",
-      "size": 98421312,
-      "sha256": "7f9859dc1f9d68d9bc3cc84025bfec7548c33ee4f8b29e415c43607d5a675151",
-      "version": "2.7.24 (Claude Code)"
-    },
-    "linux-x64": {
-      "binary": "claude",
-      "path": "platforms/linux-x64/claude",
-      "size": 131729808,
-      "sha256": "80aca6653a6c13e1271faf573149f66f24effad95a0a6adcd757267e73e957d3",
-      "version": "2.7.24 (Claude Code)"
-    },
-    "linux-arm64": {
-      "binary": "claude",
-      "path": "platforms/linux-arm64/claude",
-      "size": 131170891,
-      "sha256": "3739858372c65404b8292878a58543f7100f8c73fef0e1f0f1c604d7ca25862b",
-      "version": "2.7.24 (Claude Code)"
-    },
-    "linux-x64-musl": {
-      "binary": "claude",
-      "path": "platforms/linux-x64-musl/claude",
-      "size": 131729808,
-      "sha256": "cb00f261650c5e843bf59bc2987fae52f33520000c0f256dc70746889db2ffca",
-      "version": "2.7.24 (Claude Code)"
-    },
-    "linux-arm64-musl": {
-      "binary": "claude",
-      "path": "platforms/linux-arm64-musl/claude",
-      "size": 131170891,
-      "sha256": "455b41fa9444aeca98072ac589a531adf7c2ad2124611ddc22ef4a04fe9f8da6",
-      "version": "2.7.24 (Claude Code)"
-    },
-    "win32-x64": {
-      "binary": "claude.exe",
-      "path": "platforms/win32-x64/claude.exe",
-      "size": 147862528,
-      "sha256": "549b39b0469fc28c8a7c6ee9000e5203cf69b7c01c2b4d298992d7a7c279aff9",
-      "version": "2.7.24 (Claude Code)"
-    },
-    "win32-arm64": {
-      "binary": "claude.exe",
-      "path": "platforms/win32-arm64/claude.exe",
-      "size": 144488960,
-      "sha256": "8148a2db759bcec8709659ff96b821b6b57b337d0e173fc01d5f9a4d56292cd4",
-      "version": "2.7.24 (Claude Code)"
     }
-  }
+  },
+  "mode": "host-only",
+  "hostKey": "darwin-arm64"
 }

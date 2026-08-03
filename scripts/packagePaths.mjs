@@ -232,6 +232,92 @@ export function readIonBuildId(ionIndexPath) {
 }
 
 /**
+ * Host platform key matching scripts/copy-claude-code-binary.mjs.
+ * @param {{ platform?: string, arch?: string }} [opts]
+ */
+export function hostClaudeCodePlatformKey(opts = {}) {
+  const platform = opts.platform ?? process.platform;
+  const archRaw = opts.arch ?? process.arch;
+  const arch = archRaw === "arm64" ? "arm64" : "x64";
+  if (platform === "darwin") return `darwin-${arch}`;
+  if (platform === "win32") return `win32-${arch}`;
+  if (platform === "linux") return `linux-${arch}`;
+  return `${platform}-${arch}`;
+}
+
+/**
+ * Prune foreign Claude Code CLI platforms from a packaged (or resources) tree.
+ * Host-loop only spawns host binary; multi-platform matrix is optional fat tree.
+ *
+ * Keeps:
+ *   platforms/<hostKey>/
+ *   top-level host binary (claude / claude.exe)
+ *   top-level vendor/ (host rg)
+ * Removes:
+ *   platforms/<other>/
+ *   foreign top-level binary (e.g. claude.exe on darwin)
+ *
+ * @param {string} claudeCodeBinRoot  path to .../claude-code-bin
+ * @param {{ platform?: string, arch?: string, allPlatforms?: boolean }} [opts]
+ * @returns {{ pruned: boolean, hostKey: string, removedPlatforms: string[], removedTopLevel: string[] }}
+ */
+export function pruneClaudeCodeBinToHost(claudeCodeBinRoot, opts = {}) {
+  const allPlatforms =
+    opts.allPlatforms === true || process.env.CLAUDE_CODE_ALL_PLATFORMS === "1";
+  const hostKey = hostClaudeCodePlatformKey(opts);
+  const removedPlatforms = [];
+  const removedTopLevel = [];
+  if (allPlatforms || !fs.existsSync(claudeCodeBinRoot)) {
+    return { pruned: false, hostKey, removedPlatforms, removedTopLevel };
+  }
+
+  const platformsRoot = path.join(claudeCodeBinRoot, "platforms");
+  if (fs.existsSync(platformsRoot)) {
+    for (const name of fs.readdirSync(platformsRoot)) {
+      if (name === hostKey) continue;
+      const full = path.join(platformsRoot, name);
+      try {
+        fs.rmSync(full, { recursive: true, force: true });
+        removedPlatforms.push(name);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  const platform = opts.platform ?? process.platform;
+  // Drop foreign top-level binary only.
+  if (platform === "darwin" || platform === "linux") {
+    const foreignExe = path.join(claudeCodeBinRoot, "claude.exe");
+    if (fs.existsSync(foreignExe)) {
+      try {
+        fs.rmSync(foreignExe, { force: true });
+        removedTopLevel.push("claude.exe");
+      } catch {
+        /* ignore */
+      }
+    }
+  } else if (platform === "win32") {
+    const foreignUnix = path.join(claudeCodeBinRoot, "claude");
+    if (fs.existsSync(foreignUnix)) {
+      try {
+        fs.rmSync(foreignUnix, { force: true });
+        removedTopLevel.push("claude");
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  return {
+    pruned: removedPlatforms.length > 0 || removedTopLevel.length > 0,
+    hostKey,
+    removedPlatforms,
+    removedTopLevel,
+  };
+}
+
+/**
  * Packaged dual-root residual check.
  * Product main prefers product-web; residual ion-dist keeps setup-desktop-3p SPA.
  * @param {{ productWebIndex: string, residualIonIndex?: string, ionIndex?: string }} targets

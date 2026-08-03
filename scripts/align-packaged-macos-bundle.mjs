@@ -9,6 +9,7 @@ import {
   OFFICIAL_BUNDLE_ID,
   PRODUCT_BUNDLE_ID,
   PRODUCT_NAME,
+  pruneClaudeCodeBinToHost,
   resolvePackagedTargets,
 } from "./packagePaths.mjs";
 
@@ -302,12 +303,18 @@ try {
     );
   }
   // Keep product CLI bundle if present under project resources (official residual may lack it).
+  // Host-only: mac package ships only platforms/darwin-<arch> (+ top-level claude/vendor).
+  // Full multi-platform matrix is opt-in via CLAUDE_CODE_ALL_PLATFORMS=1 (copy + no prune).
   const claudeCodeBinSource = path.join(projectRoot, "resources/claude-code-bin");
   let claudeCodeBinInjected = false;
+  let claudeCodeBinPrune = null;
   if (await exists(claudeCodeBinSource)) {
+    // Prune source tree too so subsequent packages / dev resources stay lean.
+    pruneClaudeCodeBinToHost(claudeCodeBinSource, { platform: "darwin" });
     const claudeCodeBinTarget = path.join(packagedResources, "claude-code-bin");
     await fs.rm(claudeCodeBinTarget, { recursive: true, force: true });
     await copyPath(claudeCodeBinSource, claudeCodeBinTarget);
+    claudeCodeBinPrune = pruneClaudeCodeBinToHost(claudeCodeBinTarget, { platform: "darwin" });
     claudeCodeBinInjected = true;
   }
 
@@ -366,6 +373,7 @@ try {
     residualIonBuildId: residualBuildId,
     dualRoot: "product-web primary + ion-dist residual",
     claudeCodeBinInjected,
+    claudeCodeBinPrune,
     electronAppIconPngInjected,
   }, null, 2));
 } finally {

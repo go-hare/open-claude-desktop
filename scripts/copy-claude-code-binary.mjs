@@ -1,13 +1,18 @@
 /**
  * Bundle @go-hare/claude-code platform binaries into resources/claude-code-bin.
  *
- * Default source: npm @go-hare/claude-code@VERSION optional platform packages
- *   @go-hare/claude-code-darwin-arm64|darwin-x64|linux-*|win32-*
+ * Runtime residual (host-loop / Code spawn) only needs the **host** binary:
+ *   platforms/<hostPlatformKey>/claude[.exe] + top-level copy + sibling vendor/rg.
+ * Linux/win guests do not load foreign host-tree binaries from this folder.
+ *
+ * Default: **host-only** (mac package → mac CLI only). Full multi-platform matrix
+ * is opt-in for CI / dual-exec guest prep that needs every npm optional package.
  *
  * Env:
  *   CLAUDE_CODE_NPM_VERSION   default 2.7.24
  *   CLAUDE_CODE_BINARY_SOURCE / CLAUDE_CODE_EXECUTABLE  optional override for host binary only
- *   CLAUDE_CODE_SKIP_PLATFORMS=1  only copy host (+ win top-level if available)
+ *   CLAUDE_CODE_ALL_PLATFORMS=1  fetch all PLATFORM_PACKAGES (opt-in fat tree)
+ *   CLAUDE_CODE_SKIP_PLATFORMS=1  legacy alias of host-only (default; kept for scripts)
  */
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -23,7 +28,11 @@ import { pipeline } from "node:stream/promises";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetRoot = path.join(projectRoot, "resources", "claude-code-bin");
 const VERSION = process.env.CLAUDE_CODE_NPM_VERSION || "2.7.24";
-const SKIP_PLATFORMS = process.env.CLAUDE_CODE_SKIP_PLATFORMS === "1";
+/** Opt-in fat matrix. Default is host-only (mac packages mac, win packages win). */
+const ALL_PLATFORMS = process.env.CLAUDE_CODE_ALL_PLATFORMS === "1";
+/** Legacy env: when set to 1, force host-only even if ALL_PLATFORMS is also set. */
+const FORCE_HOST_ONLY = process.env.CLAUDE_CODE_SKIP_PLATFORMS === "1";
+const HOST_ONLY = FORCE_HOST_ONLY || !ALL_PLATFORMS;
 
 /** Platform package key → binary file name inside the npm package. */
 const PLATFORM_PACKAGES = [
@@ -248,16 +257,22 @@ async function main() {
   await fs.mkdir(platformsRoot, { recursive: true });
 
   const binaries = {};
-  const toFetch = SKIP_PLATFORMS
-    ? PLATFORM_PACKAGES.filter((entry) => entry.key === hostPlatformKey() || entry.key === "win32-x64")
+  const hostKey = hostPlatformKey();
+  // Default host-only: mac packages mac, win packages win. Fat matrix is opt-in.
+  const toFetch = HOST_ONLY
+    ? PLATFORM_PACKAGES.filter((entry) => entry.key === hostKey)
     : PLATFORM_PACKAGES;
+  console.log(
+    `[copy-claude-code-binary] mode=${HOST_ONLY ? "host-only" : "all-platforms"} host=${hostKey} fetch=[${toFetch.map((e) => e.key).join(",")}]`,
+  );
 
   for (const entry of toFetch) {
     try {
       const dest = await downloadPlatformBinary(entry, VERSION, platformsRoot, tmpRoot);
       const canExec =
         (process.platform === "darwin" && entry.key.startsWith("darwin") && entry.key.endsWith(process.arch === "arm64" ? "arm64" : "x64")) ||
-        (process.platform === "linux" && entry.key.startsWith("linux") && entry.key.includes(process.arch));
+        (process.platform === "linux" && entry.key.startsWith("linux") && entry.key.includes(process.arch)) ||
+        (process.platform === "win32" && entry.key.startsWith("win32"));
       binaries[entry.key] = {
         binary: path.basename(dest),
         path: path.relative(targetRoot, dest).replaceAll("\\", "/"),
@@ -271,7 +286,6 @@ async function main() {
     }
   }
 
-  const hostKey = hostPlatformKey();
   const hostBinaryName = process.platform === "win32" ? "claude.exe" : "claude";
   // Prefer the platform package we just downloaded for this host (pinned VERSION).
   let hostSource =
@@ -285,7 +299,7 @@ async function main() {
   }
   if (!hostSource || !fsSync.existsSync(hostSource)) {
     throw new Error(
-      `Host Claude Code binary not found for ${hostKey}. Re-run without CLAUDE_CODE_SKIP_PLATFORMS, or set CLAUDE_CODE_BINARY_SOURCE to a ${VERSION} binary.`,
+      `Host Claude Code binary not found for ${hostKey}. Set CLAUDE_CODE_BINARY_SOURCE to a ${VERSION} binary, or CLAUDE_CODE_ALL_PLATFORMS=1 if the host package failed to download.`,
     );
   }
 
@@ -295,14 +309,15 @@ async function main() {
   await replaceFile(hostSource, topClaude);
   if (process.platform !== "win32") await fs.chmod(topClaude, 0o755);
 
-  // Always keep win32-x64 top-level claude.exe for Windows packaging residual when present.
-  const winSrc =
-    binaries["win32-x64"] && path.join(targetRoot, binaries["win32-x64"].path);
+  // Top-level foreign binaries only when fat matrix is requested.
+  // Host-only mac must NOT ship claude.exe (was ~140MB dead weight).
   const topExe = path.join(targetRoot, "claude.exe");
-  if (winSrc && fsSync.existsSync(winSrc) && hostBinaryName !== "claude.exe") {
-    await replaceFile(winSrc, topExe);
-  } else if (hostBinaryName === "claude.exe") {
-    // already written as top
+  if (!HOST_ONLY) {
+    const winSrc =
+      binaries["win32-x64"] && path.join(targetRoot, binaries["win32-x64"].path);
+    if (winSrc && fsSync.existsSync(winSrc) && hostBinaryName !== "claude.exe") {
+      await replaceFile(winSrc, topExe);
+    }
   }
 
   // Sibling vendor for top-level host binary (host-loop Glob/Grep).
@@ -358,7 +373,7 @@ async function main() {
       : null,
     binaries,
   };
-  if (fsSync.existsSync(topExe) && hostBinaryName !== "claude.exe") {
+  if (!HOST_ONLY && fsSync.existsSync(topExe) && hostBinaryName !== "claude.exe") {
     manifest.topLevel["claude.exe"] = {
       from: binaries["win32-x64"]?.path ?? "claude.exe",
       size: fsSync.statSync(topExe).size,
@@ -366,6 +381,8 @@ async function main() {
       version: binaries["win32-x64"]?.version ?? `${VERSION} (Claude Code)`,
     };
   }
+  manifest.mode = HOST_ONLY ? "host-only" : "all-platforms";
+  manifest.hostKey = hostKey;
 
   await fs.writeFile(path.join(targetRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
@@ -375,6 +392,8 @@ async function main() {
       {
         version: hostVersion,
         source: manifest.source,
+        mode: manifest.mode,
+        hostKey,
         platforms: Object.keys(binaries),
         topLevel: Object.keys(manifest.topLevel),
         vendor: manifest.vendor,

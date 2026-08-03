@@ -21,7 +21,11 @@ import fsPromises from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { injectPackagedAsarRuntime } from "./inject-packaged-asar-runtime.mjs";
-import { readIonBuildId, resolvePackagedTargets } from "./packagePaths.mjs";
+import {
+  pruneClaudeCodeBinToHost,
+  readIonBuildId,
+  resolvePackagedTargets,
+} from "./packagePaths.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targets = resolvePackagedTargets({ root: projectRoot, platform: "win32" });
@@ -91,9 +95,13 @@ await copyTree(productWebSource, productWebTarget);
 await copyTree(residualIonSource, ionDistTarget);
 
 let claudeCodeBinInjected = false;
+let claudeCodeBinPrune = null;
 if (existsSync(claudeCodeBinSource)) {
+  // Host-only: win package ships only platforms/win32-<arch> (+ top-level claude.exe).
+  pruneClaudeCodeBinToHost(claudeCodeBinSource, { platform: "win32" });
   const claudeCodeBinTarget = path.join(packagedResources, "claude-code-bin");
   await copyTree(claudeCodeBinSource, claudeCodeBinTarget);
+  claudeCodeBinPrune = pruneClaudeCodeBinToHost(claudeCodeBinTarget, { platform: "win32" });
   claudeCodeBinInjected = true;
 }
 
@@ -147,6 +155,7 @@ console.log(
       residualIonBuildId: residualBuildId,
       dualRoot: "product-web primary + ion-dist residual",
       claudeCodeBinInjected,
+      claudeCodeBinPrune,
       claudeExeExists,
       asarRuntimeInjected: asarInject.ok,
       load: "app://localhost → resources/product-web (setup residual → ion-dist)",
