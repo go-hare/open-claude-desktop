@@ -4,17 +4,13 @@ import path from "node:path";
 import { getProjectRoot, resolveOriginalIonDist } from "./originalAppPaths.mjs";
 
 const root = getProjectRoot();
+// Prefer OUR vendored residual app's ion-dist; Downloads only if vendor empty.
 const sourceCandidates = [
   process.argv[2] ? path.resolve(process.argv[2]) : undefined,
   process.env.CLAUDE_ORIGINAL_ION_DIST,
-  resolveOriginalIonDist(),
   path.join(root, "resources/original-claude.app/Contents/Resources/ion-dist"),
+  resolveOriginalIonDist(),
   "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app/Contents/Resources/ion-dist",
-  path.resolve(root, "../Claudex.app/Contents/Resources/ion-dist"),
-  path.resolve(root, "../../Claudex.app/Contents/Resources/ion-dist"),
-  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claudex.app/Contents/Resources/ion-dist",
-  String.raw`D:\BaiduNetdiskDownload\Claude code 汉化mac桌面版\Claudex\Claudex.app\Contents\Resources\ion-dist`,
-  String.raw`D:\work\py\claude\claude-ion-react-workbench\claudex-desktop\resources\ion-dist`,
 ].filter(Boolean);
 const source = sourceCandidates.find((candidate) => {
   try {

@@ -297,6 +297,19 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   const initialTarget = extractLaunchTarget(process.argv);
 
   await app.whenReady();
+  // Official residual: restore Yi.get("userThemeMode") → nativeTheme.themeSource.
+  try {
+    const { applyStoredUserThemeMode } = await import("./services/settings/userThemeMode");
+    applyStoredUserThemeMode(app.getPath("userData"));
+  } catch {
+    /* theme restore is best-effort */
+  }
+  // residual E5e/lq: warm login-shell PATH/env via shellPathWorker (non-blocking).
+  void import("./services/shell/shellEnvironment")
+    .then((m) => m.getShellEnvironment())
+    .catch(() => {
+      /* optional CCD residual */
+    });
   // Live SPA residual requires UA token "claude/" + claudeAppBindings (see jI).
   // Product display name is Claudex — inject Claude/<ver> without renaming the app.
   installAnthropicDesktopUserAgent();

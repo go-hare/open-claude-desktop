@@ -4,6 +4,7 @@ import { createProcessShim } from "./processShim";
 import { settingsBridgeSpec } from "./bridges/settingsBridge";
 import { internalUiBridgeSpec } from "./bridges/internalUiBridge";
 import { hybridBridgeSpec } from "./bridges/hybridBridge";
+import { readInitialLocaleBootstrap } from "./initialLocaleBootstrap";
 
 exposeBridgeSpec(
   {
@@ -14,6 +15,7 @@ exposeBridgeSpec(
   ipcRenderer,
 );
 
+const { messages, locale } = readInitialLocaleBootstrap();
 exposeValue("process", createProcessShim());
-exposeValue("initialMessages", {});
-exposeValue("initialLocale", "en-US");
+exposeValue("initialMessages", messages);
+exposeValue("initialLocale", locale);

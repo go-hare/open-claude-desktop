@@ -5,8 +5,8 @@
  *   !localSessionId → je outcome "no_local_session"
  *   else sessionManager.interruptTurn(localSessionId) + je "interrupted"
  *
- * Full remote bridge / activeSessions transport product is residual.
- * This pure helper is the control_request→interruptTurn residual product can call.
+ * activeSessions map + CCR transport live on SessionsBridgeClient; this pure
+ * helper is the control_request→interruptTurn residual product can call.
  */
 
 export type CoworkBridgeInterruptOutcome =

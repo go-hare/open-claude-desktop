@@ -15,6 +15,13 @@ import {
   installDxtArchive,
   revealInstalledExtension,
 } from "../services/extensions/desktopExtensions";
+import {
+  isDesktopExtensionDirectoryEnabledResidual,
+  isDesktopExtensionSignatureRequiredResidual,
+  isDirectoryEnabledResidual,
+  isExtensionsEnabledResidual,
+  refreshAllowlistCheckResidual,
+} from "../services/settings/extensionEnableGates";
 import { FeatureStateStore } from "../services/featureState/featureStateStore";
 import { LocalLaunchManager } from "../services/launch/localLaunchManager";
 import { LaunchPreviewViewManager } from "../services/launch/launchPreviewViewManager";
@@ -48,6 +55,34 @@ import {
 import { getCoworkClaudeVmService } from "../services/coworkVm/coworkClaudeVm";
 import { getHardwareBuddyService } from "../services/buddy/hardwareBuddyService";
 import {
+  getClaudeCodeInstallStatus,
+  grandPrixStatusResidual,
+  prepareClaudeCodeInstall,
+  restartAfterVmpInstallResidual,
+  simulatorAttachmentStateResidual,
+} from "./shellSoftTrueResidual";
+import { askClaudeResidual } from "../services/coworkArtifacts/coworkArtifactAskClaude";
+import { isCoworkGrowthBookFeatureOn } from "../services/coworkHostLoop/coworkGrowthBookFeatures";
+import {
+  attachSimulatorSessionResidual,
+  gestureSimulatorResidual,
+  installAndLaunchIosSimulator,
+  parseSimulatorAttachRequest,
+  parseSimulatorInstallRequest,
+} from "../services/simulator/simulatorSessionResidual";
+import { listFramebufferSourcesIpc } from "../services/framebuffer/framebufferSourcesResidual";
+import {
+  grandPrixDisconnectResidual,
+  grandPrixPairedMapFromStore,
+  grandPrixPairNvi,
+} from "../services/grandPrix/grandPrixPairingResidual";
+import { getBuddyRemoteFeedResidual } from "../services/buddy/buddyRemoteFeedResidual";
+import { getOrbitDeploysResidual } from "../services/launch/orbitDeploysResidual";
+import {
+  deployPreviewNestUnavailableResidual,
+  unpublishDeployNestUnavailableResidual,
+} from "../services/launch/launchDeployPreviewResidual";
+import {
   addLocalDirectoryMarketplace,
   installPluginByIdFromDisk,
   installPluginFromDirectory,
@@ -64,6 +99,16 @@ import {
   uninstallPluginFromDisk,
   type LocalPluginsPathBag,
 } from "../services/plugins/localPluginsWriter";
+import {
+  getPluginCliStatus as residualGetPluginCliStatus,
+  getPluginOAuthStatus as residualGetPluginOAuthStatus,
+  getPluginShimOps as residualGetPluginShimOps,
+  revokePluginOAuth as residualRevokePluginOAuth,
+  setPluginEnvVars as residualSetPluginEnvVars,
+  setPluginOAuthClient as residualSetPluginOAuthClient,
+  setPluginShimPermission as residualSetPluginShimPermission,
+  startPluginOAuthFlow as residualStartPluginOAuthFlow,
+} from "../services/plugins/localPluginOAuthService";
 import { getComputerUseTccState, openTccSystemSettings, requestAccessibilityGrant, requestScreenRecordingGrant } from "../services/tcc/computerUseTcc";
 import { createCoworkHostLoopModeResolver } from "../services/coworkHostLoop/createCoworkHostLoopModeResolver";
 import { isCoworkHostLoopGrowthBookFeatureEnabled } from "../services/coworkHostLoop/coworkGrowthBookFeatures";
@@ -232,6 +277,11 @@ async function runOptional(command: string, args: string[]): Promise<string | nu
   }
 }
 
+/**
+ * Official Simulator.listDevices residual shape (Usr-ish):
+ *   { kind?, udid, name, state, osVersion }
+ * List path uses real xcrun/adb when present; never invent devices.
+ */
 async function listSimulatorDevices(): Promise<Array<Record<string, unknown>>> {
   const devices: Array<Record<string, unknown>> = [];
   if (process.platform === "darwin") {
@@ -243,22 +293,44 @@ async function listSimulatorDevices(): Promise<Array<Record<string, unknown>>> {
       parsed = null;
     }
     for (const [runtime, items] of Object.entries(parsed?.devices ?? {})) {
+      const osVersion = String(runtime).replace(/^com\.apple\.CoreSimulator\.SimRuntime\./, "").replace(/-/g, ".");
       for (const item of items) {
-        devices.push({ ...item, runtime, platform: "ios", source: "xcrun" });
+        const udid = String(item.udid ?? item.UDID ?? "");
+        const name = String(item.name ?? "");
+        if (!udid || !name) continue;
+        devices.push({
+          kind: "ios",
+          udid,
+          name,
+          state: String(item.state ?? "unknown"),
+          osVersion,
+        });
       }
     }
   }
 
   const avds = await runOptional("emulator", ["-list-avds"]);
   for (const name of (avds ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
-    devices.push({ id: `android-avd:${name}`, name, platform: "android", state: "available", source: "emulator" });
+    devices.push({
+      kind: "android",
+      udid: `android-avd:${name}`,
+      name,
+      state: "available",
+      osVersion: "unknown",
+    });
   }
 
   const adb = await runOptional("adb", ["devices", "-l"]);
   for (const line of (adb ?? "").split(/\r?\n/).slice(1)) {
-    const [serial, state, ...rest] = line.trim().split(/\s+/);
+    const [serial, state] = line.trim().split(/\s+/);
     if (!serial || !state) continue;
-    devices.push({ id: `adb:${serial}`, name: serial, platform: "android", state, details: rest.join(" "), source: "adb" });
+    devices.push({
+      kind: "android",
+      udid: `adb:${serial}`,
+      name: serial,
+      state,
+      osVersion: "unknown",
+    });
   }
 
   return devices;
@@ -433,7 +505,15 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   const artifacts = featureState.loadMap<Record<string, unknown>>("artifacts");
   // Legacy featureState memories map — migrate once into official on-disk residual.
   const legacyMemories = featureState.loadMap<string>("memories");
-  const orbitDeploys = featureState.loadMap<Record<string, unknown>>("orbitDeploys");
+  // Official OrbitDeploys: userData/orbit-deploys.json (not featureState invent map).
+  const orbitDeploysStore = getOrbitDeploysResidual(app.getPath("userData"));
+  // Official BuddyRemoteFeed Hrr residual (sync sessions, not {ok,items:[]}).
+  const buddyRemoteFeed = getBuddyRemoteFeedResidual();
+  buddyRemoteFeed.registerDispatcher({
+    dispatchPermissionDecision: (sessionId, requestId, decision) => {
+      events.buddyRemoteFeedPermissionDecision(sessionId, requestId, decision);
+    },
+  });
   // Legacy in-memory maps kept as fallback when account/org identity is absent.
   // Prefer official on-disk residual (TGi / known_marketplaces / installed_plugins).
   const customMarketplaces = featureState.loadMap<Record<string, unknown>>("customMarketplaces");
@@ -502,7 +582,6 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     return legacyMemoryMigration;
   };
   const persistArtifacts = () => featureState.saveMap("artifacts", artifacts);
-  const persistOrbitDeploys = () => featureState.saveMap("orbitDeploys", orbitDeploys);
   const persistCustomMarketplaces = () => featureState.saveMap("customMarketplaces", customMarketplaces);
   const persistLocalPlugins = () => featureState.saveMap("localPlugins", localPlugins);
   const persistVmState = () => featureState.saveMap("vmState", vmStateMap);
@@ -531,6 +610,13 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     });
     return [...fromDisk, ...fromMemory];
   };
+
+  /** Residual LocalPlugins OAuth/env/shim deps (kc/PK list). */
+  const pluginOAuthDeps = () => ({
+    getIdentity: () => context.coworkAccount.getIdentity(),
+    listPlugins: () => installedPlugins(),
+  });
+
   const marketplacePlugins = (): Array<Record<string, unknown>> => {
     const paths = resolvePluginPaths();
     const fromDisk = listAvailableLocalMarketplacePlugins(paths);
@@ -563,11 +649,20 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       pluginId: plugin.id,
     })),
   ];
-  let simulatorAttachment: unknown = null;
+  /** Official Simulator attachment store is an AmA[] residual, not a single bag. */
+  let simulatorAttachments: unknown[] = [];
   let framebufferSource: Record<string, unknown> | null = null;
   let activeOfficeFileId: string | null = null;
   let miniExpanded = false;
-  let grandPrixPaired = false;
+  /**
+   * Official GrandPrix store residual (kZe/Tle):
+   *   Record<partnerId, {paired?:boolean, token?:string}>
+   * Tle map for events is derived via grandPrixPairedMapFromStore — never invent.
+   */
+  let grandPrixStore: Record<string, { paired?: boolean; token?: string }> = {};
+  const grandPrixSessionAttempts = new Map<string, number>();
+  const grandPrixPairedMap = (): Record<string, boolean> =>
+    grandPrixPairedMapFromStore(grandPrixStore);
   let previewUrl: string | null = null;
   const localSessions = () => [
     ...context.localSessions.getAll(true).map((session) => ({
@@ -671,6 +766,33 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   const buddy = getHardwareBuddyService();
   buddy.setProgressSink((msg) => events.buddyProgress(msg));
   buddy.setPairingPromptSink((deviceName) => events.buddyPairingPrompt(deviceName));
+  // Official rat → xn("hardwareBuddyEnabled", e!==null).
+  buddy.setHardwareBuddyEnabledWriter((enabled) => {
+    try {
+      context.settings.setPreference("hardwareBuddyEnabled", enabled);
+    } catch {
+      /* preference write best-effort */
+    }
+  });
+  // Official uTA.dispatchTx residual — main → mainView BuddyBleTransport.tx → Kr.
+  // Do NOT invent TX on reportState; only real Yq lines go through here.
+  buddy.setTxDispatcher((line) => {
+    events.buddyBleTx(line);
+  });
+  // Official oat / ZCr residual: pair via mainView window.buddyBle + BLE bridge.
+  try {
+    const mainView = context.windows.mainView;
+    if (mainView?.webContents) {
+      buddy.setMainViewExecutor({
+        isDestroyed: () => mainView.webContents.isDestroyed(),
+        executeJavaScript: (code, userGesture) =>
+          mainView.webContents.executeJavaScript(code, userGesture ?? true),
+        webContents: mainView.webContents,
+      });
+    }
+  } catch {
+    /* mainView may not be ready at register time — pair falls back to false */
+  }
 
   registerNamespaceHandlers("claude.buddy", {
     Buddy: {
@@ -711,14 +833,16 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     },
     BuddyBleTransport: {
       rx: async (_event, payload) => buddy.bleRx(payload),
-      reportState: async (_event, state, _details) => {
-        const result = await buddy.reportBleState(state);
-        // Official: main may also push tx frames to the transport side.
-        events.buddyBleTx(String(state ?? ""));
-        return result;
+      /**
+       * Official reportState(state, name|null) residual (WCr).
+       * state ∈ ready|connected|disconnected; name is device name when connected.
+       */
+      reportState: async (_event, state, name) => {
+        // Official WCr only — never invent BuddyBleTransport.tx from state string.
+        return buddy.reportBleState(state, name);
       },
       log: async (_event, message) => {
-        console.log(`[buddy] ${String(message ?? "")}`);
+        console.log(`[buddy-ble] ${String(message ?? "")}`);
         return true;
       },
     },
@@ -727,23 +851,54 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   registerNamespaceHandlers("claude.simulator", {
     Simulator: {
       listDevices: async () => listSimulatorDevices(),
-      installAndLaunch: async (_event, options) => {
-        simulatorAttachment = { id: "local-simulator", status: "running", launchedAt: new Date().toISOString(), options };
-        events.simulatorAttachmentUpdated(simulatorAttachment);
-        return simulatorAttachment;
+      /**
+       * Official installAndLaunch(req: Ysr) → void.
+       * Product residual: darwin ios xcrun simctl boot/install/launch when tools+app exist.
+       * Does NOT invent AmA attachment/stream (attach remains separate).
+       */
+      installAndLaunch: async (_event, req) => {
+        const parsed = parseSimulatorInstallRequest(req);
+        if (!parsed) {
+          throw new Error(
+            'Argument "req" to method "installAndLaunch" failed validation (need udid+appPath)',
+          );
+        }
+        await installAndLaunchIosSimulator(parsed);
       },
-      attach: async (_event, device) => {
-        simulatorAttachment = device ?? { attachedAt: new Date().toISOString() };
-        events.simulatorAttachmentUpdated(simulatorAttachment);
-        return simulatorAttachment;
+      /**
+       * Official attach(udid?, deviceName?, kind?) binds a live stream session → AmA.
+       * Product residual: parse request shape, emit empty AmA store honesty, then
+       * throw — never invent streamUrl/point size without live stream residual.
+       */
+      attach: async (_event, req?: unknown) => {
+        const parsed = parseSimulatorAttachRequest(req);
+        // Keep AmA store empty until a real stream residual can produce AmA bags.
+        simulatorAttachments = [];
+        events.simulatorAttachmentUpdated(
+          simulatorAttachmentStateResidual(simulatorAttachments),
+        );
+        attachSimulatorSessionResidual(parsed ?? undefined);
       },
       detach: async () => {
-        simulatorAttachment = null;
-        events.simulatorAttachmentUpdated(simulatorAttachment);
-        return true;
+        // Official detach residual clears live session; empty store when none.
+        simulatorAttachments = [];
+        events.simulatorAttachmentUpdated(
+          simulatorAttachmentStateResidual(simulatorAttachments),
+        );
       },
-      gesture: async (_event, gesture) => ok({ gesture }),
-      attachment_$store$_getState: async () => simulatorAttachment,
+      /**
+       * Official gesture(udid, gesture) delivers input to an attached session.
+       * No attachment → honest throw (not ok invent).
+       */
+      gesture: async () => {
+        gestureSimulatorResidual();
+      },
+      /**
+       * Official attachment store getInitialAttachmentState → AmA[] (array).
+       * Empty residual when no live sim session.
+       */
+      attachment_$store$_getState: async () =>
+        simulatorAttachmentStateResidual(simulatorAttachments),
     },
   });
 
@@ -751,7 +906,14 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     OfficeAddinFiles: {
       connectedFilesState_$store$_getState: async () => officeFilesState(),
       getConnectedFiles: async () => connectedOfficeFiles(),
-      isFeatureEnabled: async () => true,
+      /**
+       * Official residual: gi("louderPenguinEnabled") === true.
+       * SSA default louderPenguinEnabled is false — do not invent true.
+       */
+      isFeatureEnabled: async () => {
+        const prefs = context.settings.getPreferences();
+        return prefs.louderPenguinEnabled === true;
+      },
       focusFile: async (_event, fileIdOrPath) => {
         const file = connectedOfficeFiles().find((item) => item.id === fileIdOrPath || item.path === fileIdOrPath);
         if (!file) return false;
@@ -768,13 +930,30 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         events.officeConnectedFilesStateUpdated(officeFilesState());
         return file;
       },
-      updateActiveConversationSummary: async () => true,
+      /**
+       * Official residual updateActiveConversationSummary stores summary for
+       * office add-in IPC; without live add-in bridge this is a no-op (not true).
+       */
+      updateActiveConversationSummary: async () => undefined,
     },
   });
 
   registerNamespaceHandlers("claude.coworkArtifact", {
     CoworkArtifactBridge: {
-      askClaude: async (_event, prompt) => ({ ok: true, response: String(prompt ?? ""), localOnly: true }),
+      /**
+       * Official askClaude residual (ior / Wnr / cz):
+       *   !ft(2940196192) → cz not enabled
+       *   !shown artifact → cz not currently shown
+       *   else Wnr sample (CLI ready + OAuth) or honest error bags
+       * Never invent ok text without real residual body.
+       */
+      askClaude: async (_event, prompt, data) =>
+        askClaudeResidual(prompt, data, {
+          isInferenceEnabled: () =>
+            isCoworkGrowthBookFeatureOn("2940196192"),
+          getShownArtifactId: () =>
+            context.windows.coworkArtifacts?.getShownArtifactId?.(),
+        }),
       callMcpTool: async (_event, tool) => {
         const request = parseMcpToolRequest(tool);
         const server = findMcpServer(context, request.serverName);
@@ -819,8 +998,14 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
       reportErrorToSlack: async (_event, error) => ({ ok: false, reason: "slack_bridge_absent", error }),
     },
+    /**
+     * Official BuddyRemoteFeed (Hrr) residual:
+     *   sync(sessions: bUt[]) → store + remote_sync; void (not {ok,items})
+     */
     BuddyRemoteFeed: {
-      sync: async () => ({ ok: true, items: [] }),
+      sync: async (_event, sessions) => {
+        buddyRemoteFeed.sync(sessions);
+      },
     },
     ChromeExtension: {
       isInstalled: async () => isClaudeChromeExtensionInstalled(),
@@ -853,8 +1038,15 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
           return { available: false, errorMessage: error instanceof Error ? error.message : String(error) };
         }
       },
-      getStatus: async () => "ready",
-      prepare: async () => ({ success: true }),
+      /**
+       * Official Tl residual via Ta.getStatus: not_installed|updating|ready|download_failed.
+       * Ready only when a real absolute Claude Code binary exists on disk.
+       */
+      getStatus: async () => getClaudeCodeInstallStatus(),
+      /**
+       * Official prepare residual: `{ success: ready, error? }` — no invent success.
+       */
+      prepare: async () => prepareClaudeCodeInstall(),
       resolveLocalSettings: async (_event, workspacePath) => {
         const workspace = asString(workspacePath);
         const result: Record<string, unknown> = {};
@@ -978,12 +1170,28 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
           bundleReady: snap.bundleReady,
         };
       },
-      enableVirtualMachinePlatform: async () => ({
-        success: process.platform === "darwin",
-        restartNeeded: false,
-        mode: "vm",
-      }),
-      restartAfterVMPInstall: async () => ({ success: true, restartNeeded: false, mode: "vm" }),
+      /**
+       * Official JTi: non-win32 → {success:true, restartNeeded:false};
+       * win32 enables VirtualMachinePlatform (native/powershell). No invent
+       * win32 success without actually enabling the feature.
+       */
+      enableVirtualMachinePlatform: async () => {
+        if (process.platform !== "win32") {
+          return { success: true, restartNeeded: false, mode: "vm" };
+        }
+        return {
+          success: false,
+          restartNeeded: false,
+          mode: "vm",
+          error: "VirtualMachinePlatform enable residual unavailable",
+        };
+      },
+      /**
+       * Official KTi / restartAfterVMPInstall → boolean.
+       * Only true after a real win32 VMP enable armed seA; otherwise false.
+       * Never invent success bag.
+       */
+      restartAfterVMPInstall: async () => restartAfterVmpInstallResidual(false),
       apiReachability_$store$_getState: async () => {
         const snap = await coworkVm.snapshot();
         return {
@@ -1397,9 +1605,14 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         shell.showItemInFolder(context.localSessions.getStorageFile());
         return true;
       },
-      dismissCard: async () => true,
-      setCardStatus: async () => true,
-      recordCardEngagement: async () => true,
+      /**
+       * Official residual radar cards (when remote radar unavailable):
+       *   dismissCard / setCardStatus / recordCardEngagement → false
+       * Do not soft-true engagement/dismiss without radar backend.
+       */
+      dismissCard: async () => false,
+      setCardStatus: async () => false,
+      recordCardEngagement: async () => false,
       adoptSession: async (_event, card) => context.localSessions.start({ title: asString(asObject(card).title) ?? "Radar session", prompt: asString(asObject(card).prompt) ?? undefined }),
     },
     CoworkSpaces: {
@@ -1813,15 +2026,29 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         return okDisk;
       },
       getDownloadedRemotePlugins: async () => installedPlugins().filter((plugin) => plugin.source === "local-upload" || plugin.source === "marketplace"),
-      getPluginCliStatus: async () => ({ installed: false }),
-      getPluginOAuthStatus: async () => ({ connected: false }),
-      getPluginShimOps: async () => pluginShimOps(installedPlugins()),
+      // Official residual oye / getPluginOAuthStatus / getPluginShimOps — not invent stubs.
+      getPluginCliStatus: async (_event, pluginId, contextMode?) =>
+        residualGetPluginCliStatus(pluginOAuthDeps(), pluginId, contextMode),
+      getPluginOAuthStatus: async (_event, pluginId, contextMode?) =>
+        residualGetPluginOAuthStatus(pluginOAuthDeps(), pluginId, contextMode),
+      getPluginShimOps: async (_event, pluginId, contextMode?, cliName?) => {
+        const residual = residualGetPluginShimOps(
+          pluginOAuthDeps(),
+          pluginId,
+          contextMode,
+          cliName,
+        );
+        // Fall back to coarse product scan only when residual empty (no manifest clis).
+        return residual.length > 0 ? residual : pluginShimOps(installedPlugins());
+      },
       listSkillFiles: async (_event, skillRef) => {
         if (skillRef) return getLocalSkillFiles(skillRef);
         const skills = await listLocalSkills();
         return (await Promise.all(skills.map((skill) => getLocalSkillFiles(skill)))).flat();
       },
-      revokePluginOAuth: async () => true,
+      revokePluginOAuth: async (_event, pluginId, cliName?, contextMode?) => {
+        residualRevokePluginOAuth(pluginOAuthDeps(), pluginId, cliName, contextMode);
+      },
       setPluginEnabled: async (_event, pluginId, enabled) => {
         const paths = resolvePluginPaths();
         const updated = setPluginEnabledOnDisk(paths, String(pluginId), Boolean(enabled));
@@ -1832,14 +2059,53 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         persistLocalPlugins();
         return mem;
       },
-      setPluginEnvVars: async () => true,
-      setPluginOAuthClient: async () => true,
-      setPluginShimPermission: async () => true,
-      startPluginOAuthFlow: async (_event, url) => {
-        const target = asString(url) ?? asString(asObject(url).url);
-        if (target) await shell.openExternal(target);
-        return { success: Boolean(target) };
-      },
+      setPluginEnvVars: async (_event, pluginId, cliName, values, contextMode?) =>
+        residualSetPluginEnvVars(
+          pluginOAuthDeps(),
+          pluginId,
+          cliName,
+          values,
+          contextMode,
+        ),
+      setPluginOAuthClient: async (
+        _event,
+        pluginId,
+        cliName,
+        clientId,
+        clientSecret,
+        contextMode?,
+      ) =>
+        residualSetPluginOAuthClient(
+          pluginOAuthDeps(),
+          pluginId,
+          cliName,
+          clientId,
+          clientSecret,
+          contextMode,
+        ),
+      setPluginShimPermission: async (
+        _event,
+        pluginId,
+        op,
+        permission,
+        contextMode?,
+        cliName?,
+      ) =>
+        residualSetPluginShimPermission(
+          pluginOAuthDeps(),
+          pluginId,
+          op,
+          permission,
+          contextMode,
+          cliName,
+        ),
+      startPluginOAuthFlow: async (_event, pluginId, cliName?, contextMode?) =>
+        residualStartPluginOAuthFlow(
+          pluginOAuthDeps(),
+          pluginId,
+          cliName,
+          contextMode,
+        ),
       /**
        * Official syncRemotePlugins residual — product does not invent cloud sync.
        * Returns on-disk installed plugins only.
@@ -1886,7 +2152,14 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         if (!target) return { success: false, error: "missing plugin path or base64 content" };
 
         const lower = target.toLowerCase();
-        const result = lower.endsWith(".zip")
+        // Residual portable: .zip / .mcpb / .dxt are zip containers when
+        // package is a plugin (.claude-plugin/plugin.json). Extension-only
+        // packages fail honest after unzip (no invent plugin.json mapping).
+        const isZipPackage =
+          lower.endsWith(".zip") ||
+          lower.endsWith(".mcpb") ||
+          lower.endsWith(".dxt");
+        const result = isZipPackage
           ? installPluginFromZip(paths, target, { replaceExisting: replace })
           : installPluginFromDirectory(paths, target, { replaceExisting: replace });
         if (!result.success) {
@@ -1902,52 +2175,136 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         };
       },
     },
-    // Official lr (c11959232 YR):
-    //   T = capabilities.framebufferPreview.status === "supported"
-    //   A = listSources(cwd) real simulator/device streams
-    //   Screen menu: T && (A || pane open)
-    // Product residual: RFB / simulator framebuffer MessagePort is NOT wired.
-    // Do not invent support via desktopCapturer screen/window sources — that made
-    // Screen always appear unlike official (Preview/Diff/Terminal/Tasks/Plan only).
+    // Official Uvi capability + ixt empty residual when RFB unavailable:
+    //   Uvi: mT(() => ft("1928275548") ? {status:"supported"} : {status:"unavailable"})
+    //   mT: packaged app → {status:"unavailable"}; unpackaged → evaluate flag
+    //   requestFramePort: async () => false
+    //   listSources: async () => []
+    //   attach: throw "FramebufferPreview not available in this window"
+    //   detach / setStreamHints / sendPointer / sendKey / sendScroll: async () => {}
+    // Full RFB MessagePort / @ant/rfb-client live frames = separate surface.
+    // Do NOT invent true success on input methods or desktopCapturer invent support.
     FramebufferPreview: {
-      /** Explicit capability residual for web T gate. Always unsupported until RFB lands. */
-      getStatus: async () => ({ status: "unsupported" as const }),
-      isSupported: async () => false,
-      listSources: async (_event, _cwd?: unknown) => {
-        // Official listSources returns device/sim framebuffer origins, not Electron
-        // desktopCapturer screen:/window: ids. Empty until real sources exist.
-        return [];
+      /**
+       * Official Uvi residual for framebufferPreview capability gate.
+       * Methods remain empty residual even when status is "supported" (flag on, unpackaged)
+       * until full MessagePort body lands — matches official main-window ixt empty impl.
+       */
+      getStatus: async () => {
+        if (app.isPackaged) return { status: "unavailable" as const };
+        if (isCoworkGrowthBookFeatureOn("1928275548")) {
+          return { status: "supported" as const };
+        }
+        return { status: "unavailable" as const };
+      },
+      isSupported: async () => {
+        if (app.isPackaged) return false;
+        return isCoworkGrowthBookFeatureOn("1928275548");
+      },
+      /**
+       * Official listSources residual:
+       *   - main-window ixt empty when RFB unavailable → []
+       *   - MCP/launch residual reads .claude/launch.json + launch.d framebuffer entries
+       * Product: read real configs only (vnc/rfb schemes). No desktopCapturer invent.
+       * requestFramePort / attach still empty/throw without MessagePort RFB session.
+       */
+      listSources: async (_event, cwd?: unknown) => {
+        return listFramebufferSourcesIpc(cwd);
       },
       attach: async (_event, _cwdOrSource: unknown, _sessionName?: unknown) => {
-        // Honest residual: cannot attach a live framebuffer stream yet.
-        return null;
+        // Official residual when FramebufferPreview not available in this window.
+        // listSources may return launch configs; attach still needs MessagePort RFB.
+        throw new Error("FramebufferPreview not available in this window");
       },
       detach: async (_event, _sessionId?: unknown) => {
         framebufferSource = null;
-        return true;
+        // Official residual: async () => {}
       },
       requestFramePort: async () => {
-        // Full RFB frame MessagePort not wired in open-claude-desktop yet.
-        if (!framebufferSource) return { attached: false };
-        return { attached: true, source: framebufferSource, sessionId: framebufferSource.id };
+        // Official residual: async () => false — no invent MessagePort.
+        framebufferSource = null;
+        return false;
       },
-      sendKey: async () => true,
-      sendPointer: async () => true,
-      sendScroll: async () => true,
-      setStreamHints: async () => true,
+      /** Official residual: async () => {} — no invent input success. */
+      sendKey: async (
+        _event,
+        _sessionId?: unknown,
+        _key?: unknown,
+        _code?: unknown,
+        _down?: unknown,
+      ) => {
+        /* no RFB session — honest no-op */
+      },
+      sendPointer: async (
+        _event,
+        _sessionId?: unknown,
+        _x?: unknown,
+        _y?: unknown,
+        _buttonMask?: unknown,
+      ) => {
+        /* no RFB session — honest no-op */
+      },
+      sendScroll: async (
+        _event,
+        _sessionId?: unknown,
+        _x?: unknown,
+        _y?: unknown,
+        _deltaX?: unknown,
+        _deltaY?: unknown,
+      ) => {
+        /* no RFB session — honest no-op */
+      },
+      setStreamHints: async (_event, _sessionId?: unknown, _hints?: unknown) => {
+        /* no RFB session — honest no-op */
+      },
     },
     GrandPrix: {
-      pair: async (_event, device) => {
-        grandPrixPaired = true;
-        events.grandPrixStatusUpdated({ paired: true, status: "connected" });
-        return { paired: true, device };
+      /**
+       * Official nvi(partnerId) residual body:
+       *   !darwin → featureDisabled
+       *   !evi(partner) / empty GB allowlist → unknownPartner
+       *   session attempts ≥ 3 → rateLimited
+       *   !safeStorage → safeStorageUnavailable
+       *   !Jn() attestedMach → transportUnavailable
+       *   native ok + success body → paired true + store
+       * Never invent paired without native ok body.
+       * Return shape YFt: { paired:boolean, error?:string }.
+       */
+      pair: async (_event, partnerId) => {
+        const result = await grandPrixPairNvi(partnerId, {
+          attempts: grandPrixSessionAttempts,
+          loadStore: () => grandPrixStore,
+          saveStore: (next) => {
+            grandPrixStore = next;
+          },
+        });
+        // Official ovi updates store from Tle() map after pair.
+        events.grandPrixStatusUpdated(
+          grandPrixStatusResidual(grandPrixPairedMap()),
+        );
+        return result;
       },
-      disconnect: async () => {
-        grandPrixPaired = false;
-        events.grandPrixStatusUpdated({ paired: false, status: "disconnected" });
-        return true;
+      /**
+       * Official disconnect(partnerId: string) → void + kZe clear map entry.
+       * Store shape remains { paired: Record<id,boolean> } (ucA), not boolean+status.
+       */
+      disconnect: async (_event, partnerId) => {
+        const id = asString(partnerId);
+        grandPrixStore = grandPrixDisconnectResidual(
+          id ?? undefined,
+          grandPrixStore,
+          grandPrixSessionAttempts,
+        );
+        events.grandPrixStatusUpdated(
+          grandPrixStatusResidual(grandPrixPairedMap()),
+        );
       },
-      grandPrixStatus_$store$_getState: async () => ({ paired: grandPrixPaired, status: grandPrixPaired ? "connected" : "disconnected" }),
+      /**
+       * Official getInitialGrandPrixStatusState → { paired: Tle() } where Tle is
+       * Record<partnerId, boolean>. Never invent status:"connected".
+       */
+      grandPrixStatus_$store$_getState: async () =>
+        grandPrixStatusResidual(grandPrixPairedMap()),
     },
     Launch: {
       activeServers_$store$_getState: async () => launch.getActiveServers(),
@@ -1957,11 +2314,15 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         featureState.setBoolean("autoVerify", asString(cwd) ?? process.cwd(), Boolean(enabled));
         return true;
       },
-      deployPreview: async (_event, serverId, appName) => {
-        const deploy = { id: id("deploy"), serverId, appName, deployedAt: new Date().toISOString(), localOnly: true };
-        orbitDeploys.set(String(deploy.id), deploy);
-        persistOrbitDeploys();
-        return true;
+      /**
+       * Official deployPreview residual (Nest-only via E9):
+       * product E9 empty → failed deployEvent + return false (no invent true).
+       */
+      deployPreview: async (_event, serverId, _appName) => {
+        const id = asString(serverId) ?? asString(asObject(serverId).serverId) ?? "";
+        return deployPreviewNestUnavailableResidual(id, (sid, event) => {
+          events.launchDeployEvent(sid, event);
+        });
       },
       destroyPreview: async (_event, serverId) => {
         const id = asString(serverId) ?? asString(asObject(serverId).serverId);
@@ -2149,13 +2510,10 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         if (!id) return false;
         return previewViews.toggleSelectionMode(id, on);
       },
-      unpublishDeploy: async (_event, appName) => {
-        for (const [deployId, deploy] of orbitDeploys.entries()) {
-          if (deploy.appName === appName || deploy.id === appName) orbitDeploys.delete(deployId);
-        }
-        persistOrbitDeploys();
-        return null;
-      },
+      /**
+       * Official unpublishDeploy residual: Nest-only; else error string.
+       */
+      unpublishDeploy: async () => unpublishDeployNestUnavailableResidual(),
     },
     FloatingPenguinMini: {
       requestToggleMini: async () => {
@@ -2169,9 +2527,24 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         return miniExpanded;
       },
     },
+    /**
+     * Official NestDev residual (app.asar zFt):
+     *   getState(cwd: string) → null | { pid, cdpPort, build?, frontend?, backend? }
+     *   focus(cwd: string) → boolean
+     * Non-Nest / no attached Chromium devtools session → null (never invent {enabled:false}
+     * which fails official zFt validator).
+     * data-official-source: app.asar NestDev / zFt
+     */
     NestDev: {
-      getState: async () => ({ enabled: false }),
-      focus: async () => {
+      getState: async (_event, cwd) => {
+        // cwd residual for signature parity; product has no Nest Chromium attach.
+        void asString(cwd);
+        return null;
+      },
+      focus: async (_event, cwd) => {
+        void asString(cwd);
+        // Official focus residual when no Nest session: still boolean.
+        // Product: focus main window; no invent Nest CDP success.
         context.windows.mainWindow.focus();
         return true;
       },
@@ -2180,28 +2553,61 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       getOpenDocuments: async () => listOpenDocuments(),
       readOpenDocumentAsBase64: async (_event, idOrPath) => readOpenDocumentAsBase64(idOrPath),
     },
+    /**
+     * Official OrbitDeploys residual (Tz / orbit-deploys.json):
+     *   getAll → JSON string of Record<key,{url,pinned}>
+     *   setDeploy(key, url) / removeDeploy(key) / setPinned(key, pinned) → void
+     */
     OrbitDeploys: {
-      getAll: async () => Array.from(orbitDeploys.values()),
-      setDeploy: async (_event, deploy) => {
-        const record = { id: id("deploy"), ...asObject(deploy) };
-        orbitDeploys.set(String(record.id), record);
-        persistOrbitDeploys();
-        return record;
+      getAll: async () => orbitDeploysStore.getAllJson(),
+      setDeploy: async (_event, key, url) => {
+        // Official validators: typeof key/url === "string" (empty string allowed).
+        if (typeof key !== "string" || typeof url !== "string") {
+          throw new Error(
+            'Arguments "key" and "url" to method "setDeploy" in interface "OrbitDeploys" failed validation',
+          );
+        }
+        await orbitDeploysStore.setDeploy(key, url);
       },
-      removeDeploy: async (_event, deployId) => {
-        const deleted = orbitDeploys.delete(String(deployId));
-        persistOrbitDeploys();
-        return deleted;
+      removeDeploy: async (_event, key) => {
+        if (typeof key !== "string") {
+          throw new Error(
+            'Argument "key" to method "removeDeploy" in interface "OrbitDeploys" failed validation',
+          );
+        }
+        await orbitDeploysStore.removeDeploy(key);
       },
-      setPinned: async (_event, deployId, pinned) => {
-        const existing = orbitDeploys.get(String(deployId)) ?? { id: String(deployId) };
-        const updated = { ...existing, pinned: Boolean(pinned) };
-        orbitDeploys.set(String(deployId), updated);
-        persistOrbitDeploys();
-        return updated;
+      setPinned: async (_event, key, pinned) => {
+        if (typeof key !== "string" || typeof pinned !== "boolean") {
+          throw new Error(
+            'Arguments "key" and "pinned" to method "setPinned" in interface "OrbitDeploys" failed validation',
+          );
+        }
+        await orbitDeploysStore.setPinned(key, pinned);
       },
     },
   });
+
+  // Sync store residual must match async shape (storeStateHandlers registers both).
+  // featureHandlers registers after storeStateHandlers so live Tle map wins for Sync too.
+  registerInterfaceSyncHandlers(
+    "claude.web",
+    "GrandPrix",
+    {
+      grandPrixStatus_$store$_getStateSync: () =>
+        grandPrixStatusResidual(grandPrixPairedMap()),
+    },
+    "claude.web.GrandPrix.store",
+  );
+  registerInterfaceSyncHandlers(
+    "claude.simulator",
+    "Simulator",
+    {
+      attachment_$store$_getStateSync: () =>
+        simulatorAttachmentStateResidual(simulatorAttachments),
+    },
+    "claude.simulator.Simulator.store",
+  );
 
   // Official ClaudeVM.isHostLoopModeEnabled → v4():
   //   uHA()||neA() ? false
@@ -2249,12 +2655,20 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   // Custom3pSetup is fully owned by settingsHandlers (pot/got/jsA residual).
   // Do not re-register any Custom3pSetup methods here — registerDirectInvokeHandler
   // replaces handlers and would clobber clear/relaunch.
+  const extensionGates = () => ({ settings: context.settings });
+
   registerNamespaceHandlers("claude.settings", {
     Extensions: {
-      isExtensionsEnabled: async () => true,
-      isDirectoryEnabled: async () => true,
-      isDesktopExtensionSignatureRequired: async () => false,
-      isDesktopExtensionDirectoryEnabled: async () => true,
+      /** Official HN */
+      isExtensionsEnabled: async () => isExtensionsEnabledResidual(extensionGates()),
+      /** Official YPA */
+      isDirectoryEnabled: async () => isDirectoryEnabledResidual(extensionGates()),
+      /** Official L6e — only enterprise === true */
+      isDesktopExtensionSignatureRequired: async () =>
+        isDesktopExtensionSignatureRequiredResidual(extensionGates()),
+      /** Official b6e — only enterprise === true */
+      isDesktopExtensionDirectoryEnabled: async () =>
+        isDesktopExtensionDirectoryEnabledResidual(extensionGates()),
       showInstallDxtDialog: async () => {
         const result = await dialog.showOpenDialog(context.windows.mainWindow, {
           title: "Install Extension",
@@ -2283,7 +2697,13 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         await shell.openPath((await ensureExtensionFolders(context.settings.getUserDataDir())).settingsDir);
         return true;
       },
-      refreshAllowlistCheck: async () => true,
+      /**
+       * Official rKA — only when hasOrgPolicyBackend(); product has none → no-op.
+       * Do not invent true success.
+       */
+      refreshAllowlistCheck: async () => {
+        await refreshAllowlistCheckResidual(extensionGates());
+      },
     },
   });
 }

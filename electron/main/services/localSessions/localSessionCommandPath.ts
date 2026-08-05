@@ -116,7 +116,7 @@ async function expandBinDirPattern(pattern: string): Promise<string[]> {
   return out;
 }
 
-/** Official Dl / allPaths residual (without full shell-path worker). */
+/** Official Dl / allPaths residual (+ shell-path worker PATH when available). */
 export async function resolveOfficialAllPaths(
   processEnv: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
@@ -126,7 +126,18 @@ export async function resolveOfficialAllPaths(
   for (const pattern of officialExtraBinDirGlobs(home, platform)) {
     expanded.push(...(await expandBinDirPattern(pattern)));
   }
-  const fromEnv = (processEnv.PATH ?? "")
+
+  // residual lq/E5e: prefer login-shell PATH from shellPathWorker when present
+  let pathSource = processEnv.PATH ?? "";
+  try {
+    const { getShellPath } = await import("../shell/shellEnvironment");
+    const shellPath = await getShellPath();
+    if (shellPath) pathSource = shellPath;
+  } catch {
+    /* keep processEnv.PATH */
+  }
+
+  const fromEnv = pathSource
     .split(path.delimiter)
     .map((part) => part.trim())
     .filter(Boolean);

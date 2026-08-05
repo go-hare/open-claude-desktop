@@ -20,6 +20,48 @@ vi.mock("../services/localSessions/localAgentAssets", () => ({
   revealLocalSkill: vi.fn(async () => true),
 }));
 
+// Avoid real OAuth network probe during residual IPC unit tests.
+vi.mock("../services/mcp/custom3pMcpOAuthProvider", () => {
+  class NeedsInteractiveAuthError extends Error {
+    serverName: string;
+    constructor(serverName: string) {
+      super(
+        `${serverName}: OAuth needs interactive authorization (no cached tokens)`,
+      );
+      this.name = "NeedsInteractiveAuthError";
+      this.serverName = serverName;
+    }
+  }
+  return {
+    NeedsInteractiveAuthError,
+    OAUTH_CANCELLED_BY_NEWER: "custom3p-oauth-cancelled-by-newer",
+    UnauthorizedError: class UnauthorizedError extends Error {
+      constructor(message?: string) {
+        super(message);
+        this.name = "UnauthorizedError";
+      }
+    },
+    probeOAuthCached: vi.fn(async (config: { name: string }) => {
+      throw new NeedsInteractiveAuthError(config.name);
+    }),
+    authorizeAndGetBearerHeaders: vi.fn(async (config: { name: string }) => {
+      throw new Error(
+        `OAuth for MCP server "${config.name}" interactive path unavailable in unit test`,
+      );
+    }),
+    oauthBearerHeaders: vi.fn(() => {
+      throw new Error("no token");
+    }),
+    clearOAuthTokens: vi.fn(),
+  };
+});
+
+vi.mock("../services/mcp/orgPluginMcpScan", () => ({
+  managedMcpServersFromEnterprise: vi.fn(() => []),
+  mergePluginMcpConfigs: <T,>(a: T[], b: T[]) => [...a, ...b],
+  scanOrgPluginMcpServers: vi.fn(async () => []),
+}));
+
 import {
   createCoworkLocalAgentResidualHandlers,
   requestFolderTccAccessResidual,
@@ -32,6 +74,7 @@ const event = {
 function contextStub(overrides?: {
   sessionsBridgeEnabled?: boolean;
   getSession?: (id: string) => unknown;
+  mcpServersConfig?: Record<string, unknown>;
 }) {
   return {
     settings: {
@@ -39,6 +82,7 @@ function contextStub(overrides?: {
         sessionsBridgeEnabled: overrides?.sessionsBridgeEnabled,
         mcpServers: {},
       }),
+      getMcpServersConfig: () => overrides?.mcpServersConfig ?? {},
       setPreference: vi.fn(),
     },
     localAgentModeSessions: {
@@ -74,18 +118,25 @@ describe("createCoworkLocalAgentResidualHandlers", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns residual-honest bridge consent and delete false", async () => {
-    const handlers = createCoworkLocalAgentResidualHandlers(contextStub());
-    // 3p: no Anthropic remote bridge — honest deny bag, not soft-true granted
-    await expect(handlers.getBridgeConsent?.(event)).resolves.toEqual({
-      granted: false,
-      reason: "sessions_bridge_unavailable",
-    });
-    await expect(handlers.deleteBridgeSession?.(event)).resolves.toBe(false);
-    await expect(handlers.deleteBridgeAgentMemory?.(event)).resolves.toBe(false);
-    await expect(handlers.disconnectDirectMcpServer?.(event, "x")).resolves.toBe(
-      false,
-    );
+  it("returns residual-honest bridge consent boolean and delete false", async () => {
+    const {
+      setShouldEnableSessionsBridgeForTests,
+      resetSessionsBridgeStatusForTests,
+    } = await import("../services/coworkSessions/sessionsBridgeResidual");
+    // Force custom-3p residual: shouldEnable false → consent true (boolean, not bag).
+    setShouldEnableSessionsBridgeForTests(false);
+    try {
+      const handlers = createCoworkLocalAgentResidualHandlers(contextStub());
+      await expect(handlers.getBridgeConsent?.(event)).resolves.toBe(true);
+      await expect(handlers.deleteBridgeSession?.(event)).resolves.toBe(false);
+      await expect(handlers.deleteBridgeAgentMemory?.(event)).resolves.toBe(false);
+      await expect(handlers.disconnectDirectMcpServer?.(event, "x")).resolves.toBe(
+        false,
+      );
+    } finally {
+      resetSessionsBridgeStatusForTests();
+      setShouldEnableSessionsBridgeForTests(null);
+    }
   });
 
   it("does not soft-true authorizeDirectMcpServer", async () => {
@@ -98,11 +149,42 @@ describe("createCoworkLocalAgentResidualHandlers", () => {
     });
   });
 
-  it("returns empty direct MCP statuses", async () => {
+  it("returns empty direct MCP statuses when no URL remotes configured", async () => {
     const handlers = createCoworkLocalAgentResidualHandlers(contextStub());
     await expect(handlers.getDirectMcpServerStatuses?.(event)).resolves.toEqual(
       [],
     );
+  });
+
+  it("parks oauth URL remotes as disconnected status without invent auth", async () => {
+    const handlers = createCoworkLocalAgentResidualHandlers(
+      contextStub({
+        mcpServersConfig: {
+          github: {
+            url: "https://mcp.example/github",
+            oauth: { clientId: "demo" },
+          },
+        },
+      }),
+    );
+    await expect(handlers.getDirectMcpServerStatuses?.(event)).resolves.toEqual([
+      {
+        name: "github",
+        url: "https://mcp.example/github",
+        isConnected: false,
+        hasAuth: true,
+        tools: [],
+        toolPolicy: undefined,
+      },
+    ]);
+    // authorize without real OAuth server → residual error bag (not soft-true ok).
+    const auth = await handlers.authorizeDirectMcpServer?.(event, "github");
+    expect(auth).toEqual(
+      expect.objectContaining({
+        ok: false,
+      }),
+    );
+    expect((auth as { ok: false }).ok).toBe(false);
   });
 
   it("mcpListResources returns [] when session missing", async () => {
@@ -130,6 +212,22 @@ describe("createCoworkLocalAgentResidualHandlers", () => {
       ok: false,
       error: "interactive_auth_not_available",
     });
+  });
+
+  it("revokeInteractiveAuth is residual false (no session to clear)", async () => {
+    const handlers = createCoworkLocalAgentResidualHandlers(contextStub());
+    await expect(handlers.revokeInteractiveAuth?.(event)).resolves.toBe(false);
+  });
+
+  it("bridge poll/reset/preflight are residual void (official custom-3p no-ops)", async () => {
+    const handlers = createCoworkLocalAgentResidualHandlers(contextStub());
+    await expect(handlers.kickBridgePoll?.(event)).resolves.toBeUndefined();
+    await expect(handlers.resetBridge?.(event)).resolves.toBeUndefined();
+    await expect(handlers.resetBridgeSession?.(event)).resolves.toBeUndefined();
+    await expect(handlers.abandonBridgeEnvironment?.(event)).resolves.toBeUndefined();
+    await expect(
+      handlers.respondBridgePermissionPreflight?.(event),
+    ).resolves.toBeUndefined();
   });
 
   it("listLocalSkills maps to official skillId/name/description/enabled shape", async () => {

@@ -62,6 +62,38 @@ export type CoworkSessionEvent =
       permissionMode: string;
       sessionId: string;
       type: "permission_mode_changed";
+    }
+  /**
+   * Official manager EventEmitter teach residual (Ucr listens on manager, not
+   * necessarily SPA onEvent). Also forwarded on product bridge for honesty.
+   */
+  | {
+      sessionId: string;
+      active: boolean;
+      type: "teachModeChanged";
+    }
+  | {
+      sessionId: string;
+      payload: {
+        explanation: string;
+        nextPreview: string;
+        anchorLogical?: { x: number; y: number };
+      };
+      type: "teachStepRequested";
+    }
+  | {
+      sessionId: string;
+      type: "teachStepWorking";
+    }
+  | {
+      sessionId: string;
+      displayId: number;
+      type: "cuSelectedDisplayChanged";
+    }
+  | {
+      sessionId: string;
+      newState: string;
+      type: "lifecycleChanged";
     };
 
 export type CoworkQueryFactoryInput = {
@@ -491,6 +523,17 @@ export type CoworkSessionManagerOptions = {
    * still stores mentions when CU surface is present.
    */
   isComputerUseEnabled?: () => boolean;
+  /**
+   * Official gi("chicagoAutoUnhide") AppPreferences residual.
+   * When true (SSA default), leavingRunning unhides apps in cuHiddenDuringTurn via P_A.
+   * Default true when unset.
+   */
+  getChicagoAutoUnhide?: () => boolean;
+  /**
+   * Official IFi getUserDeniedBundleIds → gi("chicagoUserDeniedBundleIds").
+   * Default [] when unset (SSA).
+   */
+  getUserDeniedBundleIds?: () => readonly string[];
   /**
    * Official gi("allowAllBrowserActions") AppPreferences read for start seed m.
    * Default false when unset.

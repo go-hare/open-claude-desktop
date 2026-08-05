@@ -1,4 +1,5 @@
 import { app } from "electron";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -14,9 +15,15 @@ import {
 } from "../coworkHostLoop/coworkHostLoopMode";
 import { coworkHostLoopMountFlagSettings } from "../coworkHostLoop/coworkHostToolPolicy";
 import type { CoworkSessionManagerOptions, CoworkSessionUpdate, CoworkTranscriptOptions } from "./coworkSessionManagerTypes";
+import { extractUrlsForWebFetchProvenance } from "./sessionsBridgeWebFetch";
 import { CoworkSessionRepository } from "./coworkSessionRepository";
 import { rewindCoworkSession } from "./coworkSessionRewind";
 import { CoworkSessionRuntimeController } from "./coworkSessionRuntimeController";
+import { computerUseLock } from "../coworkRuntime/computerUseLock";
+import type {
+  ComputerUseTeachStepPayload,
+  ComputerUseTeachStepResult,
+} from "../coworkRuntime/computerUseTeachOverlay";
 import {
   classifyCoworkPathKind,
   type CoworkPathKind,
@@ -151,6 +158,21 @@ import type {
 export class CoworkSessionManager {
   private readonly createSessionId: () => string;
   private readonly emit: CoworkSessionManagerOptions["emit"];
+  /**
+   * Official LocalAgentModeSessionManager EventEmitter residual for Ucr teach
+   * overlay (teachModeChanged / teachStepRequested / teachStepWorking /
+   * cuSelectedDisplayChanged / lifecycleChanged). Separate from bridge emit.
+   */
+  private readonly teachEvents = new EventEmitter();
+  /**
+   * Official this.pendingTeachStep residual — one blocking teach_step at a time.
+   */
+  private pendingTeachStep:
+    | {
+        sessionId: string;
+        resolve: (result: ComputerUseTeachStepResult) => void;
+      }
+    | undefined;
   private readonly fileWatcher: CoworkFileSystemWatcher;
   private readonly folderExists: (folder: string) => boolean;
   private readonly homePath: string;
@@ -272,6 +294,16 @@ export class CoworkSessionManager {
    * Residual: full doA + gi("chicagoEnabled") product store not invented.
    */
   private readonly isComputerUseEnabled: () => boolean;
+  /**
+   * Official gi("chicagoAutoUnhide") inject for leavingRunning P_A.
+   * Default true matches SSA.
+   */
+  private readonly getChicagoAutoUnhide: () => boolean;
+  /**
+   * Official gi("chicagoUserDeniedBundleIds") inject for IFi getUserDeniedBundleIds.
+   * Default [] matches SSA.
+   */
+  private readonly getUserDeniedBundleIds: () => readonly string[];
   /** Official gi("allowAllBrowserActions") inject for start chrome seed. */
   private readonly getAllowAllBrowserActions: () => boolean;
   /** Official ps.getChromePermissions inject for start chrome seed. */
@@ -374,6 +406,11 @@ export class CoworkSessionManager {
         ));
     // Official YM() residual inject — gi("chicagoEnabled"); default false matches HSA.
     this.isComputerUseEnabled = options.isComputerUseEnabled ?? (() => false);
+    // Official gi("chicagoAutoUnhide") — SSA default true.
+    this.getChicagoAutoUnhide = options.getChicagoAutoUnhide ?? (() => true);
+    // Official gi("chicagoUserDeniedBundleIds") — SSA default [].
+    this.getUserDeniedBundleIds =
+      options.getUserDeniedBundleIds ?? (() => []);
     this.getAllowAllBrowserActions =
       options.getAllowAllBrowserActions ?? (() => false);
     this.getScheduledTaskChromePermissions =
@@ -1757,12 +1794,26 @@ export class CoworkSessionManager {
   }
 
   /**
+   * Official seedWebFetchProvenance residual:
+   *   session.webFetchAllowedUrls Set += _1i(text) URLs
+   * Used by bridge inbound fast-path before sendMessage.
+   */
+  seedWebFetchProvenance(sessionId: string, text: string): void {
+    const session = this.repository.get(sessionId);
+    if (!session) return;
+    const set =
+      session.webFetchAllowedUrls ?? (session.webFetchAllowedUrls = new Set());
+    for (const url of extractUrlsForWebFetchProvenance(text)) {
+      set.add(url);
+    }
+  }
+
+  /**
    * Official bridge handleInboundControlRequest interrupt residual:
    *   subtype!==interrupt → no-op
    *   else resolve activeSessions → interruptTurn(localSessionId)
    *   je("lam_bridge_interrupt_received", …) via optional track sink residual
-   * Full remote bridge transport / activeSessions map product not invented —
-   * product injects getBridgeActiveSession only.
+   * SessionsBridgeClient owns activeSessions; inject getBridgeActiveSession.
    */
   async handleInboundControlRequest(
     remoteSessionId: string,
@@ -1812,9 +1863,14 @@ export class CoworkSessionManager {
     session.query?.close();
     session.query = null;
     session.inputStream = null;
-    // Official leavingRunning: clear product-owned CU ephemerals before idle.
-    clearCoworkSessionEphemeralsOnLeavingRunning(session);
+    // Official leavingRunning: clear product-owned CU ephemerals + P_A unhide before idle.
+    clearCoworkSessionEphemeralsOnLeavingRunning(session, {
+      chicagoAutoUnhide: this.getChicagoAutoUnhide(),
+    });
+    // Official finishTurnCleanup / leavingRunning teach exit residual.
+    this.clearTeachModeOnLeavingRunning(sessionId);
     session.lifecycleState = "idle";
+    this.emitLifecycleChanged(sessionId, "idle");
     // Official stopSession: cachedTotalTurns += user messageBuffer; clear buffer.
     // After idle + optional close event in asar; product order: idle → accumulate
     // → teardown → save (close emit after accumulate matches analytics use of count).
@@ -1950,6 +2006,165 @@ export class CoworkSessionManager {
   getSession(sessionId: string, _options?: unknown): CoworkRendererSession | null {
     const session = this.repository.get(sessionId);
     return session ? this.toRenderer(session) : null;
+  }
+
+  /**
+   * Official manager EventEmitter `.on` residual for teach overlay (Ucr).
+   * Typed loosely so computerUseTeachOverlay can subscribe without bridge invent.
+   */
+  on(
+    event:
+      | "teachModeChanged"
+      | "teachStepRequested"
+      | "teachStepWorking"
+      | "cuSelectedDisplayChanged"
+      | "lifecycleChanged",
+    listener: (...args: never[]) => void,
+  ): this {
+    this.teachEvents.on(event, listener as (...args: unknown[]) => void);
+    return this;
+  }
+
+  /** Official getCuLockHolder residual → vc.currentHolder. */
+  getCuLockHolder(): string | undefined {
+    return computerUseLock.currentHolder;
+  }
+
+  /**
+   * Official resolveTeachStep residual:
+   *   const t=this.pendingTeachStep; t&&(this.pendingTeachStep=void 0,t.resolve(A))
+   */
+  resolveTeachStep(result: ComputerUseTeachStepResult): void {
+    const pending = this.pendingTeachStep;
+    if (!pending) return;
+    this.pendingTeachStep = undefined;
+    pending.resolve(result);
+  }
+
+  /**
+   * Official onTeachModeActivated residual (IFi wiring from createQuery):
+   * set teachModeActive + emit teachModeChanged.
+   */
+  activateTeachMode(sessionId: string): void {
+    const session = this.repository.get(sessionId);
+    if (!session) {
+      console.warn(
+        `[cu-teach] activateTeachMode: session missing ${sessionId}`,
+      );
+      return;
+    }
+    // Official residual only activates while running; log skips so SPA teach
+    // failures are diagnosable (empty needDialog + userConsented still fires).
+    if (session.lifecycleState !== "running") {
+      console.warn(
+        `[cu-teach] activateTeachMode: skip lifecycle=${session.lifecycleState} session=${sessionId}`,
+      );
+      return;
+    }
+    session.teachModeActive = true;
+    session.teachModeEnteredAt = this.now();
+    this.teachEvents.emit("teachModeChanged", {
+      sessionId,
+      active: true,
+    });
+    // Bridge honesty — SPA may ignore; overlay uses teachEvents.
+    this.emit({
+      type: "teachModeChanged",
+      sessionId,
+      active: true,
+    });
+    console.info(`[cu-teach] teachModeActive=true session=${sessionId}`);
+  }
+
+  /**
+   * Official onTeachStep residual — park promise until overlay next/exit.
+   */
+  requestTeachStep(
+    sessionId: string,
+    payload: ComputerUseTeachStepPayload,
+  ): Promise<ComputerUseTeachStepResult> {
+    return new Promise((resolve) => {
+      const session = this.repository.get(sessionId);
+      if (!session?.teachModeActive) {
+        console.warn(
+          "[cu-teach] teach_step called without active teach mode — resolving as exit",
+        );
+        resolve({ action: "exit" });
+        return;
+      }
+      if (this.pendingTeachStep) {
+        console.warn(
+          "[cu-teach] new teach_step while one is pending — resolving old as exit",
+        );
+        this.pendingTeachStep.resolve({ action: "exit" });
+      }
+      this.pendingTeachStep = { sessionId, resolve };
+      this.teachEvents.emit("teachStepRequested", { sessionId, payload });
+      this.emit({
+        type: "teachStepRequested",
+        sessionId,
+        payload,
+      });
+    });
+  }
+
+  /** Official onTeachWorking residual. */
+  notifyTeachWorking(sessionId: string): void {
+    this.teachEvents.emit("teachStepWorking", { sessionId });
+    this.emit({ type: "teachStepWorking", sessionId });
+  }
+
+  /**
+   * Official finishTurnCleanup / leavingRunning teach exit residual:
+   * clear teach flags, resolve pending as exit, emit teachModeChanged false.
+   */
+  clearTeachModeOnLeavingRunning(sessionId: string): void {
+    const session = this.repository.get(sessionId);
+    if (!session?.teachModeActive && !session?.teachModeEnteredAt) {
+      // Still resolve any pending step for this session.
+      if (this.pendingTeachStep?.sessionId === sessionId) {
+        this.resolveTeachStep({ action: "exit" });
+      }
+      return;
+    }
+    if (session) {
+      session.teachModeEnteredAt = undefined;
+      session.teachModeActive = false;
+    }
+    this.resolveTeachStep({ action: "exit" });
+    this.teachEvents.emit("teachModeChanged", {
+      sessionId,
+      active: false,
+    });
+    this.emit({
+      type: "teachModeChanged",
+      sessionId,
+      active: false,
+    });
+  }
+
+  /** Official cuSelectedDisplayChanged emit for teach overlay reposition. */
+  notifyCuSelectedDisplayChanged(
+    sessionId: string,
+    displayId: number,
+  ): void {
+    this.teachEvents.emit("cuSelectedDisplayChanged", {
+      sessionId,
+      displayId,
+    });
+    this.emit({
+      type: "cuSelectedDisplayChanged",
+      sessionId,
+      displayId,
+    });
+  }
+
+  private emitLifecycleChanged(
+    sessionId: string,
+    newState: string,
+  ): void {
+    this.teachEvents.emit("lifecycleChanged", { sessionId, newState });
+    this.emit({ type: "lifecycleChanged", sessionId, newState });
   }
 
   getAll(): CoworkRendererSession[] {
@@ -2090,6 +2305,21 @@ export class CoworkSessionManager {
       // Official gi("chicagoEnabled") for computer-use gFi/QHA residual.
       // Prefer explicit settings inject; fall back to isComputerUseEnabled (YM).
       isChicagoEnabled: () => this.isComputerUseEnabled(),
+      // Official gi("chicagoAutoUnhide") for P_A + host adapter getAutoUnhideEnabled.
+      getChicagoAutoUnhide: () => this.getChicagoAutoUnhide(),
+      // Official IFi getUserDeniedBundleIds → gi("chicagoUserDeniedBundleIds").
+      getUserDeniedBundleIds: () => this.getUserDeniedBundleIds(),
+      // Official IFi onTeach* residual → manager teach bag + Ucr overlay events.
+      onTeachModeActivated: (sessionId) => this.activateTeachMode(sessionId),
+      onTeachStep: (sessionId, payload) =>
+        this.requestTeachStep(sessionId, payload),
+      onTeachWorking: (sessionId) => this.notifyTeachWorking(sessionId),
+      getTeachModeActive: (sessionId) =>
+        this.repository.get(sessionId)?.teachModeActive === true,
+      onCuSelectedDisplayChanged: (sessionId, displayId) =>
+        this.notifyCuSelectedDisplayChanged(sessionId, displayId),
+      onClearTeachMode: (sessionId) =>
+        this.clearTeachModeOnLeavingRunning(sessionId),
       // Official P4 dialog when request_cowork_directory omits path.
       pickDirectory: options.pickDirectory,
       // Official mountFolderForSession → addUserSelectedFolder(Mh kind) + host watch restart.

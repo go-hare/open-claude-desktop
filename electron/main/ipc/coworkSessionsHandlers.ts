@@ -11,6 +11,11 @@ import {
 import { respondCoworkDirectoryServers } from "../services/coworkRuntime/coworkMcpDirectoryBridge";
 import { respondCoworkPluginSearch } from "../services/coworkRuntime/coworkPluginSearchBridge";
 import { respondCoworkSlashMenuSkills } from "../services/coworkRuntime/coworkSkillsSlashBridge";
+import { resolveCoworkTranscriptPath } from "../services/coworkRuntime/coworkTranscriptJsonl";
+import {
+  getTranscriptSearchWorkerHost,
+  type TranscriptSearchSession,
+} from "../services/shell/transcriptSearchWorkerHost";
 import type { IpcHandlerContext } from "./context";
 import { assertCoworkIpcOrigin } from "./coworkIpcOrigin";
 import { parseCoworkSendMessageArgs } from "./coworkSendMessageContract";
@@ -18,6 +23,12 @@ import { createCoworkLocalAgentResidualHandlers } from "./coworkLocalAgentResidu
 import { createCoworkSessionWorkspaceHandlers } from "./coworkSessionWorkspaceHandlers";
 import type { InterfaceHandlers, IpcHandler } from "./registerIpc";
 import { registerInterfaceHandlers } from "./registerIpc";
+import {
+  getSessionsBridgeEnabled,
+  getSessionsBridgeStatusState,
+  identityFromSettingsPrefs,
+} from "../services/coworkSessions/sessionsBridgeResidual";
+import { setSessionsBridgeEnabledLive } from "../services/coworkSessions/sessionsBridgeLifecycle";
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null
@@ -155,12 +166,60 @@ export function createCoworkSessionHandlers(manager: CoworkSessionManager): Inte
     rewind: secured(async (_event, id, targetUuid) =>
       manager.rewind(sessionId(id), sessionId(targetUuid)),
     ),
+    /**
+     * Title/id filter first; query ≥ 2 also searches CLI jsonl body via
+     * TranscriptSearchWorkerHost (yHi residual) when transcriptPath resolves.
+     */
     searchSessions: secured(async (_event, query) => {
       await initialize(manager);
-      const needle = String(query ?? "").toLowerCase();
-      return manager.getAll().filter((item) =>
+      const raw = String(query ?? "");
+      const needle = raw.toLowerCase().trim();
+      const all = manager.getAll();
+      const titleHits = all.filter((item) =>
         `${item.title ?? ""} ${item.sessionId}`.toLowerCase().includes(needle),
       );
+      if (needle.length < 2) return titleHits;
+
+      const titleIds = new Set(titleHits.map((item) => item.sessionId));
+      const candidates = all.filter(
+        (item) => !titleIds.has(item.sessionId) && Boolean(item.cliSessionId),
+      );
+      if (candidates.length === 0) return titleHits;
+
+      const searchSessions: TranscriptSearchSession[] = [];
+      for (const item of candidates) {
+        const transcriptPath = await resolveCoworkTranscriptPath({
+          cliSessionId: item.cliSessionId,
+          cwd: item.cwd,
+          hostLoopMode: item.hostLoopMode,
+          userSelectedFolders: item.userSelectedFolders,
+        });
+        if (!transcriptPath) continue;
+        searchSessions.push({
+          sessionId: item.sessionId,
+          transcriptPath,
+          lastActivityAt: item.lastActivityAt,
+        });
+      }
+      if (searchSessions.length === 0) return titleHits;
+
+      try {
+        const hits = await getTranscriptSearchWorkerHost().search(raw.trim(), searchSessions, {
+          limit: 50,
+        });
+        if (hits.length === 0) return titleHits;
+        const hitIds = new Set(hits.map((hit) => hit.sessionId));
+        const bodyHits = all.filter(
+          (item) => hitIds.has(item.sessionId) && !titleIds.has(item.sessionId),
+        );
+        return [...titleHits, ...bodyHits];
+      } catch (error) {
+        console.warn(
+          "[LocalAgentModeSessions.searchSessions] transcript body search failed",
+          error,
+        );
+        return titleHits;
+      }
     }),
     sendMessage: secured(async (_event, ...args) => {
       const request = parseCoworkSendMessageArgs(args);
@@ -410,30 +469,30 @@ export function registerCoworkSessionsHandlers(context: IpcHandlerContext): void
       ...createCoworkSessionWorkspaceHandlers(context),
       // Skills / bridge / TCC / direct-MCP / interactiveAuth / mcp resources residuals.
       ...createCoworkLocalAgentResidualHandlers(context),
-      // Official Dispatch Ht (cc989143e): Xe.get/setSessionsBridgeEnabled on LocalAgentModeSessions.
-      // 3p product has no Anthropic remote sessions bridge — prefs may round-trip, but
-      // never soft-true "ready"/live poll. Status stays unavailable while bridge is absent.
+      // Official Dispatch Ht: get/setSessionsBridgeEnabled + yit status (QcA).
+      // custom-3p residual: enabled true, set void (persist bridge-state + pref), yit bag.
       getSessionsBridgeEnabled: async () => {
-        // Honest runtime: bridge is not available in 3p residual, regardless of pref.
-        return false;
+        const prefs = context.settings.getPreferences() as Record<string, unknown>;
+        return getSessionsBridgeEnabled(identityFromSettingsPrefs(prefs));
       },
       setSessionsBridgeEnabled: async (_event, enabled) => {
-        // Persist pref for UI toggle round-trip only; does not activate remote bridge.
-        // Return value is effective runtime enabled (always false in 3p residual) —
-        // never soft-true success that implies Anthropic sessions bridge is live.
+        if (typeof enabled !== "boolean") {
+          throw new Error(
+            'Argument "enabled" at position 0 to method "setSessionsBridgeEnabled" in interface "LocalAgentModeSessions" failed to pass validation',
+          );
+        }
+        // Pref round-trip for UI + residual fwe / setEnabledFlag + NJ reconcile.
         context.settings.setPreference("sessionsBridgeEnabled", enabled === true);
-        return false;
+        const prefs = context.settings.getPreferences() as Record<string, unknown>;
+        await setSessionsBridgeEnabledLive(
+          identityFromSettingsPrefs(prefs),
+          enabled,
+        );
+        // Official IPC: await set… void (no boolean result).
       },
       sessionsBridgeStatus_$store$_getState: async () => {
-        // Official getInitialSessionsBridgeStatusState also carries conflict/dispatchAgentName.
-        // Product: no poller → never report ready (even if pref true).
-        return {
-          enabled: false,
-          status: "unavailable",
-          conflict: false,
-          dispatchAgentName: null,
-          reason: "sessions_bridge_unavailable",
-        };
+        // Official getInitialSessionsBridgeStatusState → yit() (QcA fields only).
+        return getSessionsBridgeStatusState();
       },
       /**
        * Official BrowserUse / Gir internal MCP route:

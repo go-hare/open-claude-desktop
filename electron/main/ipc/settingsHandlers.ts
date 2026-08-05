@@ -36,6 +36,10 @@ import {
 } from "../services/custom3p/custom3pConfigHealth";
 import { custom3pBootstrapState, custom3pLoginDesktopStatus } from "../services/custom3p/custom3pStatus";
 import {
+  getCredentialHelperLastRunResidual,
+  runCredentialHelperResidual,
+} from "../services/custom3p/credentialHelperResidual";
+import {
   deleteInstalledExtension,
   ensureExtensionFolders,
   getInstalledExtension,
@@ -48,8 +52,15 @@ import {
   updateInstalledExtension,
 } from "../services/extensions/desktopExtensions";
 import { describeMcpServer, mcpConfigEntries } from "../services/mcp/mcpRuntime";
+import { isDesktopExtensionDirectoryEnabledResidual } from "../services/settings/extensionEnableGates";
+import {
+  authorizeAndProbeMcpServer,
+  forgetMcpOAuth,
+  probeMcpServer,
+} from "../services/mcp/custom3pMcpProbe";
 import { handleSupportBundleAction } from "../services/support/supportBundle";
 import { openCustom3pSetupWindow } from "../windows/custom3pSetupWindow";
+import { openDeviceCodeWindowForE2e } from "../windows/custom3pDeviceCodeWindow";
 import {
   applyKeepAwakeEnabled,
   syncKeepAwakeFromPreferences,
@@ -651,27 +662,6 @@ async function probeEgressHost(host: string) {
   }
 }
 
-async function probeMcpServerConfig(config: unknown) {
-  const record = asObject(config);
-  const url = asString(record.url);
-  const name = asString(record.name);
-  const transport = asString(record.transport) ?? (url ? "http" : "stdio");
-  if (!url) return { kind: "err", title: "Missing URL", message: "MCP server URL is required for network probing." };
-  const started = Date.now();
-  try {
-    const response = await withTimeout(net.fetch(url, {
-      method: "HEAD",
-      bypassCustomProtocolHandlers: true,
-    }), 5000);
-    const latencyMs = Date.now() - started;
-    if (response.status === 401 || response.status === 403) return { kind: "auth", serverName: name, transport, latencyMs, request: url };
-    if (!response.ok) return { kind: "err", title: `HTTP ${response.status}`, message: response.statusText, request: url, latencyMs };
-    return { kind: "ok", serverName: name, transport, latencyMs, tools: [] };
-  } catch (error) {
-    return { kind: "err", title: "Connection failed", message: error instanceof Error ? error.message : String(error), request: url, latencyMs: Date.now() - started };
-  }
-}
-
 export function registerSettingsHandlers(context: IpcHandlerContext): void {
   const settings = context.settings;
   const mainView = context.windows.mainView.webContents;
@@ -885,6 +875,20 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         // Official residual: after write, push mcpConfigChange so Developer UI
         // (cadc35a07 onMcpConfigChange) hot-reloads without remount.
         dispatchMcpConfigChange(context);
+        // Residual connectMcp hot-reload: URL remotes in bag → Direct MCP manager
+        // (custom3p-mcp park/connect + status push). Fire-and-forget; do not block write.
+        void import("../services/mcp/directMcpConnectionManager")
+          .then(({ getDirectMcpConnectionManager }) =>
+            getDirectMcpConnectionManager().connectFromConfigBag(
+              settings.getMcpServersConfig(),
+            ),
+          )
+          .catch((error) => {
+            console.warn(
+              "[custom3p-mcp] reconnect after setMcpServerConfigs failed",
+              error instanceof Error ? error.message : String(error),
+            );
+          });
         return ok;
       },
       getMcpServersConfig: async () => settings.getMcpServersConfig(),
@@ -969,10 +973,25 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         return true;
       },
     },
+    /**
+     * Official Custom3pHelperRun residual (MPe / _Pe / Gre):
+     *   runCredentialHelper(helperPath: string) → real spawn + Gre bag
+     *   getCredentialHelperLastRun() → last Gre | null
+     * Never invent `{ ok:true, ranAt, input }`.
+     */
     Custom3pHelperRun: {
-      getCredentialHelperLastRun: async () => settings.getCredentialHelperLastRun(),
-      runCredentialHelper: async (_event, input) => {
-        const result = { ranAt: new Date().toISOString(), input: asObject(input), ok: true };
+      getCredentialHelperLastRun: async () => {
+        const last = getCredentialHelperLastRunResidual();
+        // Keep settings mirror for residual readers; official is in-memory k1.
+        return last ?? settings.getCredentialHelperLastRun() ?? null;
+      },
+      runCredentialHelper: async (_event, helperPath) => {
+        if (typeof helperPath !== "string") {
+          throw new Error(
+            'Argument "helperPath" at position 0 to method "runCredentialHelper" in interface "Custom3pHelperRun" failed to pass validation',
+          );
+        }
+        const result = await runCredentialHelperResidual(helperPath);
         settings.setCredentialHelperLastRun(result);
         return result;
       },
@@ -1133,18 +1152,26 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       getConfigHealth: async () => getCustom3pConfigHealth(ensureCustom3pConfigLibrary(context)),
       recheckConfigHealth: async () => recheckCustom3pConfigHealth(ensureCustom3pConfigLibrary(context)),
       probeEgressHosts: async (_event, hosts) => Promise.all((Array.isArray(hosts) ? hosts : []).filter((host): host is string => typeof host === "string").map(probeEgressHost)),
-      probeMcpServer: async (_event, config) => probeMcpServerConfig(config),
-      authorizeAndProbeMcpServer: async (_event, config) => probeMcpServerConfig(config),
-      forgetMcpOAuth: async () => true,
+      // Official residual WYe: Bot / Qot / xv (custom3pMcpProbe). Not HEAD net.fetch invent.
+      probeMcpServer: async (_event, config) => probeMcpServer(config),
+      authorizeAndProbeMcpServer: async (_event, config) => authorizeAndProbeMcpServer(config),
+      forgetMcpOAuth: async (_event, serverName) => {
+        forgetMcpOAuth(serverName);
+      },
+      // Official kot residual — same bag as bootstrapState store getState.
+      getInitialBootstrapStateState: async () =>
+        custom3pBootstrapState(settingsUserDataPath(context)),
       triggerBootstrapAuth: async () => {
-        publishCustom3pBootstrapState(context);
-        return { ok: true };
+        // Official Tot residual: recompute + publish bootstrap bag (no Anthropic OAuth invent).
+        const state = publishCustom3pBootstrapState(context);
+        return { ok: true, state };
       },
       openSetupWindow: async () => {
         await openCustom3pSetupWindow(context.windows.mainWindow);
         return true;
       },
-      openDeviceCodeWindowForE2e: async () => true,
+      // Official: only when CLAUDE_CDP_AUTH; not unconditional true invent.
+      openDeviceCodeWindowForE2e: async () => openDeviceCodeWindowForE2e(),
       getLoginDesktop3pStatus: async () => custom3pLoginDesktopStatus(settingsUserDataPath(context)),
       relaunchApp: async () => {
         app.relaunch();
@@ -1286,9 +1313,37 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         dispatchExtensionsChanged(context);
         return installed.id;
       },
-      installDxtFromDirectory: async (_event, extensionId) => {
-        if (typeof extensionId !== "string") return null;
-        return null;
+      installDxtFromDirectory: async (_event, extensionId, folderPath?) => {
+        // Residual: install unpacked extension directory (was stub null).
+        const dir =
+          typeof folderPath === "string" && folderPath.length > 0
+            ? folderPath
+            : typeof extensionId === "string" && extensionId.includes(path.sep)
+              ? extensionId
+              : null;
+        if (!dir) return null;
+        try {
+          const installed = await installUnpackedExtension(
+            extensionUserDataDir(context),
+            dir,
+            typeof extensionId === "string" && !extensionId.includes(path.sep)
+              ? extensionId
+              : null,
+          );
+          events.extensionDownloadProgress(
+            installed.id,
+            1,
+            1,
+            1,
+            installed.manifest,
+            "installed",
+          );
+          dispatchExtensionsChanged(context);
+          return installed.id;
+        } catch (error) {
+          console.warn("[Extensions] installDxtFromDirectory failed", error);
+          return null;
+        }
       },
       installDxtUnpacked: async (_event, folderPath) => {
         if (typeof folderPath !== "string") return null;
@@ -1320,7 +1375,9 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         dispatchExtensionsChanged(context);
         return deleted;
       },
-      isDesktopExtensionDirectoryEnabled: async () => true,
+      /** Official b6e — enterprise isDesktopExtensionDirectoryEnabled === true only. */
+      isDesktopExtensionDirectoryEnabled: async () =>
+        isDesktopExtensionDirectoryEnabledResidual({ settings: context.settings }),
     },
     SupportBundle: {
       submitAction: async (_event, action) => handleSupportBundleAction(context, action),

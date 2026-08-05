@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>About</title>
+    <style>
+      /*
+       * About window shell — residual DOM/classNames from app.asar
+       *   .vite/renderer/about_window/assets/AboutWindow-*.js
+       * Tokens from residual about.html :root (claude.ai 2025-10-17).
+       * Full tailwind dump is not re-vendored; only classes About uses.
+       */
+      :root {
+        --accent-brand: 15 63.1% 59.6%;
+        --brand-000: 15 54.2% 51.2%;
+        --brand-100: 15 54.2% 51.2%;
+        --brand-200: 15 63.1% 59.6%;
+        --bg-000: 0 0% 100%;
+        --bg-100: 48 33.3% 97.1%;
+        --bg-200: 53 28.6% 94.5%;
+        --bg-300: 48 25% 92.2%;
+        --bg-400: 50 20.7% 88.6%;
+        --border-300: 30 3.3% 11.8%;
+        --text-000: 60 2.6% 7.6%;
+        --text-100: 60 2.6% 7.6%;
+        --text-200: 60 2.5% 23.3%;
+        --text-300: 60 2.5% 23.3%;
+        --text-400: 51 3.1% 43.7%;
+        --oncolor-100: 0 0% 100%;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: hsl(var(--bg-100));
+        color: hsl(var(--text-100));
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .nc-drag {
+        -webkit-app-region: drag;
+        app-region: drag;
+      }
+      .nc-no-drag {
+        -webkit-app-region: no-drag;
+        app-region: no-drag;
+      }
+
+      .flex { display: flex; }
+      .flex-col { flex-direction: column; }
+      .items-center { align-items: center; }
+      .justify-center { justify-content: center; }
+      .inline-flex { display: inline-flex; }
+      .relative { position: relative; }
+      .w-full { width: 100%; }
+      .h-full { height: 100%; }
+      .h-9 { height: 2.25rem; }
+      .pt-16 { padding-top: 4rem; }
+      .mt-2 { margin-top: 0.5rem; }
+      .mt-4 { margin-top: 1rem; }
+      .mt-6 { margin-top: 1.5rem; }
+      .px-4 { padding-left: 1rem; padding-right: 1rem; }
+      .px-16 { padding-left: 4rem; padding-right: 4rem; }
+      .py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+      .min-w-\[5rem\] { min-width: 5rem; }
+      .rounded-lg { border-radius: 0.5rem; }
+      .select-none { user-select: none; }
+      .cursor-pointer { cursor: pointer; }
+      .whitespace-nowrap { white-space: nowrap; }
+      .overflow-hidden { overflow: hidden; }
+      .shrink-0 { flex-shrink: 0; }
+      .font-medium { font-weight: 500; }
+      .font-serif {
+        font-family: "Anthropic Serif", ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+      }
+      .font-sans {
+        font-family: "Anthropic Sans", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji",
+          "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+      }
+      .text-2xl { font-size: 1.5rem; line-height: 2rem; }
+      .text-xl { font-size: 1.25rem; line-height: 1.75rem; }
+      .text-md { font-size: 1rem; line-height: 1.5rem; }
+      .text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+      .text-text-000 { color: hsl(var(--text-000)); }
+      .text-text-100 { color: hsl(var(--text-100)); }
+      .text-text-300 { color: hsl(var(--text-300)); }
+      .text-text-400 { color: hsl(var(--text-400)); }
+      .hover\:text-text-300:hover { color: hsl(var(--text-300)); }
+      .transition-colors {
+        transition-property: color, background-color, border-color;
+        transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+        transition-duration: 150ms;
+      }
+      .transition { transition-property: all; transition-duration: 100ms; }
+      .border-0\.5 { border-width: 0.5px; border-style: solid; }
+      .border-border-300 { border-color: hsl(var(--border-300) / 0.12); }
+      .hover\:border-border-300\/0:hover { border-color: transparent; }
+      .bg-bg-300\/0 { background-color: transparent; }
+      .hover\:bg-bg-400:hover { background-color: hsl(var(--bg-400)); }
+      .backface-hidden { backface-visibility: hidden; }
+      .active\:scale-\[0\.985\]:active { transform: scale(0.985); }
+
+      /* residual Button secondary + default size */
+      .about-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        flex-shrink: 0;
+        user-select: none;
+        width: 100%;
+        color: hsl(var(--text-000));
+        border: 0.5px solid hsl(var(--border-300) / 0.12);
+        overflow: hidden;
+        font-family: "Anthropic Sans", ui-sans-serif, system-ui, sans-serif;
+        font-weight: 500;
+        transition: all 100ms;
+        background: transparent;
+        height: 2.25rem;
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+        min-width: 5rem;
+        white-space: nowrap;
+        font-size: 0.875rem;
+        line-height: 1.25rem;
+        cursor: pointer;
+      }
+      .about-btn:hover {
+        border-color: transparent;
+        background: hsl(var(--bg-400));
+      }
+      .about-btn:active {
+        transform: scale(0.985);
+      }
+    </style>
+  </head>
+  <body class="light">
+    <div id="root" class="w-full h-full"></div>
+    <script defer src="./about-window.js"></script>
+  </body>
+</html>

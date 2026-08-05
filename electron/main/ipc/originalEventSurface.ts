@@ -168,6 +168,10 @@ export class OriginalRendererEventSurface {
     dispatchBridgeEvent(this.mainView(), "claude.web", "Launch", "previewSelectionShortcut", serverId);
   }
 
+  /**
+   * Official Launch.deployEvent residual (Yd).
+   * Non-Nest deployPreview: { type:"failed", error:"Deploy is only available in Nest builds." }
+   */
   launchDeployEvent(serverId: string, event: unknown): void {
     dispatchBridgeEvent(this.mainView(), "claude.web", "Launch", "deployEvent", serverId, event);
   }

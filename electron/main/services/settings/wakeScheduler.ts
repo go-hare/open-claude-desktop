@@ -80,6 +80,12 @@ export type WakeSchedulerNativeApi = {
   uninstall?: () => Promise<void> | void;
   scheduleWake?: (when: unknown) => Promise<number> | number;
   cancelWakes?: () => Promise<number> | number;
+  /**
+   * Official bridge PSS residual (createPreventSystemSleepAssertion / releaseAssertion).
+   * Present only when native exposes it — product never invents ids.
+   */
+  createPreventSystemSleepAssertion?: (reason: string) => number;
+  releaseAssertion?: (id: number) => void;
 };
 
 /** Back-compat alias used by existing tests. */

@@ -1110,8 +1110,9 @@ export function resolveLocalMarketplaceInput(
       }
       return {
         kind: "unsupported",
+        // Official mQ + REMOTE_HOST_UNSUPPORTED residual (git/url clone not productized).
         error:
-          "Remote marketplace URLs are not synced in this residual (local directory only).",
+          "MARKETPLACE_ERROR:REMOTE_HOST_UNSUPPORTED",
       };
     }
     return {
@@ -1151,8 +1152,8 @@ export function resolveLocalMarketplaceInput(
     }
     return {
       kind: "unsupported",
-      error:
-        "Remote marketplace URLs are not synced in this residual (local directory only).",
+      // Official mQ + REMOTE_HOST_UNSUPPORTED residual (git/url clone not productized).
+      error: "MARKETPLACE_ERROR:REMOTE_HOST_UNSUPPORTED",
     };
   }
 

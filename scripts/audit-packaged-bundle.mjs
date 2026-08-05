@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
-import { getProjectRoot, resolveOriginalApp } from "./originalAppPaths.mjs";
+import { getProjectRoot } from "./originalAppPaths.mjs";
 import {
   inspectPackagedAsarMain,
   inspectPackagedDualRoot,
@@ -16,7 +16,6 @@ import {
 
 const projectRoot = getProjectRoot();
 const docsRoot = path.join(projectRoot, "docs");
-const originalApp = resolveOriginalApp();
 const darwinTargets = resolvePackagedTargets({ root: projectRoot, platform: "darwin" });
 const winTargets = resolvePackagedTargets({ root: projectRoot, platform: "win32" });
 const packagedApp = darwinTargets.packagedRoot;
@@ -250,41 +249,51 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
   process.exit(0);
 }
 
-const originalInfo = path.join(originalApp, "Contents/Info.plist");
+/**
+ * darwin audit — own forge Electron shell (same model as win32).
+ * Does NOT require official MacOS/Claude binary hash or Frameworks/Helpers ditto parity.
+ */
 const packagedInfo = path.join(packagedApp, "Contents/Info.plist");
-const originalExecutable = path.join(originalApp, "Contents/MacOS/Claude");
-const packagedExecutable = path.join(packagedApp, "Contents/MacOS/Claude");
-const generatedExecutable = path.join(packagedApp, "Contents/MacOS/Claudex");
+const packagedExecutable = path.join(packagedApp, "Contents/MacOS", PRODUCT_NAME);
+const residualClaudeExecutable = path.join(packagedApp, "Contents/MacOS/Claude");
 const packagedAsar = path.join(packagedApp, "Contents/Resources/app.asar");
-const originalAsar = path.join(originalApp, "Contents/Resources/app.asar");
-
-const originalResources = await listTopLevel(path.join(originalApp, "Contents/Resources"));
-const packagedResources = await listTopLevel(path.join(packagedApp, "Contents/Resources"));
-const originalFrameworks = await listTopLevel(path.join(originalApp, "Contents/Frameworks"));
+const packagedResourcesList = await listTopLevel(path.join(packagedApp, "Contents/Resources"));
 const packagedFrameworks = await listTopLevel(path.join(packagedApp, "Contents/Frameworks"));
-const originalHelpers = await listTopLevel(path.join(originalApp, "Contents/Helpers"));
-const packagedHelpers = await listTopLevel(path.join(packagedApp, "Contents/Helpers"));
-const packagedElectronFrameworkSymlinks = await topLevelSymlinks(path.join(packagedApp, "Contents/Frameworks/Electron Framework.framework"));
+const packagedElectronFrameworkSymlinks = await topLevelSymlinks(
+  path.join(packagedApp, "Contents/Frameworks/Electron Framework.framework"),
+);
+const helpersChrome = path.join(packagedApp, "Contents/Helpers/chrome-native-host");
+const helpersDisclaimer = path.join(packagedApp, "Contents/Helpers/disclaimer");
+const smolHost = path.join(
+  packagedApp,
+  "Contents/Resources",
+  process.arch === "arm64" ? "smol-bin.arm64.img" : "smol-bin.x64.img",
+);
+const localeEnUs = path.join(packagedApp, "Contents/Resources/en-US.json");
 
-// Identity keys: product must DIFFER from official (Dock/TCC separation).
-// Residual keys: executable name / short version still track original shell.
-// PRODUCT_* / OFFICIAL_BUNDLE_ID imported from packagePaths.mjs
+const info = {
+  CFBundleExecutable: { packaged: plistPrint(packagedInfo, "CFBundleExecutable") },
+  CFBundleName: { packaged: plistPrint(packagedInfo, "CFBundleName") },
+  CFBundleIdentifier: { packaged: plistPrint(packagedInfo, "CFBundleIdentifier") },
+  CFBundleDisplayName: { packaged: plistPrint(packagedInfo, "CFBundleDisplayName") },
+  CFBundleDocumentTypes: { packaged: plistPrint(packagedInfo, "CFBundleDocumentTypes") },
+  CFBundleURLTypes: { packaged: plistPrint(packagedInfo, "CFBundleURLTypes") },
+};
 
-const residualInfoKeys = ["CFBundleExecutable", "CFBundleShortVersionString"];
-const identityInfoKeys = ["CFBundleName", "CFBundleIdentifier"];
-const infoKeys = [...residualInfoKeys, ...identityInfoKeys];
-const info = Object.fromEntries(infoKeys.map((key) => [key, {
-  original: plistPrint(originalInfo, key),
-  packaged: plistPrint(packagedInfo, key),
-}]));
-const residualInfoAligned = residualInfoKeys.every((key) => info[key].original === info[key].packaged);
-// CFBundleName must remain residual "Claude" (Electron helper app lookup).
-// Product identity is Bundle ID + DisplayName, not CFBundleName.
+// Own shell: executable + CFBundleName = Claudex (forge Helper lookup).
 const productIdentityOk =
   info.CFBundleIdentifier.packaged === PRODUCT_BUNDLE_ID &&
   info.CFBundleIdentifier.packaged !== OFFICIAL_BUNDLE_ID &&
-  info.CFBundleIdentifier.packaged !== info.CFBundleIdentifier.original &&
-  info.CFBundleName.packaged === "Claude";
+  info.CFBundleName.packaged === PRODUCT_NAME &&
+  info.CFBundleExecutable.packaged === PRODUCT_NAME;
+
+// Document / URL residual present (PlistBuddy prints Array for dict arrays).
+const documentTypesOk =
+  info.CFBundleDocumentTypes.packaged != null &&
+  String(info.CFBundleDocumentTypes.packaged).length > 0;
+const urlTypesOk =
+  info.CFBundleURLTypes.packaged != null &&
+  String(info.CFBundleURLTypes.packaged).length > 0;
 
 const packagedAsarHeaderHash = (await exists(packagedAsar)) ? asarHeaderSha256(packagedAsar) : null;
 const plistAsarHash = plistPrint(packagedInfo, "ElectronAsarIntegrity:Resources/app.asar:hash");
@@ -300,57 +309,57 @@ for (const entry of expectedUnpackedRuntimeEntries) {
   if (!(await exists(path.join(unpackedRoot, entry)))) missingRuntimeUnpackedEntries.push(entry);
 }
 
+const dualRoot = inspectPackagedDualRoot(darwinTargets);
+const dualRootOk = Boolean(dualRoot?.ok);
+
 const report = {
   generated_at: new Date().toISOString(),
   project_root: projectRoot,
-  original_app: originalApp,
+  shell_model: "own-forge-electron",
   packaged_app: packagedApp,
   executable: {
-    original_exists: await exists(originalExecutable),
+    path: `Contents/MacOS/${PRODUCT_NAME}`,
     packaged_exists: await exists(packagedExecutable),
-    generated_deepseek_executable_exists: await exists(generatedExecutable),
-    original_sha256: (await exists(originalExecutable)) ? await sha256(originalExecutable) : null,
+    residual_claude_overlay_present: await exists(residualClaudeExecutable),
     packaged_sha256: (await exists(packagedExecutable)) ? await sha256(packagedExecutable) : null,
   },
   info,
   resources: {
-    original_top_level_count: originalResources.length,
-    packaged_top_level_count: packagedResources.length,
-    missing_original_resource_entries_except_app_asar: diffMissing(originalResources.filter((entry) => entry !== "app.asar"), packagedResources),
-    // Product-only trees re-injected after residual Resources copy.
-    // Dual-root: product-web (primary SPA) + residual ion-dist (official spa for setup).
-    allowed_product_resource_entries: ["claude-code-bin", "product-web", "electron-app-icon.png"],
-    extra_packaged_resource_entries: packagedResources.filter((entry) => {
-      if (new Set(originalResources).has(entry)) return false;
-      return !["claude-code-bin", "product-web", "electron-app-icon.png"].includes(entry);
-    }),
+    packaged_top_level_count: packagedResourcesList.length,
     product_web_exists: await exists(
       path.join(packagedApp, "Contents/Resources/product-web/index.html"),
     ),
     residual_ion_dist_exists: await exists(
       path.join(packagedApp, "Contents/Resources/ion-dist/index.html"),
     ),
-    dual_root: inspectPackagedDualRoot(darwinTargets),
+    smol_bin_host_exists: await exists(smolHost),
+    locale_en_us_exists: await exists(localeEnUs),
+    dual_root: dualRoot,
+    dual_root_ok: dualRootOk,
+  },
+  residual_helpers: {
+    chrome_native_host: await exists(helpersChrome),
+    disclaimer: await exists(helpersDisclaimer),
   },
   frameworks: {
-    missing: diffMissing(originalFrameworks, packagedFrameworks),
-    extra: packagedFrameworks.filter((entry) => !new Set(originalFrameworks).has(entry)),
-  },
-  helpers: {
-    missing: diffMissing(originalHelpers, packagedHelpers),
-    extra: packagedHelpers.filter((entry) => !new Set(originalHelpers).has(entry)),
+    top_level: packagedFrameworks,
+    // Forge Electron always ships Electron Framework; *Helper*.app under Frameworks.
+    has_electron_framework: packagedFrameworks.includes("Electron Framework.framework"),
   },
   symlinks: {
     packaged_electron_framework_top_level: packagedElectronFrameworkSymlinks,
-    has_absolute_framework_symlink: packagedElectronFrameworkSymlinks.some((entry) => path.isAbsolute(entry.target)),
+    has_absolute_framework_symlink: packagedElectronFrameworkSymlinks.some((entry) =>
+      path.isAbsolute(entry.target),
+    ),
   },
   asar: {
-    original_sha256: (await exists(originalAsar)) ? await sha256(originalAsar) : null,
     packaged_sha256: (await exists(packagedAsar)) ? await sha256(packagedAsar) : null,
-    intentionally_rebuilt: true,
     packaged_header_sha256: packagedAsarHeaderHash,
     plist_integrity_hash: plistAsarHash,
-    plist_integrity_matches_packaged_asar: packagedAsarHeaderHash !== null && plistAsarHash === packagedAsarHeaderHash,
+    // Integrity bag optional on pure forge shells; if present must match.
+    plist_integrity_matches_packaged_asar:
+      plistAsarHash == null ||
+      (packagedAsarHeaderHash !== null && plistAsarHash === packagedAsarHeaderHash),
     contains_smoke_user_data: asarEntries.some((entry) => entry.startsWith("/.smoke-user-data")),
     missing_runtime_node_modules_entries: missingRuntimeAsarEntries,
     missing_unpacked_runtime_entries: missingRuntimeUnpackedEntries,
@@ -358,9 +367,6 @@ const report = {
   },
 };
 
-// codesign Identifier must match product Bundle ID (TCC / Quick Entry AX residual).
-// align-packaged-macos-bundle re-signs with --identifier PRODUCT_BUNDLE_ID after
-// copying official MacOS residual (which otherwise keeps com.anthropic.claudefordesktop).
 const codesignDv = spawnSync(
   "/usr/bin/codesign",
   ["-dv", "--verbose=2", packagedApp],
@@ -377,40 +383,31 @@ report.product_identity = {
   expected_bundle_id: PRODUCT_BUNDLE_ID,
   expected_name: PRODUCT_NAME,
   official_bundle_id: OFFICIAL_BUNDLE_ID,
-  residual_info_aligned: residualInfoAligned,
   product_identity_ok: productIdentityOk,
   codesign_identifier: codesignId,
   codesign_identity_ok: codesignIdentityOk,
 };
 
-// Outer adhoc re-sign rewrites MacOS/Claude embedded signature blob → content
-// hash diverges from official residual even though code pages are the ditto'd
-// residual binary. When codesign Identifier is product id, hash mismatch is OK.
-const executableHashAligned =
-  report.executable.original_sha256 === report.executable.packaged_sha256;
 const executableOk =
-  report.executable.original_exists &&
   report.executable.packaged_exists &&
-  !report.executable.generated_deepseek_executable_exists &&
-  (executableHashAligned || codesignIdentityOk);
-report.executable.hash_aligned = executableHashAligned;
-report.executable.hash_ok_after_product_codesign = executableOk;
+  !report.executable.residual_claude_overlay_present;
 
-const dualRootOk = Boolean(report.resources.dual_root?.ok);
-report.resources.dual_root_ok = dualRootOk;
+const residualHelpersOk =
+  report.residual_helpers.chrome_native_host && report.residual_helpers.disclaimer;
 
 report.ok =
   executableOk &&
-  residualInfoAligned &&
   productIdentityOk &&
   codesignIdentityOk &&
   dualRootOk &&
+  documentTypesOk &&
+  urlTypesOk &&
+  residualHelpersOk &&
   report.resources.product_web_exists &&
   report.resources.residual_ion_dist_exists &&
-  report.resources.missing_original_resource_entries_except_app_asar.length === 0 &&
-  report.resources.extra_packaged_resource_entries.length === 0 &&
-  report.frameworks.missing.length === 0 && report.frameworks.extra.length === 0 &&
-  report.helpers.missing.length === 0 && report.helpers.extra.length === 0 &&
+  report.resources.smol_bin_host_exists &&
+  report.resources.locale_en_us_exists &&
+  report.frameworks.has_electron_framework &&
   !report.symlinks.has_absolute_framework_symlink &&
   report.asar.plist_integrity_matches_packaged_asar &&
   !report.asar.contains_smoke_user_data &&
@@ -421,52 +418,64 @@ report.ok =
 await fs.mkdir(docsRoot, { recursive: true });
 const jsonPath = path.join(docsRoot, "electron-packaged-bundle-alignment.json");
 await fs.writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
-const markdown = `# Electron packaged bundle 对齐审计\n\n` +
+const markdown =
+  `# Electron packaged bundle 对齐审计\n\n` +
   `生成时间：${report.generated_at}\n\n` +
-  `## 结论\n\n` +
-  `- Claude 二进制 hash 对齐：${report.executable.original_sha256 === report.executable.packaged_sha256 ? "是" : "否"}\n` +
-  `- 生成的 Claudex 二进制是否已移除：${!report.executable.generated_deepseek_executable_exists ? "是" : "否"}\n` +
-  `- Info.plist 残差字段（Executable/Version）是否对齐原包：${residualInfoAligned ? "是" : "否"}\n` +
-  `- 产品身份（Bundle ID / Name）是否独立于官方：${productIdentityOk ? "是" : "否"}\n` +
+  `## 结论（own forge Electron shell）\n\n` +
+  `- 壳模型：${report.shell_model}\n` +
+  `- 产品二进制 Contents/MacOS/${PRODUCT_NAME} 存在：${report.executable.packaged_exists ? "是" : "否"}\n` +
+  `- 是否残留官方 MacOS/Claude 覆盖：${report.executable.residual_claude_overlay_present ? "是（失败）" : "否"}\n` +
+  `- 产品身份（Bundle ID / Name / Executable）：${productIdentityOk ? "是" : "否"}\n` +
   `- codesign Identifier 是否为产品 ID：${codesignIdentityOk ? "是" : "否"}（${codesignId}）\n` +
   `- 产品 Bundle ID：${info.CFBundleIdentifier.packaged}（期望 ${PRODUCT_BUNDLE_ID}）\n` +
-  `- 原包 Resources 配套项缺失数（不含 app.asar）：${report.resources.missing_original_resource_entries_except_app_asar.length}\n` +
-  `- Resources 额外项数：${report.resources.extra_packaged_resource_entries.length}\n` +
-  `- Frameworks 缺失/额外：${report.frameworks.missing.length}/${report.frameworks.extra.length}\n` +
-  `- Helpers 缺失/额外：${report.helpers.missing.length}/${report.helpers.extra.length}\n` +
+  `- CFBundleDocumentTypes 残差：${documentTypesOk ? "是" : "否"}\n` +
+  `- CFBundleURLTypes 残差：${urlTypesOk ? "是" : "否"}\n` +
+  `- Helpers/chrome-native-host：${report.residual_helpers.chrome_native_host ? "是" : "否"}\n` +
+  `- Helpers/disclaimer：${report.residual_helpers.disclaimer ? "是" : "否"}\n` +
+  `- smol-bin host：${report.resources.smol_bin_host_exists ? "是" : "否"}\n` +
+  `- locale en-US.json：${report.resources.locale_en_us_exists ? "是" : "否"}\n` +
+  `- Electron Framework 存在：${report.frameworks.has_electron_framework ? "是" : "否"}\n` +
   `- Electron Framework 是否存在绝对 symlink：${report.symlinks.has_absolute_framework_symlink ? "是" : "否"}\n` +
-  `- app.asar integrity 是否已重算：${report.asar.plist_integrity_matches_packaged_asar ? "是" : "否"}\n` +
+  `- app.asar integrity：${report.asar.plist_integrity_matches_packaged_asar ? "是" : "否"}\n` +
   `- app.asar 产品 main 指纹：${report.asar.product_main.ok ? "是" : "否"}（${report.asar.product_main.reason ?? "ok"} index=${report.asar.product_main.indexSize ?? 0} chunks=${report.asar.product_main.hasChunks}）\n` +
   `- app.asar runtime node_modules 缺失数：${report.asar.missing_runtime_node_modules_entries.length}\n` +
   `- app.asar.unpacked runtime 缺失数：${report.asar.missing_unpacked_runtime_entries.length}\n` +
-  `- app.asar 是否误打入 smoke user data：${report.asar.contains_smoke_user_data ? "是" : "否"}\n` +
   `- product-web 存在：${report.resources.product_web_exists ? "是" : "否"}（build-id=${report.resources.dual_root?.productBuildId ?? "null"}）\n` +
   `- residual ion-dist 存在：${report.resources.residual_ion_dist_exists ? "是" : "否"}（build-id=${report.resources.dual_root?.residualBuildId ?? "null"}）\n` +
   `- dual-root 通过：${dualRootOk ? "是" : "否"}（${report.resources.dual_root?.reason ?? "ok"}）\n` +
   `- 是否通过：${report.ok ? "是" : "否"}\n\n` +
-  `说明：外层 macOS Frameworks/Helpers/二进制对齐原包；CFBundleIdentifier/Name 必须是独立产品身份（不能等于 com.anthropic.claudefordesktop），避免与官方 Dock/TCC 合并；app.asar 必须是产品 main（chunks / 产品指纹），禁止官方 12MB 单文件 monolith；Resources 必须 dual-root：product-web 主 SPA + residual ion-dist（setup-desktop-3p），禁止把 product 覆盖进 ion-dist。\n`;
+  `说明：壳与 web 一样是我们写的产品代码 + forge Electron 运行时；选择性注入官方 residual Helpers（chrome-native-host/disclaimer）、smol-bin、locale JSON、document/URL types。不做官方 Claude.app MacOS/Frameworks 整段覆盖。CFBundleIdentifier/Name/Executable 为产品身份（Claudex）；app.asar 必须是产品 main；Resources dual-root：product-web 主 SPA + residual ion-dist（setup-desktop-3p）。\n`;
 const markdownPath = path.join(docsRoot, "electron-packaged-bundle-alignment.md");
 await fs.writeFile(markdownPath, markdown);
 console.log(path.relative(projectRoot, jsonPath));
 console.log(path.relative(projectRoot, markdownPath));
-console.log(JSON.stringify({
-  ok: report.ok,
-  executable_hash_aligned: report.executable.original_sha256 === report.executable.packaged_sha256,
-  residual_info_aligned: residualInfoAligned,
-  product_identity_ok: productIdentityOk,
-  product_main_ok: report.asar.product_main.ok,
-  dual_root_ok: dualRootOk,
-  product_web_build_id: report.resources.dual_root?.productBuildId ?? null,
-  residual_ion_dist_build_id: report.resources.dual_root?.residualBuildId ?? null,
-  codesign_identity_ok: codesignIdentityOk,
-  codesign_identifier: codesignId,
-  product_bundle_id: info.CFBundleIdentifier.packaged,
-  missing_resources: report.resources.missing_original_resource_entries_except_app_asar.length,
-  extra_resources: report.resources.extra_packaged_resource_entries.length,
-  absolute_framework_symlink: report.symlinks.has_absolute_framework_symlink,
-  asar_integrity_ok: report.asar.plist_integrity_matches_packaged_asar,
-  missing_runtime_node_modules: report.asar.missing_runtime_node_modules_entries.length,
-  missing_unpacked_runtime: report.asar.missing_unpacked_runtime_entries.length,
-  contains_smoke_user_data: report.asar.contains_smoke_user_data,
-}, null, 2));
+console.log(
+  JSON.stringify(
+    {
+      ok: report.ok,
+      shell_model: report.shell_model,
+      product_identity_ok: productIdentityOk,
+      product_main_ok: report.asar.product_main.ok,
+      dual_root_ok: dualRootOk,
+      document_types_ok: documentTypesOk,
+      url_types_ok: urlTypesOk,
+      helpers_ok: residualHelpersOk,
+      smol_bin_ok: report.resources.smol_bin_host_exists,
+      locale_en_us_ok: report.resources.locale_en_us_exists,
+      product_web_build_id: report.resources.dual_root?.productBuildId ?? null,
+      residual_ion_dist_build_id: report.resources.dual_root?.residualBuildId ?? null,
+      codesign_identity_ok: codesignIdentityOk,
+      codesign_identifier: codesignId,
+      product_bundle_id: info.CFBundleIdentifier.packaged,
+      residual_claude_overlay: report.executable.residual_claude_overlay_present,
+      absolute_framework_symlink: report.symlinks.has_absolute_framework_symlink,
+      asar_integrity_ok: report.asar.plist_integrity_matches_packaged_asar,
+      missing_runtime_node_modules: report.asar.missing_runtime_node_modules_entries.length,
+      missing_unpacked_runtime: report.asar.missing_unpacked_runtime_entries.length,
+      contains_smoke_user_data: report.asar.contains_smoke_user_data,
+    },
+    null,
+    2,
+  ),
+);
 if (!report.ok) process.exit(1);

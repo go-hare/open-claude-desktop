@@ -64,8 +64,29 @@ import {
   shellQuote,
   type SessionSshConfig,
 } from "../services/localSessions/sshTranscriptSync";
+import { resolveCodeTranscriptPath } from "../services/localSessions/codeTranscriptJsonl";
+import {
+  getTranscriptSearchWorkerHost,
+  type TranscriptSearchSession,
+} from "../services/shell/transcriptSearchWorkerHost";
 import type { InterfaceHandlers, IpcHandler } from "./registerIpc";
 import { dispatchBridgeEvent, registerInterfaceHandlers } from "./registerIpc";
+import {
+  deleteBridgeAgentMemoryResidual,
+  deleteBridgeSessionResidual,
+  getBridgeConsent,
+  getSessionsBridgeEnabled,
+  getSessionsBridgeStatusState,
+  identityFromSettingsPrefs,
+} from "../services/coworkSessions/sessionsBridgeResidual";
+import {
+  abandonBridgeEnvironmentLive,
+  kickBridgePollLive,
+  resetBridgeLive,
+  resetBridgeSessionLive,
+  respondBridgePermissionPreflightLive,
+  setSessionsBridgeEnabledLive,
+} from "../services/coworkSessions/sessionsBridgeLifecycle";
 
 const execFileAsync = promisify(execFile);
 const TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
@@ -153,6 +174,9 @@ const BRIDGE_SESSION_KEYS = [
   "archived",
   "stopped",
   "isRunning",
+  // Official CodeStatusGlyph / u_e — ready = hasCompleted && isUnread
+  "hasCompleted",
+  "isUnread",
   "isPinned",
   "pinned",
   "cliSessionId",
@@ -1459,7 +1483,53 @@ function createSessionHandlers(
         ...(result.error ? { error: result.error } : {}),
       };
     },
-    searchSessions: async (_event, query) => store.search(String(query ?? "")),
+    /**
+     * Title/cwd/message filter first; when query ≥ 2 chars also search CLI jsonl
+     * body via TranscriptSearchWorkerHost (yHi residual) for sessions with paths.
+     */
+    searchSessions: async (_event, query) => {
+      const raw = String(query ?? "");
+      const titleHits = store.search(raw);
+      const needle = raw.trim();
+      if (needle.length < 2) return titleHits;
+
+      const titleIds = new Set(titleHits.map((session) => session.id));
+      const candidates = store.getAll(true).filter(
+        (session) => !titleIds.has(session.id) && Boolean(session.cliSessionId),
+      );
+      if (candidates.length === 0) return titleHits;
+
+      const searchSessions: TranscriptSearchSession[] = [];
+      for (const session of candidates) {
+        const transcriptPath = await resolveCodeTranscriptPath(session.cliSessionId, {
+          cwd: session.cwd,
+          worktreePath: session.worktreePath,
+          originCwd: session.originCwd,
+        });
+        if (!transcriptPath) continue;
+        searchSessions.push({
+          sessionId: session.id,
+          transcriptPath,
+          lastActivityAt: session.lastActivityAt ?? session.updatedAt,
+        });
+      }
+      if (searchSessions.length === 0) return titleHits;
+
+      try {
+        const hits = await getTranscriptSearchWorkerHost().search(needle, searchSessions, {
+          limit: 50,
+        });
+        if (hits.length === 0) return titleHits;
+        const hitIds = new Set(hits.map((hit) => hit.sessionId));
+        const bodyHits = store
+          .getAll(true)
+          .filter((session) => hitIds.has(session.id) && !titleIds.has(session.id));
+        return [...titleHits, ...bodyHits];
+      } catch (error) {
+        console.warn("[LocalSessions.searchSessions] transcript body search failed", error);
+        return titleHits;
+      }
+    },
     addDirectories: async (_event, id, directories) => {
       const sessionId = asString(id);
       const session = sessionId ? store.addFolders(sessionId, directories) : null;
@@ -1538,16 +1608,15 @@ function createSessionHandlers(
       return id ? bridgeSessions(store.getSessionsForScheduledTask(id)) : [];
     },
     getSupportedCommands: async (_event, request) => getSupportedCommands(store, asObject(request)),
-    // 3p has no Anthropic remote sessions bridge — never soft-true ready.
-    getSessionsBridgeEnabled: async () => false,
-    sessionsBridgeStatus_$store$_getState: async () => ({
-      enabled: false,
-      status: "unavailable",
-      conflict: false,
-      dispatchAgentName: null,
-      reason: "sessions_bridge_unavailable",
-    }),
-    interactiveAuth_$store$_getState: async () => ({ status: "idle" }),
+    // Official custom-3p residual: getSessionsBridgeEnabled → true; yit status bag.
+    getSessionsBridgeEnabled: async () => {
+      const prefs = context.settings.getPreferences() as Record<string, unknown>;
+      return getSessionsBridgeEnabled(identityFromSettingsPrefs(prefs));
+    },
+    sessionsBridgeStatus_$store$_getState: async () => getSessionsBridgeStatusState(),
+    // Official getInitialInteractiveAuthState: null | lcA bag (app.asar).
+    // Product residual: null — never invent idle/OAuth bag on LocalSessions.
+    interactiveAuth_$store$_getState: async () => null,
     getContextUsage: async (_event, id) => {
       const sessionId = asString(id);
       if (!sessionId) return null;
@@ -1732,8 +1801,17 @@ function createSessionHandlers(
     },
     setVisibility: async (_event, id, visibility) => bridgeSession(asString(id) ? store.update(asString(id)!, { visibility: String(visibility ?? "") }) : null),
     setFocusedSession: async (_event, id) => {
-      // Official focusedSessionChanged residual — close Code idle notifications.
-      setFocusedCodeSession(context, asString(id));
+      // Official focusedSessionChanged residual — close Code idle notifications
+      // and clear isUnread (ready glyph) for the focused session.
+      const sessionId = asString(id);
+      const wasUnread = sessionId ? store.getSession(sessionId)?.isUnread === true : false;
+      setFocusedCodeSession(context, sessionId);
+      const focused = store.setFocusedSession(sessionId);
+      // Only emit session_updated when unread actually cleared — avoid Recents
+      // reorder spam on every open of a completed+read session.
+      if (sessionId && focused && wasUnread) {
+        dispatchSessionEvent("session_updated", sessionId, focused);
+      }
       return true;
     },
     /**
@@ -1832,24 +1910,37 @@ function createSessionHandlers(
       return false;
     },
     /**
-     * Anthropic Sessions Bridge residual — product has no remote bridge poller.
-     * Prefer honest empty/disabled over soft-true success that implies bridge is live.
+     * Official Sessions Bridge shell residual (custom-3p / yit / QcA).
+     * set is void; consent/enabled are boolean; delete is boolean without client.
      */
     setSessionsBridgeEnabled: async (_event, enabled) => {
-      // Persist pref so UI toggles round-trip; do not imply remote bridge is active.
+      if (typeof enabled !== "boolean") {
+        throw new Error(
+          'Argument "enabled" at position 0 to method "setSessionsBridgeEnabled" in interface "LocalAgentModeSessions" failed to pass validation',
+        );
+      }
       context.settings.setPreference("sessionsBridgeEnabled", enabled === true);
-      return true;
+      const prefs = context.settings.getPreferences() as Record<string, unknown>;
+      await setSessionsBridgeEnabledLive(identityFromSettingsPrefs(prefs), enabled);
     },
-    getBridgeConsent: async () => ({
-      granted: false,
-      reason: "sessions_bridge_unavailable",
-    }),
-    deleteBridgeSession: async () => false,
-    deleteBridgeAgentMemory: async () => false,
-    abandonBridgeEnvironment: async () => false,
-    resetBridge: async () => false,
-    resetBridgeSession: async () => false,
-    kickBridgePoll: async () => false,
+    getBridgeConsent: async () => {
+      const prefs = context.settings.getPreferences() as Record<string, unknown>;
+      return getBridgeConsent(identityFromSettingsPrefs(prefs));
+    },
+    deleteBridgeSession: async () => deleteBridgeSessionResidual(),
+    deleteBridgeAgentMemory: async () => deleteBridgeAgentMemoryResidual(),
+    abandonBridgeEnvironment: async (_event, deregister) => {
+      await abandonBridgeEnvironmentLive(deregister);
+    },
+    resetBridge: async () => {
+      await resetBridgeLive();
+    },
+    resetBridgeSession: async () => {
+      await resetBridgeSessionLive();
+    },
+    kickBridgePoll: async () => {
+      await kickBridgePollLive();
+    },
     respondToToolPermission: async (_event, requestId, decision, updatedInput, explicitSessionId) => {
       const request = asString(requestId);
       const mode = asString(decision);
@@ -1872,8 +1963,10 @@ function createSessionHandlers(
       });
       return result;
     },
-    // No Anthropic bridge preflight queue in product — honest no-op ack false.
-    respondBridgePermissionPreflight: async () => false,
+    // Official void residual (preflightWaiting map absent → no-op; not soft-false invent).
+    respondBridgePermissionPreflight: async (_event, requestId, proceed) => {
+      await respondBridgePermissionPreflightLive(requestId, proceed);
+    },
     // Directory / plugin / slash reverse-RPC is LocalAgentModeSessions (Cowork) only.
     // These keys are not in LOCAL_SESSIONS_METHODS; keep residual-honest if ever registered.
     respondDirectoryServers: async () => false,
@@ -1975,13 +2068,42 @@ function createSessionHandlers(
     },
     getAgents: async () => listLocalAgents(),
     createAgent: async (_event, input) => createLocalAgent(input),
-    getDirectMcpServerStatuses: async () => configuredMcpServers(context).map(([name, config]) => describeMcpServer(name, config)),
-    // Residual-honest: product has no pending OAuth MCP flow — never soft-true authorize.
-    authorizeDirectMcpServer: async (_event, serverName) => ({
-      ok: false,
-      error: `No pending MCP server named "${String(serverName ?? "")}"`,
-    }),
-    disconnectDirectMcpServer: async () => false,
+    getDirectMcpServerStatuses: async () => {
+      const { getDirectMcpConnectionManager } = await import(
+        "../services/mcp/directMcpConnectionManager"
+      );
+      const manager = getDirectMcpConnectionManager();
+      try {
+        await manager.connectFromConfigBag(context.settings.getMcpServersConfig());
+      } catch (error) {
+        console.warn(
+          "[custom3p-mcp] LocalSessions connectFromConfigBag failed",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+      const live = manager.getStatuses();
+      if (live.length > 0) return live;
+      // Fallback residual-ish: configured descriptors when nothing connected yet.
+      return configuredMcpServers(context).map(([name, config]) =>
+        describeMcpServer(name, config),
+      );
+    },
+    // Residual authorizeDirectMcpServer → _ni custom3p MCP OAuth loopback (not Anthropic login).
+    authorizeDirectMcpServer: async (_event, serverName) => {
+      const name = String(serverName ?? "");
+      const { getDirectMcpConnectionManager } = await import(
+        "../services/mcp/directMcpConnectionManager"
+      );
+      return getDirectMcpConnectionManager().authorizePending(name);
+    },
+    disconnectDirectMcpServer: async (_event, serverName) => {
+      const name = asString(serverName);
+      if (!name) return false;
+      const { getDirectMcpConnectionManager } = await import(
+        "../services/mcp/directMcpConnectionManager"
+      );
+      return getDirectMcpConnectionManager().disconnect(name);
+    },
     getLocalSkillFiles: async (_event, skillRef) => getLocalSkillFiles(skillRef),
     listLocalSkills: async () => listLocalSkills(),
     syncSkills: async () => listLocalSkills(),
@@ -2042,6 +2164,24 @@ function createSessionHandlers(
         }
       } catch (error) {
         console.warn("[Chrome Extension MCP] mcpCallTool internal route failed", error);
+      }
+      // Prefer live directMcpHost connection when present (residual custom3p-main client).
+      try {
+        const { getDirectMcpConnectionManager } = await import(
+          "../services/mcp/directMcpConnectionManager"
+        );
+        const live = getDirectMcpConnectionManager().getConnectedClient(
+          asString(serverName) ?? "",
+        );
+        if (live) {
+          return live.client.callTool(
+            { name, arguments: asObject(input) },
+            undefined,
+            { timeout: 300_000 },
+          );
+        }
+      } catch (error) {
+        console.warn("[custom3p-mcp] live mcpCallTool failed", error);
       }
       const server = mcpServerConfig(context, serverName);
       if (!server) return { ok: false, error: "mcp_server_not_configured", serverName };

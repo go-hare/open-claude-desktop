@@ -100,7 +100,17 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
     }
   }
   if (method === "getAppName") return app.getName();
-  if (method === "getBuildProps") return { appVersion: app.getVersion(), platform: process.platform, arch: process.arch };
+  if (method === "getBuildProps") {
+    return {
+      buildType: app.isPackaged ? "prod" : "dev",
+      commitHash: process.env.CLAUDEX_COMMIT_HASH || "unknown",
+      commitTimestamp: process.env.CLAUDEX_COMMIT_TIMESTAMP || "",
+      isNestBuild: false,
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+    };
+  }
   if (method === "getSupport") return {};
   if (method === "reportNavigationState" || method === "navigationState_") {
     const { mainView } = context.windows;
@@ -124,7 +134,8 @@ function defaultValueFor(channel: string, context: IpcHandlerContext): unknown {
 
   if (/^(is|has|can|check)/.test(method)) return false;
   if (/^(list|search|fetch|getAll|getAvailable|getInstalled|getExtensions|getExtensionVersions|getConnected|getSessions|getAgents|getLocal|getDirect)/.test(method)) return [];
-  if (/^(set|update|save|open|show|hide|close|request|reveal|focus|select|cancel|remove|delete|archive|clear|enable|disable|disconnect|forget|report|submit|navigate|resize)/.test(method)) return true;
+  // Unregistered mutation residual: false (never soft-true invent success).
+  if (/^(set|update|save|open|show|hide|close|request|reveal|focus|select|cancel|remove|delete|archive|clear|enable|disable|disconnect|forget|report|submit|navigate|resize)/.test(method)) return false;
   if (/^(create|start|install|download|run|authorize|probe|export|duplicate|rename|write|read|fork|send|add|adopt|dismiss|record|refresh|reload|restart)/.test(method)) return null;
   if (lower.includes("enabled") || lower.includes("available")) return false;
   if (lower.includes("status")) return { status: "fallback" };

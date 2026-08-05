@@ -3,9 +3,11 @@
  * strip residual workspace root index.js if present.
  *
  * Used by:
- *   align-packaged-macos-bundle.mjs (after residual Resources copy)
+ *   align-packaged-macos-bundle.mjs (finalize forge package — inject project runtime)
  *   align-packaged-win32-bundle.mjs (after forge package — required now that
  *   forge ignore allowlists only package.json + .vite)
+ *
+ * Source is always project resources/original-runtime-node_modules — not residual .app.
  *
  * @param {{
  *   appAsar: string,

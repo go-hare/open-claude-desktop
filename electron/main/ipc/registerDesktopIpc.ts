@@ -13,6 +13,13 @@ import { isCoworkHostLoopGrowthBookFeatureEnabled } from "../services/coworkHost
 import { getActiveCoworkGrowthBookLifecycle } from "../services/coworkHostLoop/coworkGrowthBookLifecycle";
 import { resolveCoworkRequireFullVmSandbox } from "../services/coworkHostLoop/coworkHostLoopMode";
 import { createCoworkAgentQueryFactory } from "../services/coworkRuntime/coworkAgentQueryFactory";
+import { kickComputerUseAppEnumerationPrewarm } from "../services/coworkRuntime/computerUseAppEnumeration";
+import {
+  createComputerUseHostAdapter,
+} from "../services/coworkRuntime/computerUseDarwinExecutor";
+import { getComputerUseSubGates } from "../services/coworkRuntime/computerUseChicagoConfig";
+import { initComputerUseEsc } from "../services/coworkRuntime/computerUseLock";
+import { initComputerUseTeachOverlay } from "../services/coworkRuntime/computerUseTeachOverlay";
 import {
   createWebContentsDirectoryDispatcher,
   setCoworkDirectoryBridgeDispatcher,
@@ -45,13 +52,33 @@ import { registerFeatureHandlers } from "./featureHandlers";
 import { registerFindInPageHandlers } from "./findInPageHandlers";
 import { registerCoworkSessionsHandlers } from "./coworkSessionsHandlers";
 import { registerLocalSessionsHandlers } from "./localSessionsHandlers";
-import { registerOriginalEventSurface } from "./originalEventSurface";
+import { getDirectMcpConnectionManager } from "../services/mcp/directMcpConnectionManager";
+import {
+  originalEventSurface,
+  registerOriginalEventSurface,
+} from "./originalEventSurface";
 import { dispatchBridgeEvent } from "./registerIpc";
 import { registerScheduledTasksHandlers } from "./scheduledTasksHandlers";
 import { registerSettingsHandlers } from "./settingsHandlers";
 import { registerStoreStateHandlers } from "./storeStateHandlers";
 import { registerWebMiscHandlers } from "./webMiscHandlers";
 import { registerWindowHandlers } from "./windowHandlers";
+import { setSessionsBridgeStatusListener } from "../services/coworkSessions/sessionsBridgeResidual";
+import {
+  configureSessionsBridgeLifecycle,
+  scheduleSessionsBridgeReconcile,
+  setSessionsBridgeFeatureGate,
+  SESSIONS_BRIDGE_FEATURE_FLAG_ID,
+} from "../services/coworkSessions/sessionsBridgeLifecycle";
+import { getSessionsBridgeClient } from "../services/coworkSessions/sessionsBridgeClient";
+import { configureSessionsBridgePss } from "../services/coworkSessions/sessionsBridgePss";
+import {
+  getActiveWakeSchedulerController,
+  getWakeSchedulerNativeApi,
+} from "../services/settings/wakeScheduler";
+import { setWakeChainActive } from "../services/settings/wakeSchedulerClaims";
+import { isCoworkGrowthBookFeatureOn } from "../services/coworkHostLoop/coworkGrowthBookFeatures";
+import { identityFromSettingsPrefs } from "../services/coworkSessions/sessionsBridgeResidual";
 
 export function createDefaultIpcContext(
   windows: DesktopWindowParts,
@@ -126,6 +153,11 @@ export function createDefaultIpcContext(
   });
   const localAgentModeSessions = new CoworkSessionManager({
     accountContext: coworkAccount,
+    // Official getBridgeActiveSession inject — SessionsBridgeClient owns activeSessions.
+    getBridgeActiveSession: (remoteId) => {
+      const s = getSessionsBridgeClient()?.getActiveSession(remoteId);
+      return s ? { localSessionId: s.localSessionId } : null;
+    },
     registerRootsProvider: mcpCoordinatorInjects.registerRootsProvider,
     unregisterRootsProvider: mcpCoordinatorInjects.unregisterRootsProvider,
     createMcpServer: mcpCoordinatorInjects.createMcpServer,
@@ -167,6 +199,16 @@ export function createDefaultIpcContext(
     // Also drives QHA stub path (featureDisabled enable prompt) when false.
     isComputerUseEnabled: () =>
       settings.getPreferences().chicagoEnabled === true,
+    // Official gi("chicagoAutoUnhide") — SSA default true; leavingRunning P_A + adapter.
+    getChicagoAutoUnhide: () =>
+      settings.getPreferences().chicagoAutoUnhide !== false,
+    // Official IFi getUserDeniedBundleIds → gi("chicagoUserDeniedBundleIds").
+    getUserDeniedBundleIds: () => {
+      const raw = settings.getPreferences().chicagoUserDeniedBundleIds;
+      return Array.isArray(raw)
+        ? raw.filter((id): id is string => typeof id === "string")
+        : [];
+    },
     // Official idle onClick: yz() focus main + dispatchNavigate residual.
     // Full XC.getDispatcher product not invented — focus main window only.
     navigateToLocalSession: (_sessionId) => {
@@ -285,6 +327,54 @@ export function createDefaultIpcContext(
       }),
     ),
   });
+  // Official Xki residual: Escape globalShortcut stops CU lock holder.
+  // Register only while lock held (Zki/zki via cuLockChanged).
+  initComputerUseEsc((sessionId) => {
+    void localAgentModeSessions.stop(sessionId).catch((error) => {
+      console.warn("[cu-esc] stop holder failed", sessionId, error);
+    });
+  });
+  // Official Ucr residual: teach overlay controller (BrowserWindow + cu-teach IPC).
+  initComputerUseTeachOverlay(
+    {
+      on: (event, listener) => {
+        localAgentModeSessions.on(
+          event,
+          listener as (...args: never[]) => void,
+        );
+      },
+      resolveTeachStep: (result) =>
+        localAgentModeSessions.resolveTeachStep(result),
+      getCuLockHolder: () => localAgentModeSessions.getCuLockHolder(),
+      stopSession: (sessionId) => localAgentModeSessions.stop(sessionId),
+      getSession: (sessionId) => {
+        const s = localAgentModeSessions.getSession(sessionId);
+        return s
+          ? { cuSelectedDisplayId: s.cuSelectedDisplayId }
+          : null;
+      },
+    },
+    () => windows.mainWindow,
+  );
+  // Official aFi residual prewarm (sFi 1s race) so gFi request_access descriptions
+  // can include installed app names on first session when natives load in time.
+  kickComputerUseAppEnumerationPrewarm(() => {
+    const adapter = createComputerUseHostAdapter({
+      // Enumeration does not require chicago on; adapter.isDisabled only gates actions.
+      isChicagoEnabled: () => true,
+      getAutoUnhideEnabled: () =>
+        settings.getPreferences().chicagoAutoUnhide !== false,
+      getSubGates: getComputerUseSubGates,
+    });
+    return adapter?.executor
+      ? {
+          listInstalledApps: () => adapter.executor.listInstalledApps(),
+          listRunningApps: adapter.executor.listRunningApps
+            ? () => adapter.executor.listRunningApps()
+            : undefined,
+        }
+      : null;
+  });
   return {
     windows,
     coworkAccount,
@@ -299,6 +389,86 @@ export function createDefaultIpcContext(
 
 export function registerDesktopIpc(context: IpcHandlerContext): void {
   registerOriginalEventSurface(context);
+  // Residual setDirectMcpStatusListener → dispatchOnDirectMcpServerStatusesChanged
+  getDirectMcpConnectionManager().setStatusListener((statuses) => {
+    originalEventSurface(context).localAgentModeDirectMcpServerStatusesChanged(
+      statuses,
+    );
+  });
+  // Official H6i → updateSessionsBridgeStatusStore (yit/QcA push)
+  setSessionsBridgeStatusListener((state) => {
+    originalEventSurface(context).localAgentModeSessionsBridgeStatusUpdated(state);
+  });
+  // Official nTA/lIr/NJ residual wiring (gate off until feature / force)
+  setSessionsBridgeFeatureGate(
+    isCoworkGrowthBookFeatureOn(SESSIONS_BRIDGE_FEATURE_FLAG_ID),
+  );
+  configureSessionsBridgeLifecycle({
+    getIdentity: () => {
+      try {
+        const prefs = context.settings.getPreferences() as Record<string, unknown>;
+        const fromPrefs = identityFromSettingsPrefs(prefs);
+        if (fromPrefs.orgUuid && fromPrefs.accountUuid) return fromPrefs;
+      } catch {
+        /* fall through */
+      }
+      const id = context.coworkAccount?.getIdentity?.() ?? null;
+      return {
+        orgUuid: id?.organizationUuid ?? null,
+        accountUuid: id?.accountUuid ?? null,
+      };
+    },
+    onRemoteSessionStart: (payload) => {
+      originalEventSurface(context).localAgentModeRemoteSessionStart(payload);
+    },
+    // Single preflight path → event surface only (no setPreflightDispatcher double-fire).
+    onBridgePermissionPreflight: (payload) => {
+      originalEventSurface(context).localAgentModeBridgePermissionPreflight(payload);
+    },
+    // Client handleInboundControlRequest → sessionManager.interruptTurn.
+    // Do NOT also onInboundMessage → manager.handleInboundControlRequest (double interrupt).
+    // getBridgeActiveSession on manager remains for direct manager residual callers.
+    sessionManager: {
+      hasSession: (id) => context.localAgentModeSessions.getSession(id) != null,
+      sendMessage: (localId, text, images, files, messageUuid) =>
+        context.localAgentModeSessions.sendMessage(
+          localId,
+          text,
+          images as never,
+          files as never,
+          messageUuid,
+        ),
+      interruptTurn: (localId) =>
+        context.localAgentModeSessions.interruptTurn(localId),
+      seedWebFetchProvenance: (localId, text) =>
+        context.localAgentModeSessions.seedWebFetchProvenance(localId, text),
+    },
+  });
+  // Official bridge PSS residual: prefer native wakeScheduler asserts when present;
+  // else powerSaveBlocker; never invent when both unavailable (returns 0).
+  // Official Gle residual: setWakeChainActive (true no-op schedule; true→false → woA
+  // rescheduleWakeFromClaims when controller ready + feature gated).
+  configureSessionsBridgePss({
+    getNative: () => {
+      const api = getWakeSchedulerNativeApi() as {
+        createPreventSystemSleepAssertion?: (r: string) => number;
+        releaseAssertion?: (id: number) => void;
+      } | null;
+      if (!api) return null;
+      const controller = getActiveWakeSchedulerController();
+      return {
+        isReady: () => controller?.isReady() === true,
+        createPreventSystemSleepAssertion:
+          api.createPreventSystemSleepAssertion?.bind(api),
+        releaseAssertion: api.releaseAssertion?.bind(api),
+      };
+    },
+    setChainActive: (active: boolean) => {
+      // Official Gle residual → setWakeChainActive (woA claim-min chain).
+      setWakeChainActive(active);
+    },
+  });
+  void scheduleSessionsBridgeReconcile();
   registerWindowHandlers(context);
   registerAppBindingsHandlers(context);
   registerFindInPageHandlers(context);

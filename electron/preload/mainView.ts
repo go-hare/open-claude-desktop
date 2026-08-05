@@ -9,6 +9,7 @@ import { settingsBridgeSpec } from "./bridges/settingsBridge";
 import { hybridBridgeSpec } from "./bridges/hybridBridge";
 import { webBridgeSpec } from "./bridges/webBridge";
 import { buddyBridgeSpec, officeAddinBridgeSpec, simulatorBridgeSpec, skillsBridgeSpec } from "./bridges/mainViewExtraBridge";
+import { setupBuddyBle } from "./buddyBle";
 
 exposeBridgeSpec(
   {
@@ -32,3 +33,11 @@ exposeValue("desktopTelemetryConfig", readJsonArg("--desktop-telemetry-config=",
 exposeValue("desktopNestLocalUsername", readJsonArg("--desktop-nest-local-username=", null));
 exposeValue("electronWindowControl", electronWindowControl);
 exposeValue("electronIntl", electronIntl);
+
+// Official mainView residual: window.buddyBle = { pair, disconnect } + NUS transport.
+// Must run after BuddyBleTransport IPC bridge is exposed.
+try {
+  setupBuddyBle();
+} catch (err) {
+  console.error("[buddyBle setup]", err);
+}

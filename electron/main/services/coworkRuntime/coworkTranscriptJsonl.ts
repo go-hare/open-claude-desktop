@@ -47,7 +47,7 @@ export function createCoworkRawTranscriptLoader(
 ): RawTranscriptLoader {
   return async (session, options) => {
     if (!session.cliSessionId) return null;
-    const transcriptPath = await resolveTranscriptPath(configDir, session);
+    const transcriptPath = await resolveCoworkTranscriptPath(session, configDir);
     if (!transcriptPath) return null;
     const lines = splitLines(await readFile(transcriptPath, "utf8"));
     const selected = options?.limit ? tailLines(lines, options) : lines;
@@ -55,6 +55,42 @@ export function createCoworkRawTranscriptLoader(
       dropPreBoundary: options?.limit !== undefined,
     });
     return parsed.filter((message) => officialTranscriptTypes.has(message.type));
+  };
+}
+
+/**
+ * Resolve on-disk CLI jsonl for a Cowork session (search + raw loader).
+ * data-official-source: resolveTranscriptPath residual in app.asar cowork path.
+ */
+export async function resolveCoworkTranscriptPath(
+  session: Pick<CoworkSessionRuntimeState, "cliSessionId" | "cwd" | "hostLoopMode" | "resolvedFolders"> | {
+    cliSessionId?: string;
+    cwd?: string;
+    hostLoopMode?: boolean;
+    resolvedFolders?: Array<{ canonical?: string | null; display?: string | null }>;
+    userSelectedFolders?: string[];
+  },
+  configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
+): Promise<string | null> {
+  const normalized = normalizeCoworkTranscriptSession(session);
+  return resolveTranscriptPath(configDir, normalized);
+}
+
+function normalizeCoworkTranscriptSession(
+  session: Parameters<typeof resolveCoworkTranscriptPath>[0],
+): Pick<CoworkSessionRuntimeState, "cliSessionId" | "cwd" | "hostLoopMode" | "resolvedFolders"> {
+  const resolvedFolders =
+    "resolvedFolders" in session && Array.isArray(session.resolvedFolders) && session.resolvedFolders.length > 0
+      ? (session.resolvedFolders as CoworkSessionRuntimeState["resolvedFolders"])
+      : ((session as { userSelectedFolders?: string[] }).userSelectedFolders ?? []).map((display) => ({
+          display,
+          canonical: display,
+        })) as CoworkSessionRuntimeState["resolvedFolders"];
+  return {
+    cliSessionId: session.cliSessionId,
+    cwd: session.cwd ?? "",
+    hostLoopMode: session.hostLoopMode,
+    resolvedFolders,
   };
 }
 
@@ -105,7 +141,12 @@ function preservedUuids(
   return new Set<string>();
 }
 
-async function resolveTranscriptPath(configDir: string, session: CoworkSessionRuntimeState) {
+type CoworkTranscriptPathSession = Pick<
+  CoworkSessionRuntimeState,
+  "cliSessionId" | "cwd" | "hostLoopMode" | "resolvedFolders"
+>;
+
+async function resolveTranscriptPath(configDir: string, session: CoworkTranscriptPathSession) {
   const sessionId = session.cliSessionId;
   if (!sessionId || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) return null;
   const projectsDir = join(configDir, "projects");
@@ -123,7 +164,7 @@ async function resolveTranscriptPath(configDir: string, session: CoworkSessionRu
   return null;
 }
 
-async function preferredProjectDirectory(projectsDir: string, session: CoworkSessionRuntimeState) {
+async function preferredProjectDirectory(projectsDir: string, session: CoworkTranscriptPathSession) {
   const directory = transcriptDirectory(session);
   if (!directory) return null;
   const canonical = await realpath(directory).catch(() => directory);
@@ -131,7 +172,7 @@ async function preferredProjectDirectory(projectsDir: string, session: CoworkSes
   return key.length <= 200 ? join(projectsDir, key) : null;
 }
 
-function transcriptDirectory(session: CoworkSessionRuntimeState) {
+function transcriptDirectory(session: CoworkTranscriptPathSession) {
   if (!session.hostLoopMode) return session.cwd;
   return session.resolvedFolders[0]?.canonical ?? session.resolvedFolders[0]?.display;
 }

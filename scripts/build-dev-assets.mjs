@@ -24,5 +24,15 @@ function runNode(args, label) {
   });
 }
 
+/**
+ * Dev asset ladder (subset of full `npm run build`):
+ *   main → preload → residual secondary seed → product workers
+ * Full package also builds renderer-shell + copy runtime; omit those for speed.
+ * Product workers (directMcpHost / nodeHost / shell-path / transcript-search)
+ * must stay fresh so custom3p MCP / search match source edits.
+ */
 await runNode([path.join(root, "node_modules/vite/bin/vite.js"), "build", "--config", "vite.main.config.ts"], "build:main");
 await runNode([path.join(root, "scripts/build-preload.mjs")], "build:preload");
+// Residual secondary layout seed — does not overwrite product-owned workers.
+await runNode([path.join(root, "scripts/ensure-secondary-shell.mjs")], "ensure:secondary-shell");
+await runNode([path.join(root, "scripts/build-workers.mjs")], "build:workers");

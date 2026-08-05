@@ -681,6 +681,8 @@ it("updateSession title refuses auto when user already renamed", async () => {
 it("sendMessage toolStates + noteCuWindowMentions append official hints", async () => {
   const harness = createManagerHarness();
   const manager = createTestManager(harness, {
+    // Official YM() residual for noteCuWindowMentions — default false (SSA).
+    isComputerUseEnabled: () => true,
     resolveHostLoopMode: () => true,
   });
   const sessionId = await manager.start({
@@ -1856,6 +1858,8 @@ it("noteCuWindowMentions is assign-only with YM gate residual", async () => {
   const harness = createManagerHarness();
   const manager = createTestManager(harness, {
     createSessionId: () => "local_cu_note",
+    // Official YM() residual — default false; this case needs CU on.
+    isComputerUseEnabled: () => true,
     resolveHostLoopMode: () => true,
   });
   const sessionId = await manager.start({
@@ -3406,4 +3410,61 @@ it("Ds residual: isHiddenSession follows iv sessionType gate", async () => {
   });
   await Promise.resolve();
   expect(hiddenShown).toEqual([]);
+});
+
+it("teach residual: activate / pending step / resolve / clear on stop (real manager)", async () => {
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    createSessionId: () => "local_teach_1",
+    resolveHostLoopMode: () => true,
+  });
+  const sessionId = await manager.start({
+    message: "teach-me",
+    messageUuid: "teach-msg-1",
+  });
+  // Wait until query attaches → lifecycle running.
+  await vi.waitFor(() => expect(harness.factoryInputs).toHaveLength(1));
+  await nextUserMessage(harness.factoryInputs[0]!.prompt);
+
+  const runtime = (
+    manager as unknown as {
+      repository: { get: (id: string) => { lifecycleState: string; teachModeActive?: boolean } | undefined };
+    }
+  ).repository.get(sessionId)!;
+  expect(runtime.lifecycleState).toBe("running");
+
+  manager.activateTeachMode(sessionId);
+  expect(runtime.teachModeActive).toBe(true);
+  expect(
+    harness.events.some(
+      (e) => e.type === "teachModeChanged" && (e as { active?: boolean }).active === true,
+    ),
+  ).toBe(true);
+
+  const stepPromise = manager.requestTeachStep(sessionId, {
+    explanation: "Click File",
+    nextPreview: "Open",
+    anchorLogical: { x: 1, y: 2 },
+  });
+  expect(
+    harness.events.some((e) => e.type === "teachStepRequested"),
+  ).toBe(true);
+  manager.resolveTeachStep({ action: "next" });
+  await expect(stepPromise).resolves.toEqual({ action: "next" });
+
+  // Park another step then stop → residual exit clear.
+  const pending = manager.requestTeachStep(sessionId, {
+    explanation: "Done?",
+    nextPreview: "Exit",
+  });
+  await manager.stop(sessionId);
+  await expect(pending).resolves.toEqual({ action: "exit" });
+  expect(runtime.teachModeActive).toBe(false);
+  expect(
+    harness.events.some(
+      (e) =>
+        e.type === "teachModeChanged" &&
+        (e as { active?: boolean }).active === false,
+    ),
+  ).toBe(true);
 });

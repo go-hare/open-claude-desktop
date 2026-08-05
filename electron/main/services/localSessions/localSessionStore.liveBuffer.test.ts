@@ -306,3 +306,45 @@ it("getTranscript: session without cliSessionId falls back to legacy persisted c
   const events = await store.getTranscript(session.id);
   expect(events.length).toBeGreaterThan(0);
 });
+
+it("u_e unread residual: setRunning(false) marks hasCompleted+isUnread when not focused", () => {
+  const { store } = makeStore();
+  const session = store.start({ prompt: "hello", cwd: "/tmp/proj" });
+  store.setRunning(session.id, true, { kind: "claude-cli" });
+  const settled = store.setRunning(session.id, false, { kind: "claude-cli" });
+  expect(settled?.hasCompleted).toBe(true);
+  expect(settled?.isUnread).toBe(true);
+  // Focus clears unread (ready glyph off) but keeps hasCompleted.
+  const focused = store.setFocusedSession(session.id);
+  expect(focused?.isUnread).toBe(false);
+  expect(focused?.hasCompleted).toBe(true);
+});
+
+it("u_e unread residual: focused session settle does not mark isUnread", () => {
+  const { store } = makeStore();
+  const session = store.start({ prompt: "hello", cwd: "/tmp/proj" });
+  store.setFocusedSession(session.id);
+  store.setRunning(session.id, true, { kind: "claude-cli" });
+  const settled = store.setRunning(session.id, false, { kind: "claude-cli" });
+  expect(settled?.hasCompleted).toBe(true);
+  expect(settled?.isUnread).toBe(false);
+});
+
+it("u_e unread residual: refocus completed+read session is idempotent (no updatedAt climb)", () => {
+  const { store } = makeStore();
+  const session = store.start({ prompt: "hello", cwd: "/tmp/proj" });
+  store.setRunning(session.id, true, { kind: "claude-cli" });
+  store.setRunning(session.id, false, { kind: "claude-cli" });
+  const first = store.setFocusedSession(session.id);
+  expect(first?.isUnread).toBe(false);
+  expect(first?.hasCompleted).toBe(true);
+  const afterClear = store.getSession(session.id);
+  const tAfterClear = afterClear?.updatedAt;
+  // Second focus must not rewrite activity time (Recents order / session_updated spam).
+  const second = store.setFocusedSession(session.id);
+  expect(second?.isUnread).toBe(false);
+  expect(second?.hasCompleted).toBe(true);
+  expect(second?.updatedAt).toBe(tAfterClear);
+  const third = store.setFocusedSession(session.id);
+  expect(third?.updatedAt).toBe(tAfterClear);
+});

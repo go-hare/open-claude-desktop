@@ -443,6 +443,57 @@ it("clearCoworkSessionEphemeralsOnLeavingRunning wipes product CU ephemerals", (
   expect(s.pendingNotifications).toEqual(["keep"]);
 });
 
+it("clearCoworkSessionEphemeralsOnLeavingRunning unhides, restores clipboard, releases lock", async () => {
+  const unhideCalls: string[][] = [];
+  const released: string[] = [];
+  const written: string[] = [];
+  const s = session({
+    sessionId: "cu-sess-1",
+    cuHiddenDuringTurn: new Set(["com.apple.Notes", "com.tinyspeck.slackmacgap"]),
+    cuHiddenPendingNote: new Set(["com.apple.Notes"]),
+    cuClipboardStash: "stashed-text",
+    cuMentionedWindows: [{ title: "Notes", bundleId: "com.apple.Notes" }],
+  });
+  clearCoworkSessionEphemeralsOnLeavingRunning(s, {
+    chicagoAutoUnhide: true,
+    unhideApps: async (ids) => {
+      unhideCalls.push(ids);
+    },
+    releaseCuLock: (id) => {
+      released.push(id);
+    },
+    writeClipboard: (text) => {
+      written.push(text);
+    },
+  });
+  expect(unhideCalls).toEqual([
+    ["com.apple.Notes", "com.tinyspeck.slackmacgap"],
+  ]);
+  expect(written).toEqual(["stashed-text"]);
+  expect(released).toEqual(["cu-sess-1"]);
+  expect(s.cuHiddenDuringTurn).toBeUndefined();
+  expect(s.cuHiddenPendingNote).toBeUndefined();
+  expect(s.cuClipboardStash).toBeUndefined();
+  expect(s.cuMentionedWindows).toBeUndefined();
+});
+
+it("clearCoworkSessionEphemeralsOnLeavingRunning skips unhide when chicagoAutoUnhide false", () => {
+  const unhideCalls: string[][] = [];
+  const s = session({
+    sessionId: "cu-sess-2",
+    cuHiddenDuringTurn: new Set(["com.apple.Notes"]),
+  });
+  clearCoworkSessionEphemeralsOnLeavingRunning(s, {
+    chicagoAutoUnhide: false,
+    unhideApps: async (ids) => {
+      unhideCalls.push(ids);
+    },
+    releaseCuLock: () => undefined,
+  });
+  expect(unhideCalls).toEqual([]);
+  expect(s.cuHiddenDuringTurn).toBeUndefined();
+});
+
 it("accumulateCoworkCachedTotalTurnsOnStop counts user buffer and clears it", () => {
   const s = session({
     cachedTotalTurns: 2,

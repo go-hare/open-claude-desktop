@@ -23,6 +23,7 @@
   },
   "include": [
     "electron/**/*.ts",
+    "electron/**/*.d.ts",
     "shared/**/*.ts",
     "vite.*.config.ts"
   ],

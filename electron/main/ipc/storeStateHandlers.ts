@@ -4,6 +4,11 @@ import { custom3pBootstrapState } from "../services/custom3p/custom3pStatus";
 import { getSupportBundleState } from "../services/support/supportBundle";
 import type { IpcHandlerContext } from "./context";
 import { registerInterfaceHandlers, registerInterfaceSyncHandlers, type IpcHandler, type SyncIpcHandler } from "./registerIpc";
+import { getSessionsBridgeStatusState } from "../services/coworkSessions/sessionsBridgeResidual";
+import {
+  grandPrixStatusResidual,
+  simulatorAttachmentStateResidual,
+} from "./shellSoftTrueResidual";
 
 type StoreStateDefinition = {
   namespace: string;
@@ -58,7 +63,8 @@ export function registerStoreStateHandlers(context: IpcHandlerContext): void {
     namespace: "claude.simulator",
     iface: "Simulator",
     storeName: "attachment",
-    getState: () => ({ attached: false, device: null }),
+    // Official AmA[] residual (empty when no live sim session). Not {attached,device}.
+    getState: () => simulatorAttachmentStateResidual([]),
   });
   registerStoreState({
     namespace: "claude.officeAddin",
@@ -82,15 +88,9 @@ export function registerStoreStateHandlers(context: IpcHandlerContext): void {
     namespace: "claude.web",
     iface: "LocalAgentModeSessions",
     storeName: "sessionsBridgeStatus",
-    // Residual-honest: 3p has no Anthropic remote sessions bridge poller.
-    // Pref may exist for UI round-trip, but never soft-true "ready".
-    getState: () => ({
-      enabled: false,
-      status: "unavailable",
-      conflict: false,
-      dispatchAgentName: null,
-      reason: "sessions_bridge_unavailable",
-    }),
+    // Official yit/QcA: conflict + dispatchAgentName (+ optional agentName/remote fields).
+    // No invent status/reason/enabled fields.
+    getState: () => getSessionsBridgeStatusState(),
   });
   registerStoreState({
     namespace: "claude.web",
@@ -103,7 +103,9 @@ export function registerStoreStateHandlers(context: IpcHandlerContext): void {
     namespace: "claude.web",
     iface: "GrandPrix",
     storeName: "grandPrixStatus",
-    getState: () => ({ paired: false, status: "disconnected" }),
+    // Official getInitialGrandPrixStatusState → { paired: Tle() } / OFt Record.
+    // Never invent { paired:boolean, status:"connected"|"disconnected" }.
+    getState: () => grandPrixStatusResidual({}),
   });
   registerStoreState({
     namespace: "claude.web",

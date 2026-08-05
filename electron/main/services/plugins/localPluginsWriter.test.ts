@@ -252,6 +252,10 @@ describe("custom directory marketplace residual", () => {
       "https://github.com/example/market.git",
     );
     expect(remote.kind).toBe("unsupported");
+    if (remote.kind === "unsupported") {
+      // Official mQ + REMOTE_HOST_UNSUPPORTED residual (no invent clone success).
+      expect(remote.error).toBe("MARKETPLACE_ERROR:REMOTE_HOST_UNSUPPORTED");
+    }
   });
 
   it("does not invent remote marketplace install", () => {

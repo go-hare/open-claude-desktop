@@ -6,6 +6,9 @@
  * Mount host-loop strings use U+2014 em dash (exact asar bytes).
  */
 
+import { clipboard } from "electron";
+import { releaseComputerUseLock } from "../coworkRuntime/computerUseLock";
+import { unhideComputerUseApps } from "../coworkRuntime/computerUseUnhide";
 import type { CoworkSessionRuntimeState } from "./coworkSessionTypes";
 
 /** Official ft("2979038612") gate — product injects; default prefer notifications. */
@@ -253,22 +256,77 @@ export function appendCoworkPreUserMessageHints(
 }
 
 /**
- * Official leavingRunning CU ephemerals (product-owned subset):
+ * Official leavingRunning CU ephemerals (product-owned Mac residual):
  *   A.cuMentionedWindows = void 0
  *   A.widgetToolStates = void 0
  *   A.cicOnceApproved = void 0 (finishTurnCleanup / leavingRunning)
- * Residual not invented: cuHiddenDuringTurn/auto-unhide, cuHiddenPendingNote,
- * cuClipboardStash restore, teachMode exit, full Ds NotificationService.
+ *   cuHiddenDuringTurn → P_A unhide when chicagoAutoUnhide; then void
+ *   cuHiddenPendingNote = void 0
+ *   cuClipboardStash restore then void
+ *   release CU lock for this session
+ *
+ * teachMode exit is owned by manager.clearTeachModeOnLeavingRunning /
+ * runtime onClearTeachMode (not this helper) so pendingTeachStep can resolve.
  */
 export function clearCoworkSessionEphemeralsOnLeavingRunning(
   session: Pick<
     CoworkSessionRuntimeState,
     | "_turnInterruptRequested"
     | "cicOnceApproved"
+    | "cuClipboardStash"
+    | "cuHiddenDuringTurn"
+    | "cuHiddenPendingNote"
     | "cuMentionedWindows"
+    | "sessionId"
     | "widgetToolStates"
   >,
+  options?: {
+    /** Official gi("chicagoAutoUnhide") — default true matches SSA. */
+    chicagoAutoUnhide?: boolean;
+    /** Official P_A — inject for tests; default Darwin unhideComputerUseApps. */
+    unhideApps?: (bundleIds: string[]) => Promise<void>;
+    /** Official vc.release — inject for tests. */
+    releaseCuLock?: (sessionId: string) => void;
+    /** Official clipboard restore — inject for tests; default electron.clipboard.writeText. */
+    writeClipboard?: (text: string) => void;
+  },
 ): void {
+  // Official: c=A.cuHiddenDuringTurn; c&&c.size>0&&(gi("chicagoAutoUnhide")&&P_A([...c]))
+  const hidden = session.cuHiddenDuringTurn;
+  if (hidden && hidden.size > 0) {
+    const autoUnhide = options?.chicagoAutoUnhide !== false;
+    if (autoUnhide) {
+      const unhide = options?.unhideApps ?? unhideComputerUseApps;
+      void unhide([...hidden]).catch((error) => {
+        console.warn(
+          "[computer-use] auto-unhide on leavingRunning failed",
+          error,
+        );
+      });
+    }
+    session.cuHiddenDuringTurn = undefined;
+  }
+  session.cuHiddenPendingNote = undefined;
+
+  // Official: restore cuClipboardStash then void
+  const stash = session.cuClipboardStash;
+  session.cuClipboardStash = undefined;
+  if (stash !== undefined) {
+    try {
+      const write = options?.writeClipboard ?? ((text: string) => clipboard.writeText(text));
+      write(stash);
+    } catch (error) {
+      console.warn(
+        "[computer-use] clipboard stash restore on leavingRunning failed",
+        error,
+      );
+    }
+  }
+
+  // Official vc: release lock when session leaves running.
+  const release = options?.releaseCuLock ?? releaseComputerUseLock;
+  release(session.sessionId);
+
   session.cuMentionedWindows = undefined;
   session.widgetToolStates = undefined;
   // Official finishTurnCleanup / leavingRunning: cicOnceApproved=void 0

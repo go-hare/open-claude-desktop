@@ -65,12 +65,13 @@ export function resolvePackagedTargets(opts = {}) {
         : preferred;
   const resourcesRoot = path.join(packagedRoot, "Contents/Resources");
 
+  // Own product shell = forge Electron (Claudex). Residual MacOS/Claude overlay is gone.
   return {
     platform: "darwin",
     arch,
     packagedRoot,
-    binary: path.join(packagedRoot, "Contents/MacOS/Claude"),
-    binaryFallback: path.join(packagedRoot, "Contents/MacOS/Claudex"),
+    binary: path.join(packagedRoot, "Contents/MacOS/Claudex"),
+    binaryFallback: path.join(packagedRoot, "Contents/MacOS/Claude"),
     resourcesRoot,
     productWebIndex: path.join(resourcesRoot, "product-web/index.html"),
     ionIndex: path.join(resourcesRoot, "ion-dist/index.html"),

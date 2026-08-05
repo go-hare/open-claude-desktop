@@ -6,6 +6,7 @@ import { createFileSystemHandlers } from "./fileSystemHandlers";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
 import { doAuthInBrowserResidual } from "../services/auth/doAuthInBrowserResidual";
 import { applyRecentChatsFromWeb } from "../services/settings/quickEntryNative";
+import { cancelPendingRestart as residualCancelPendingRestart } from "../services/updater/pendingRestart";
 
 const SEARCH_FILE_LIMIT = 500;
 const SEARCH_TEXT_BYTES = 512 * 1024;
@@ -189,7 +190,10 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
         app.exit(0);
         return { scheduled: false, restarted: true };
       },
-      cancelPendingRestart: async () => true,
+      /** Official sb residual — clear deferred restart canceler N2. */
+      cancelPendingRestart: async () => {
+        residualCancelPendingRestart();
+      },
       getRunningLocalSessionCount: async () => context.localSessions.getAll().length + context.localAgentModeSessions.getAll().length,
     },
     DesktopNotifications: {
@@ -238,7 +242,12 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
     FileSystem: fileSystemHandlers,
     Resources: {
       fetchMentionOptions: async (_event, query) => fetchMentionOptions(context, focusedCwd, query),
-      handleMentionSelect: async () => true,
+      /**
+       * Official uir residual:
+       *   file-… → { chipText: fileName | basename(path) }
+       *   window mention → chipText + optional cuAppHint (no invent screenshot path).
+       */
+      handleMentionSelect: async (_event, optionId) => handleMentionSelect(optionId),
       listProjectFiles: async () => (await projectFiles(context, focusedCwd, 500)).map((file) => file.path),
       searchFileContents: async (_event, query) => searchFileContents(context, focusedCwd, query),
       setFocusedCwd: async (_event, cwd) => {
@@ -250,4 +259,24 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
       },
     },
   });
+}
+
+/**
+ * Residual uir (handleMentionSelect).
+ * File mentions only (product has no window-metadata bag / desktop capture bridge).
+ */
+function handleMentionSelect(optionId: unknown): {
+  chipText: string;
+  additionalText?: string;
+} {
+  const id = typeof optionId === "string" ? optionId : "";
+  if (id.startsWith("file-")) {
+    const absPath = id.slice(5);
+    return { chipText: path.basename(absPath) || absPath || id };
+  }
+  // Window / unknown mentions without residual metadata bag.
+  return {
+    chipText: id || "mention",
+    additionalText: "\n\n(Window no longer available)",
+  };
 }

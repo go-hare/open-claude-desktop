@@ -11,6 +11,36 @@ const extraResource = [];
 const electronVersion = require("electron/package.json").version;
 const packagePlatform = process.env.CLAUDE_PACKAGE_PLATFORM || process.platform;
 const packageArch = process.env.CLAUDE_PACKAGE_ARCH || process.arch;
+
+// Residual document / URL types (official Info.plist — product identity stays Claudex).
+const residualDocumentTypes = [
+  {
+    CFBundleTypeName: "Desktop Extension",
+    CFBundleTypeExtensions: ["dxt", "mcpb"],
+    CFBundleTypeRole: "Viewer",
+  },
+  {
+    CFBundleTypeName: "Skill File",
+    CFBundleTypeExtensions: ["skill"],
+    CFBundleTypeRole: "Viewer",
+  },
+  {
+    CFBundleTypeName: "Folder",
+    CFBundleTypeRole: "Editor",
+    LSItemContentTypes: ["public.folder"],
+  },
+  {
+    CFBundleTypeName: "All Files",
+    CFBundleTypeRole: "Viewer",
+    LSItemContentTypes: ["public.data"],
+  },
+];
+const residualUrlTypes = [
+  {
+    CFBundleURLName: "Claude",
+    CFBundleURLSchemes: ["claude"],
+  },
+];
 const electronZipName = `electron-v${electronVersion}-${packagePlatform}-${packageArch}.zip`;
 const electronZipDir = (() => {
   const cacheRoot = path.join(root, ".electron-cache");
@@ -96,25 +126,66 @@ if (fs.existsSync(swiftLprojRoot)) {
   }
 }
 
+// Cowork dual-exec residual images (host-loop default does not require them at runtime).
+for (const smol of ["smol-bin.arm64.img", "smol-bin.x64.img"]) {
+  const smolPath = path.join(resourcesDir, smol);
+  if (fs.existsSync(smolPath)) extraResource.push(smolPath);
+}
+
+// Official Resources/*.json locale bags (not Swift .lproj).
+// Flat files under Resources/ (not a locale-json/ subfolder).
+const localeJsonRoot = path.join(resourcesDir, "locale-json");
+if (fs.existsSync(localeJsonRoot)) {
+  for (const name of fs.readdirSync(localeJsonRoot)) {
+    if (!name.endsWith(".json")) continue;
+    extraResource.push(path.join(localeJsonRoot, name));
+  }
+}
+
+// Product Helpers binaries (chrome-native-host / disclaimer).
+// Forge places directory at Resources/Helpers; align lifts to Contents/Helpers.
+// Source is OUR resources/Helpers only — never original-claude.app at package time.
+const helpersRoot = path.join(resourcesDir, "Helpers");
+if (fs.existsSync(path.join(helpersRoot, "chrome-native-host"))) {
+  extraResource.push(helpersRoot);
+}
+
 module.exports = {
   packagerConfig: {
     name: "Claudex",
     executableName: "Claudex",
     appBundleId: "com.local.claudex.desktop",
-    appCategoryType: "public.app-category.productivity",
+    // Official residual category.
+    appCategoryType: "public.app-category.developer-tools",
+    // Official residual deep link.
+    protocols: [
+      {
+        name: "Claude",
+        schemes: ["claude"],
+      },
+    ],
     // Official Claude Desktop Info.plist residual for voice dictation (Swift
     // LiveSpeechRecognizer + ClaudeAiSpeechSession). Without speech key, macOS
     // refuses SFSpeech authorization and dictation never opens the mic.
-    // CFBundleIconFile/Name: official residual electron.icns + name "Claude"
-    // (packager also sets icon from resources/electron via packagerConfig.icon).
+    // Document types / URL types / ATS match official residual (product Bundle ID separate).
     extendInfo: {
       CFBundleIconFile: "electron.icns",
       CFBundleIconName: "Claude",
+      CFBundleDocumentTypes: residualDocumentTypes,
+      CFBundleURLTypes: residualUrlTypes,
       NSMicrophoneUsageDescription:
         "Claude needs access to your microphone for voice dictation.",
       NSSpeechRecognitionUsageDescription:
         "Claude needs access to speech recognition for voice dictation.",
       NSAudioCaptureUsageDescription: "This app needs access to audio capture",
+      NSAppTransportSecurity: {
+        NSAllowsArbitraryLoads: false,
+        NSAllowsLocalNetworking: true,
+      },
+      LSEnvironment: {
+        MallocNanoZone: "0",
+      },
+      NSSupportsAutomaticGraphicsSwitching: true,
     },
     asar: true,
     ...(electronZipDir ? { electronZipDir } : {}),

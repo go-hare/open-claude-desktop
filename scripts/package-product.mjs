@@ -1,25 +1,29 @@
 /**
  * Canonical product package pipeline (darwin + win32).
  *
+ * Shell model (same as open-claude-web): we WRITE the product shell.
+ *   - electron-forge Electron runtime (Claudex binary / Helpers / Frameworks)
+ *   - product main/preload in app.asar (our code, residual-aligned behavior)
+ *   - NO wholesale official Claude.app MacOS/Frameworks/Helpers overlay
+ *
  * Two load routes (do not collapse):
  *   package → app://localhost → packaged Resources dual-root:
  *             product-web (primary SPA) + ion-dist (residual setup SPA)
  *   test/dev → http://localhost:5176                        (vite open-claude-web)
  *
  * Steps:
- *   1) build          — product main + preloads, then official shell copy + residual
- *                       audit (audit:original requires residual ion-dist + official .vite)
- *   2) restore main   — rebuild product main AFTER copy:original-shell so packaged
- *                       asar does not ship official 1p → https://claude.ai loader
+ *   1) build          — product TS main + preloads + project secondary shell assets
+ *                       (no copy:original-shell; no external residual mirror)
+ *   2) restore main   — re-run build:main (safety if anything touched .vite)
  *   3) product-web    — vite-build open-claude-web → resources/product-web
  *   4) electron-zip   — clean polluted dist fonts symlink if needed
- *   5) forge package  — host-native out/ tree
- *   6) align:bundle   — keep dual-root (product-web + residual ion-dist; mac residual overlay)
+ *   5) forge package  — host-native out/ tree (own Electron shell)
+ *   6) align:bundle   — finalize Helpers path + asar runtime inject (project resources only)
  *   7) audit:bundle   — product identity / dual-root / layout checks
  *   8) post-checks    — product-web + residual ion-dist + product main asar fingerprint
  *
  * Host-native only:
- *   macOS  → out/Claudex-darwin-<arch>/Claudex.app  (Contents/MacOS/Claude)
+ *   macOS  → out/Claudex-darwin-<arch>/Claudex.app  (Contents/MacOS/Claudex)
  *   Windows → out/Claudex-win32-<arch>/Claudex.exe
  *
  * Usage: npm run package
@@ -41,6 +45,40 @@ const env = {
   ...process.env,
   electron_config_cache: path.join(root, ".electron-cache"),
 };
+
+/**
+ * Package only packs OUR project resources/ tree (normal Electron).
+ * Does NOT read original-claude.app / Downloads at package time.
+ * One-time asset import: npm run sync:residual / sync:helpers / copy:original-runtime.
+ */
+function preflightPackageResources() {
+  const required = [
+    ["resources/ion-dist/index.html", "npm run sync:ion-dist"],
+    [
+      "resources/original-runtime-node_modules/node_modules/node-pty/package.json",
+      "npm run copy:original-runtime",
+    ],
+    ["resources/Helpers/chrome-native-host", "npm run sync:helpers"],
+  ];
+  const missing = [];
+  for (const [rel, fix] of required) {
+    if (!fs.existsSync(path.join(root, rel))) {
+      missing.push(`  missing ${rel} — fix once: ${fix}`);
+    }
+  }
+  if (missing.length) {
+    throw new Error(
+      "Project resources incomplete (package does not pull from official residual .app):\n" +
+        missing.join("\n"),
+    );
+  }
+  console.log(
+    `\n[package] normal project pack\n` +
+      `          shell: forge Electron (Claudex)\n` +
+      `          assets: already under resources/ (ion-dist, Helpers, runtime, …)\n` +
+      `          package does NOT copy from original-claude.app / Downloads\n`,
+  );
+}
 
 function run(label, command, args) {
   console.log(`\n==> ${label}\n    ${command} ${args.join(" ")}\n`);
@@ -89,6 +127,9 @@ function readCodesignIdentifier(appPath) {
 }
 
 const productWebIndex = path.join(root, "resources/product-web/index.html");
+
+// Fail early: dual-root SPA + runtime natives in resources/ (own shell; no official .app).
+preflightPackageResources();
 
 // 1–2 residual-aligned build, then product main wins for package payload
 npmRun("build");

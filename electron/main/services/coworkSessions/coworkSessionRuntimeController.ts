@@ -8,11 +8,31 @@ import {
   type CoworkDirectoryMountResult,
   type CoworkDirectoryPickResult,
 } from "../coworkRuntime/coworkDirectoryMcpServer";
-import { withCoworkAlwaysLoadMcpServers } from "../coworkRuntime/coworkSkillsPluginsMcpServer";
+import { withCoworkAlwaysLoadMcpServersSync } from "../coworkRuntime/coworkSkillsPluginsMcpServer";
 import {
   createCoworkComputerUsePermissionHandler,
   type CoworkComputerUseMcpOptions,
 } from "../coworkRuntime/coworkComputerUseMcpServer";
+import {
+  acquireComputerUseLock,
+  checkComputerUseLock,
+} from "../coworkRuntime/computerUseLock";
+import {
+  getComputerUseCoordinateMode,
+  getComputerUseSubGates,
+  getComputerUseTeachModeEnabled,
+} from "../coworkRuntime/computerUseChicagoConfig";
+import {
+  getCachedInstalledAppNamesForTools,
+  peekCachedInstalledAppNamesForTools,
+  enumerateInstalledAppNamesForTools,
+} from "../coworkRuntime/computerUseAppEnumeration";
+import { createComputerUseHostAdapter } from "../coworkRuntime/computerUseDarwinExecutor";
+import { writeScreenshotToOutputsDir } from "../coworkRuntime/computerUseScreenshotPersist";
+import type {
+  ComputerUseTeachStepPayload,
+  ComputerUseTeachStepResult,
+} from "../coworkRuntime/computerUseTeachOverlay";
 import { getComputerUseTccState } from "../tcc/computerUseTcc";
 import {
   resolveCoworkWorkspaceAllowedDomains,
@@ -178,6 +198,43 @@ type CoworkSessionRuntimeControllerOptions = {
    * When unset, computer-use MCP is not injected (honest residual).
    */
   isChicagoEnabled?: () => boolean;
+  /**
+   * Official gi("chicagoAutoUnhide") for leavingRunning P_A + host adapter.
+   * Default true when unset (matches SSA).
+   */
+  getChicagoAutoUnhide?: () => boolean;
+  /**
+   * Official IFi getUserDeniedBundleIds → gi("chicagoUserDeniedBundleIds").
+   * Default [] when unset.
+   */
+  getUserDeniedBundleIds?: () => readonly string[];
+  /**
+   * Official IFi onTeachModeActivated residual.
+   */
+  onTeachModeActivated?: (sessionId: string) => void;
+  /**
+   * Official IFi onTeachStep residual — blocking overlay next/exit.
+   */
+  onTeachStep?: (
+    sessionId: string,
+    payload: ComputerUseTeachStepPayload,
+  ) => Promise<ComputerUseTeachStepResult>;
+  /**
+   * Official IFi onTeachWorking residual.
+   */
+  onTeachWorking?: (sessionId: string) => void;
+  /**
+   * Official IFi getTeachModeActive residual.
+   */
+  getTeachModeActive?: (sessionId: string) => boolean;
+  /**
+   * Official cuSelectedDisplayChanged emit for teach overlay.
+   */
+  onCuSelectedDisplayChanged?: (sessionId: string, displayId: number) => void;
+  /**
+   * Official finishTurnCleanup teach exit residual.
+   */
+  onClearTeachMode?: (sessionId: string) => void;
   queryFactory: CoworkQueryFactory;
   requestPermission: (
     session: CoworkSessionRuntimeState,
@@ -207,6 +264,20 @@ export class CoworkSessionRuntimeController {
   private readonly onQueryCompleted?: (sessionId: string) => void;
   private readonly buildCicCanUseTool?: CoworkSessionRuntimeControllerOptions["buildCicCanUseTool"];
   private readonly isChicagoEnabled?: () => boolean;
+  private readonly getChicagoAutoUnhide: () => boolean;
+  private readonly getUserDeniedBundleIds: () => readonly string[];
+  private readonly onTeachModeActivated?: (sessionId: string) => void;
+  private readonly onTeachStep?: (
+    sessionId: string,
+    payload: ComputerUseTeachStepPayload,
+  ) => Promise<ComputerUseTeachStepResult>;
+  private readonly onTeachWorking?: (sessionId: string) => void;
+  private readonly getTeachModeActive?: (sessionId: string) => boolean;
+  private readonly onCuSelectedDisplayChanged?: (
+    sessionId: string,
+    displayId: number,
+  ) => void;
+  private readonly onClearTeachMode?: (sessionId: string) => void;
   private readonly pickDirectory?: CoworkSessionRuntimeControllerOptions["pickDirectory"];
   private readonly queryFactory: CoworkQueryFactory;
   private readonly recordDetectedFile?: CoworkSessionRuntimeControllerOptions["recordDetectedFile"];
@@ -245,6 +316,18 @@ export class CoworkSessionRuntimeController {
     this.onBecameIdle = options.onBecameIdle;
     this.buildCicCanUseTool = options.buildCicCanUseTool;
     this.isChicagoEnabled = options.isChicagoEnabled;
+    // Official gi("chicagoAutoUnhide") — SSA default true.
+    this.getChicagoAutoUnhide = options.getChicagoAutoUnhide ?? (() => true);
+    // Official gi("chicagoUserDeniedBundleIds") — SSA default [].
+    this.getUserDeniedBundleIds =
+      options.getUserDeniedBundleIds ?? (() => []);
+    // Official IFi onTeach* residual.
+    this.onTeachModeActivated = options.onTeachModeActivated;
+    this.onTeachStep = options.onTeachStep;
+    this.onTeachWorking = options.onTeachWorking;
+    this.getTeachModeActive = options.getTeachModeActive;
+    this.onCuSelectedDisplayChanged = options.onCuSelectedDisplayChanged;
+    this.onClearTeachMode = options.onClearTeachMode;
     this.onMarkTaskComplete = options.onMarkTaskComplete;
     this.onQueryCompleted = options.onQueryCompleted;
     this.pickDirectory = options.pickDirectory;
@@ -272,7 +355,11 @@ export class CoworkSessionRuntimeController {
     const queue = new CoworkAsyncInputQueue<CoworkSdkUserMessage>();
     this.emitInitialization(session.sessionId);
     try {
-      const query = await this.createQuery(session, queue);
+      // When createQuery stays fully sync (no aFi / mkdir / dual-exec wait),
+      // attachQuery runs in the same turn as fire-and-forget start — matches
+      // pre-gFi residual and manager harness expectations.
+      const built = this.createQuery(session, queue);
+      const query = built instanceof Promise ? await built : built;
       if (session.lifecycleState !== "initializing") return query.close();
       this.attachQuery(session, query, queue);
       queue.enqueue(userMessage);
@@ -323,14 +410,44 @@ export class CoworkSessionRuntimeController {
     });
   }
 
-  private async createQuery(
+  /**
+   * Build SDK query. Returns a plain query when no await is required (tests /
+   * non-chicago cold start). Returns a Promise only when aFi race or mkdir
+   * residual needs the event loop (official gFi await aFi).
+   */
+  private createQuery(
     session: CoworkSessionRuntimeState,
     queue: CoworkAsyncInputQueue<CoworkSdkUserMessage>,
-  ): Promise<CoworkRuntimeQuery> {
+  ): CoworkRuntimeQuery | Promise<CoworkRuntimeQuery> {
     const rewindTo = session.pendingRewindTo;
     const resume = rewindTo === undefined ? session.cliSessionId : rewindTo ? session.cliSessionId : undefined;
     session.pendingRewindTo = undefined;
     this.save(session);
+
+    const chicagoOn = this.isChicagoEnabled?.() === true;
+    const needsAfiAwait =
+      chicagoOn &&
+      process.platform === "darwin" &&
+      !peekCachedInstalledAppNamesForTools();
+    const autoMemoryDirHint = this.getAutoMemoryDir?.(session) ?? null;
+    const sessionStorageDirHint = this.getSessionStorageDir?.(session) ?? null;
+    const needsMkdir =
+      Boolean(autoMemoryDirHint) || Boolean(sessionStorageDirHint);
+    // Dual-exec still builds mounts sync (VM start is fire-and-forget).
+    const needsAsync = needsAfiAwait || needsMkdir;
+
+    if (needsAsync) {
+      return this.createQueryAsync(session, queue, resume, rewindTo);
+    }
+    return this.createQuerySync(session, queue, resume, rewindTo, null, null, null, null);
+  }
+
+  private async createQueryAsync(
+    session: CoworkSessionRuntimeState,
+    queue: CoworkAsyncInputQueue<CoworkSdkUserMessage>,
+    resume: string | undefined,
+    rewindTo: string | undefined,
+  ): Promise<CoworkRuntimeQuery> {
     // Official UXe: autoMemoryHostDir = memoryEnabled gate ? getAutoMemoryDir : null
     // autoMemoryReadOnly = sessionType === radar (Nu)
     // mkdir failure → degrade to null (official: T=null after warn).
@@ -359,6 +476,63 @@ export class CoworkSessionRuntimeController {
       } catch {
         /* keep paths even if mkdir fails — policy still references them */
       }
+    }
+
+    // Official gFi: YM()?await aFi():OR??hMA(void0) — only when chicago+darwin cold.
+    let installedAppNames = peekCachedInstalledAppNamesForTools();
+    if (
+      this.isChicagoEnabled?.() === true &&
+      process.platform === "darwin" &&
+      !installedAppNames
+    ) {
+      installedAppNames = await getCachedInstalledAppNamesForTools(async () => {
+        const adapter = createComputerUseHostAdapter({
+          isChicagoEnabled: this.isChicagoEnabled!,
+          getAutoUnhideEnabled: () => this.getChicagoAutoUnhide(),
+          getSubGates: getComputerUseSubGates,
+        });
+        if (!adapter?.executor?.listInstalledApps) return undefined;
+        return enumerateInstalledAppNamesForTools({
+          listInstalledApps: () => adapter.executor.listInstalledApps(),
+          listRunningApps: adapter.executor.listRunningApps
+            ? () => adapter.executor.listRunningApps()
+            : undefined,
+        });
+      }).catch(() => undefined);
+    }
+
+    return this.createQuerySync(
+      session,
+      queue,
+      resume,
+      rewindTo,
+      autoMemoryDir,
+      hostOutputsDir,
+      hostUploadsDir,
+      hostClaudeConfigDir,
+      installedAppNames,
+    );
+  }
+
+  private createQuerySync(
+    session: CoworkSessionRuntimeState,
+    queue: CoworkAsyncInputQueue<CoworkSdkUserMessage>,
+    resume: string | undefined,
+    rewindTo: string | undefined,
+    autoMemoryDir: string | null,
+    hostOutputsDir: string | null,
+    hostUploadsDir: string | null,
+    hostClaudeConfigDir: string | null,
+    installedAppNames?: string[] | null,
+  ): CoworkRuntimeQuery {
+    if (autoMemoryDir === null && this.getAutoMemoryDir) {
+      autoMemoryDir = this.getAutoMemoryDir(session) ?? null;
+    }
+    const sessionStorageDir = this.getSessionStorageDir?.(session) ?? null;
+    if (sessionStorageDir) {
+      hostOutputsDir ??= path.join(sessionStorageDir, "outputs");
+      hostUploadsDir ??= path.join(sessionStorageDir, "uploads");
+      hostClaudeConfigDir ??= path.join(sessionStorageDir, ".claude");
     }
     // Official session.readOnlyPluginPaths (UXe: Ke.readOnlyPluginPaths=Ve).
     // Fill from installed_plugins.json / remote plugin dirs when session has none yet.
@@ -464,14 +638,19 @@ export class CoworkSessionRuntimeController {
       // Path context wires LocalMcp XL/DeA staging (createSdkServer).
       // Official UXe host-loop also injects workspace MCP (x1i: bash + web_fetch).
       // Official WA.cowork = dXe({ mountFolder, getSessionStorageDir, ... }).
-      // Official uoA()&&t.push(await gFi(e)) computer-use MCP residual.
+      // Official uoA()&&t.push(await gFi(e)) computer-use MCP residual —
+      // aFi is awaited in createQueryAsync before this sync build; here we only
+      // pass peeked/resolved installedAppNames into gFi options (no invent).
       mcpServers: withCoworkDirectoryMcpServer(
         withCoworkWorkspaceMcpServer(
-          withCoworkAlwaysLoadMcpServers(
+          withCoworkAlwaysLoadMcpServersSync(
             session.sessionId,
             session.mcpServers as Record<string, unknown> | undefined,
             () => this.buildPathContext(session),
-            this.buildComputerUseMcpOptions(session),
+            this.buildComputerUseMcpOptions(
+              session,
+              installedAppNames ?? peekCachedInstalledAppNamesForTools() ?? undefined,
+            ),
           ),
           session.hostLoopMode
             ? (() => {
@@ -640,9 +819,13 @@ export class CoworkSessionRuntimeController {
    * Official gFi computer-use MCP options for always-load inject.
    * Requires isChicagoEnabled inject (gi("chicagoEnabled") residual).
    * Permission maps to computer:request_access via broker (createComputerUsePermissionHandler).
+   *
+   * Caller awaits aFi when needed and passes installedAppNames (peek or race).
+   * Timeout/fail → omit list (no invent).
    */
   private buildComputerUseMcpOptions(
     session: CoworkSessionRuntimeState,
+    installedAppNames?: string[],
   ): CoworkComputerUseMcpOptions | null {
     if (!this.isChicagoEnabled) return null;
     const onPermissionRequest = createCoworkComputerUsePermissionHandler({
@@ -664,14 +847,164 @@ export class CoworkSessionRuntimeController {
         };
       },
     });
+
     return {
       // Official IFi getAllowedApps → session.cuAllowedApps (empty until Oge grant).
-      getAllowedApps: () => session.cuAllowedApps ?? [],
+      getAllowedApps: () =>
+        (session.cuAllowedApps ?? []).map((g) => ({
+          bundleId: g.bundleId,
+          displayName: g.displayName,
+          grantedAt: g.grantedAt,
+          // Vendor AppGrant tier; IXi schema omits — default full when absent.
+          tier: (g as { tier?: "read" | "click" | "full" }).tier,
+        })),
+      // Official IFi getGrantFlags → session.cuGrantFlags ?? Jp all-false.
+      getGrantFlags: () =>
+        session.cuGrantFlags
+          ? {
+              clipboardRead: session.cuGrantFlags.clipboardRead === true,
+              clipboardWrite: session.cuGrantFlags.clipboardWrite === true,
+              systemKeyCombos: session.cuGrantFlags.systemKeyCombos === true,
+            }
+          : {
+              clipboardRead: false,
+              clipboardWrite: false,
+              systemKeyCombos: false,
+            },
+      // Official IFi getUserDeniedBundleIds → gi("chicagoUserDeniedBundleIds").
+      getUserDeniedBundleIds: () => [...this.getUserDeniedBundleIds()],
+      // Official $5 / oq / pZe residual for host adapter + tool schema.
+      getSubGates: () => getComputerUseSubGates(),
+      coordinateMode: getComputerUseCoordinateMode(),
+      teachModeEnabled: getComputerUseTeachModeEnabled(),
+      // Official await aFi result (or cache peek / undefined on timeout).
+      installedAppNames,
+      // Official h9e persistScreenshotForDispatch → session outputsDir.
+      persistScreenshotForDispatch: async (data, mimeType) => {
+        const outputs =
+          this.getHostOutputsDir?.(session) ??
+          (() => {
+            const storage = this.getSessionStorageDir?.(session);
+            return storage ? path.join(storage, "outputs") : null;
+          })();
+        if (!outputs) return undefined;
+        return writeScreenshotToOutputsDir(outputs, data, mimeType);
+      },
+      // Official ddi onAllowedAppsChanged → onCuPermissionUpdated residual.
+      onAllowedAppsChanged: (apps, flags) => {
+        session.cuAllowedApps = apps.map((g) => ({
+          bundleId: g.bundleId,
+          displayName: g.displayName,
+          grantedAt: g.grantedAt,
+          tier: g.tier,
+        })) as CoworkSessionRuntimeState["cuAllowedApps"];
+        session.cuGrantFlags = {
+          clipboardRead: flags.clipboardRead === true,
+          clipboardWrite: flags.clipboardWrite === true,
+          systemKeyCombos: flags.systemKeyCombos === true,
+        };
+        this.save(session);
+      },
+      // Official IFi display / screenshot dims residual.
+      getSelectedDisplayId: () => session.cuSelectedDisplayId,
+      getDisplayPinnedByModel: () => session.cuDisplayPinnedByModel === true,
+      getDisplayResolvedForApps: () => session.cuDisplayResolvedForApps,
+      getLastScreenshotDims: () =>
+        session.cuLastScreenshotDims
+          ? {
+              width: session.cuLastScreenshotDims.width,
+              height: session.cuLastScreenshotDims.height,
+              displayWidth: session.cuLastScreenshotDims.displayWidth,
+              displayHeight: session.cuLastScreenshotDims.displayHeight,
+              displayId: session.cuLastScreenshotDims.displayId ?? 0,
+              originX: session.cuLastScreenshotDims.originX ?? 0,
+              originY: session.cuLastScreenshotDims.originY ?? 0,
+            }
+          : undefined,
+      onScreenshotCaptured: (dims) => {
+        session.cuLastScreenshotDims = {
+          width: dims.width,
+          height: dims.height,
+          displayWidth: dims.displayWidth,
+          displayHeight: dims.displayHeight,
+          displayId: dims.displayId,
+          originX: dims.originX,
+          originY: dims.originY,
+        };
+        this.save(session);
+      },
+      onResolvedDisplayUpdated: (displayId) => {
+        session.cuSelectedDisplayId = displayId;
+        session.cuDisplayPinnedByModel = false;
+        session.cuDisplayResolvedForApps = undefined;
+        this.save(session);
+        this.onCuSelectedDisplayChanged?.(session.sessionId, displayId);
+      },
+      onDisplayPinned: (displayId) => {
+        if (typeof displayId === "number") {
+          session.cuSelectedDisplayId = displayId;
+          this.onCuSelectedDisplayChanged?.(session.sessionId, displayId);
+        }
+        session.cuDisplayPinnedByModel = true;
+        this.save(session);
+      },
+      onDisplayResolvedForApps: (sortedBundleIdsKey) => {
+        session.cuDisplayResolvedForApps = sortedBundleIdsKey;
+      },
+      // Official onAppsHidden → cuHiddenDuringTurn + cuHiddenPendingNote Sets.
+      onAppsHidden: (bundleIds) => {
+        session.cuHiddenDuringTurn ??= new Set();
+        session.cuHiddenPendingNote ??= new Set();
+        for (const id of bundleIds) {
+          session.cuHiddenDuringTurn.add(id);
+          session.cuHiddenPendingNote.add(id);
+        }
+      },
+      // Official getHiddenPendingNote / drainHiddenPendingNote residual.
+      getHiddenPendingNote: () =>
+        session.cuHiddenPendingNote
+          ? [...session.cuHiddenPendingNote]
+          : [],
+      drainHiddenPendingNote: () => {
+        session.cuHiddenPendingNote = undefined;
+      },
+      getClipboardStash: () => session.cuClipboardStash,
+      onClipboardStashChanged: (stash) => {
+        session.cuClipboardStash = stash;
+      },
+      // Official $ki/vc lock residual.
+      checkCuLock: async () => checkComputerUseLock(session.sessionId),
+      acquireCuLock: async () => {
+        await acquireComputerUseLock(session.sessionId);
+      },
+      isAborted: () => session._turnInterruptRequested === true,
+      // Official gi("chicagoAutoUnhide") → host adapter getAutoUnhideEnabled.
+      getAutoUnhideEnabled: () => this.getChicagoAutoUnhide(),
       getTccState: () => getComputerUseTccState(),
       isChicagoEnabled: this.isChicagoEnabled,
+      // Official IFi getTeachModeActive / onTeach* residual.
+      getTeachModeActive: () =>
+        this.getTeachModeActive?.(session.sessionId) === true ||
+        session.teachModeActive === true,
+      onTeachModeActivated: () => {
+        session.teachModeActive = true;
+        session.teachModeEnteredAt = this.now();
+        this.onTeachModeActivated?.(session.sessionId);
+      },
+      onTeachStep: async (req) => {
+        const payload = req as ComputerUseTeachStepPayload;
+        if (this.onTeachStep) {
+          return this.onTeachStep(session.sessionId, payload);
+        }
+        return { action: "exit" as const };
+      },
+      onTeachWorking: () => {
+        this.onTeachWorking?.(session.sessionId);
+      },
       onPermissionRequest: async (request, signal) => {
         const response = await onPermissionRequest(request, signal);
-        // Official ddi onAllowedAppsChanged → onCuPermissionUpdated residual.
+        // When bindSessionContext is active it merges via onAllowedAppsChanged;
+        // keep write-through here for permission-only path (no native adapter).
         if (response.granted.length > 0) {
           session.cuAllowedApps = response.granted.map((g) => ({
             bundleId: g.bundleId,
@@ -687,9 +1020,16 @@ export class CoworkSessionRuntimeController {
         }
         return response;
       },
-      // Teach uses same permission surface residual (computer:request_access UI path
-      // via teach toolName residual when product maps teach separately later).
+      // Official onComputerUseTeachPermissionRequest residual (app.asar index.js):
+      //   deny → {granted:[], denied: apps.map(...), flags:Jp, userConsented:false}
+      //   allow + updatedInput._cuGrants → {...grants, userConsented:true}
+      //   allow standard-prompt fallback → all resolved apps (do NOT skip
+      //     alreadyGranted; package needDialog is already !alreadyGranted)
+      //   Package gate: userConsented===true && (skipDialogGrants∪response.granted).length>0
+      //   Empty needDialog (all already granted) still needs userConsented:true so
+      //   skipDialogGrants alone can activate teach / onTeachModeActivated.
       onTeachPermissionRequest: async (request, signal) => {
+        const apps = Array.isArray(request.apps) ? request.apps : [];
         const resolution = await this.requestPermission(session, {
           input: request,
           sessionId: session.sessionId,
@@ -697,37 +1037,123 @@ export class CoworkSessionRuntimeController {
           toolName: "computer:request_teach_access",
         });
         if (resolution.behavior !== "allow") {
+          const denied = apps.map((app) => {
+            const row = app as {
+              resolved?: { bundleId?: string };
+              requestedName?: string;
+            };
+            return {
+              bundleId:
+                row.resolved?.bundleId ?? row.requestedName ?? "unknown",
+              reason: "user_denied" as const,
+            };
+          });
+          console.info(
+            `[computer-use] Teach permission result: behavior=${resolution.behavior}, granted=0, userConsented=false`,
+          );
           return {
             granted: [],
-            denied: [],
+            denied,
             flags: {
               clipboardRead: false,
               clipboardWrite: false,
               systemKeyCombos: false,
             },
+            userConsented: false,
           };
         }
         const updated =
           resolution.updatedInput && typeof resolution.updatedInput === "object"
-            ? (resolution.updatedInput as { _cuGrants?: {
-                granted?: unknown[];
-                denied?: unknown[];
-                flags?: {
-                  clipboardRead?: boolean;
-                  clipboardWrite?: boolean;
-                  systemKeyCombos?: boolean;
+            ? (resolution.updatedInput as {
+                _cuGrants?: {
+                  granted?: Array<{
+                    bundleId: string;
+                    displayName: string;
+                    grantedAt: number;
+                    tier?: "read" | "click" | "full";
+                  }>;
+                  denied?: Array<{
+                    bundleId: string;
+                    reason: "user_denied" | "not_installed";
+                  }>;
+                  flags?: {
+                    clipboardRead?: boolean;
+                    clipboardWrite?: boolean;
+                    systemKeyCombos?: boolean;
+                  };
                 };
-              } })
+              })
             : undefined;
         const grants = updated?._cuGrants;
+        if (grants && Array.isArray(grants.granted)) {
+          // Official: `{...I, userConsented:!0}` — empty granted is valid when
+          // every requested app was already in session allowlist (needDialog=[]).
+          const response = {
+            granted: grants.granted.map((g) => ({
+              bundleId: g.bundleId,
+              displayName: g.displayName,
+              grantedAt: g.grantedAt,
+              tier: g.tier ?? ("full" as const),
+            })),
+            denied: grants.denied ?? [],
+            flags: {
+              clipboardRead: grants.flags?.clipboardRead === true,
+              clipboardWrite: grants.flags?.clipboardWrite === true,
+              systemKeyCombos: grants.flags?.systemKeyCombos === true,
+            },
+            userConsented: true as const,
+          };
+          console.info(
+            `[computer-use] Teach permission result: behavior=allow, granted=${response.granted.length}, userConsented=true (_cuGrants)`,
+          );
+          return response;
+        }
+        // Standard-prompt fallback residual: grant every resolved app in the
+        // dialog payload (package already filtered alreadyGranted into
+        // skipDialogGrants; do not re-skip here).
+        const grantedAt = Date.now();
+        const granted: Array<{
+          bundleId: string;
+          displayName: string;
+          grantedAt: number;
+          tier: "read" | "click" | "full";
+        }> = [];
+        const denied: Array<{
+          bundleId: string;
+          reason: "user_denied" | "not_installed";
+        }> = [];
+        for (const app of apps) {
+          const row = app as {
+            proposedTier?: "read" | "click" | "full";
+            requestedName?: string;
+            resolved?: { bundleId?: string; displayName?: string };
+          };
+          if (row.resolved?.bundleId && row.resolved.displayName) {
+            granted.push({
+              bundleId: row.resolved.bundleId,
+              displayName: row.resolved.displayName,
+              grantedAt,
+              tier: row.proposedTier ?? "full",
+            });
+          } else if (row.requestedName) {
+            denied.push({
+              bundleId: row.requestedName,
+              reason: "not_installed",
+            });
+          }
+        }
+        console.info(
+          `[computer-use] Teach permission result (standard-prompt fallback): behavior=allow, granted=${granted.length}, userConsented=true`,
+        );
         return {
-          granted: (grants?.granted as never[]) ?? [],
-          denied: (grants?.denied as never[]) ?? [],
+          granted,
+          denied,
           flags: {
-            clipboardRead: grants?.flags?.clipboardRead === true,
-            clipboardWrite: grants?.flags?.clipboardWrite === true,
-            systemKeyCombos: grants?.flags?.systemKeyCombos === true,
+            clipboardRead: false,
+            clipboardWrite: false,
+            systemKeyCombos: false,
           },
+          userConsented: true,
         };
       },
     };
@@ -764,8 +1190,14 @@ export class CoworkSessionRuntimeController {
     session.query = null;
     session.inputStream = null;
     if (session.lifecycleState === "running") {
-      // Official leavingRunning: clear product-owned CU ephemerals.
-      clearCoworkSessionEphemeralsOnLeavingRunning(session);
+      // Official leavingRunning: clear product-owned CU ephemerals + P_A unhide.
+      clearCoworkSessionEphemeralsOnLeavingRunning(session, {
+        chicagoAutoUnhide: this.getChicagoAutoUnhide(),
+      });
+      // Official finishTurnCleanup teach exit residual.
+      this.onClearTeachMode?.(session.sessionId);
+      session.teachModeActive = false;
+      session.teachModeEnteredAt = undefined;
       session.lifecycleState = "idle";
     }
     this.saveAndEmitUpdate(session);

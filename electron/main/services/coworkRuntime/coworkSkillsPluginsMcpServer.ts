@@ -218,13 +218,49 @@ export function createCoworkPluginsMcpServerConfig(
  * Official: `uoA() && t.push(await gFi(e))` — computer-use when platform supports.
  * Product: inject createCoworkComputerUseMcpServerConfig when options provided
  * (host-loop permission broker wired by runtime controller).
+ *
+ * Async so callers can `await aFi` before building CU tools (gFi residual).
+ * Sync callers may still `void` / ignore the promise shape via await in createQuery.
  */
-export function withCoworkAlwaysLoadMcpServers(
+export async function withCoworkAlwaysLoadMcpServers(
+  sessionId: string,
+  existing: Record<string, unknown> | undefined,
+  resolvePathContext?: CoworkMcpPathContextResolver,
+  computerUse?: CoworkComputerUseMcpOptions | null,
+): Promise<Record<string, unknown>> {
+  const registry = createCoworkMcpRegistryServerConfig(
+    sessionId,
+    resolvePathContext,
+  );
+  const skills = createCoworkSkillsMcpServerConfig(sessionId, resolvePathContext);
+  const plugins = createCoworkPluginsMcpServerConfig(
+    sessionId,
+    resolvePathContext,
+  );
+  const out: Record<string, unknown> = {
+    ...(existing ?? {}),
+    "mcp-registry": registry,
+    skills,
+    plugins,
+  };
+  if (computerUse) {
+    const cu = createCoworkComputerUseMcpServerConfig(computerUse);
+    if (cu) out["computer-use"] = cu;
+  }
+  return out;
+}
+
+/**
+ * Sync variant for unit tests / call sites that already resolved CU options.
+ * Prefer `withCoworkAlwaysLoadMcpServers` (async) from createQuery residual.
+ */
+export function withCoworkAlwaysLoadMcpServersSync(
   sessionId: string,
   existing: Record<string, unknown> | undefined,
   resolvePathContext?: CoworkMcpPathContextResolver,
   computerUse?: CoworkComputerUseMcpOptions | null,
 ): Record<string, unknown> {
+  // Same body — kept sync for tests that don't need aFi await.
   const registry = createCoworkMcpRegistryServerConfig(
     sessionId,
     resolvePathContext,

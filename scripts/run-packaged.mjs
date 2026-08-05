@@ -1,7 +1,7 @@
 /**
  * Launch packaged Claudex for manual testing.
  *
- * darwin:  out/Claudex-darwin-<arch>/Claudex.app  (Contents/MacOS/Claude after align)
+ * darwin:  out/Claudex-darwin-<arch>/Claudex.app  (Contents/MacOS/Claudex — own forge shell)
  * win32:   out/Claudex-win32-<arch>/Claudex.exe
  *
  * Default: isolated userData so package:open does not fight npm run dev
@@ -43,7 +43,7 @@ if (!fs.existsSync(binary)) {
   throw new Error(
     platform === "win32"
       ? `packaged exe missing:\n  ${binary}`
-      : `packaged binary missing (expected residual MacOS/Claude):\n  ${binary}`,
+      : `packaged binary missing (expected Contents/MacOS/Claudex):\n  ${binary}`,
   );
 }
 

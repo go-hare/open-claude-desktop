@@ -2,6 +2,7 @@ import { shell } from "electron";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
+import { unzipSync } from "fflate";
 
 export type ExtensionManifest = Record<string, unknown> & {
   manifest_version: string;
@@ -291,32 +292,150 @@ export async function installUnpackedExtension(userDataDir: string, sourceDir: s
   return toInstalled(metadata.extensions[id]!, settings);
 }
 
+/**
+ * Residual installDxt / mcpb archive (app.asar GeA / $oA / aU / gU):
+ *   .dxt / .mcpb / .zip are zip containers — unpack to directory.
+ *   Official: files["manifest.json"] required; aU parse+validate; no basename invent.
+ *   Path traversal guarded; single top-level folder stripped when it wraps the package.
+ */
 export async function installDxtArchive(userDataDir: string, dxtPath: string, requestedId?: string | null): Promise<InstalledExtension> {
-  const baseName = path.basename(dxtPath).replace(/\.(dxt|zip|mcpb)$/i, "");
   const lower = dxtPath.toLowerCase();
   const prefix: "local.dxt" | "local.mcpb" = lower.endsWith(".mcpb") ? "local.mcpb" : "local.dxt";
-  // Prefer real manifest.json inside archive when present (product still copies archive file as-is).
-  let manifest = normalizeManifest(null, baseName);
+
+  let zipBytes: Uint8Array;
   try {
-    // Lightweight: if path is already an unpacked-looking dir side-car, ignore; archive manifest
-    // full unzip residual stays in official install pipeline — basename fallback is honest for zip copy.
-    const siblingManifest = await readJson<Record<string, unknown>>(
-      path.join(path.dirname(dxtPath), "manifest.json"),
+    zipBytes = await fs.readFile(dxtPath);
+  } catch (err) {
+    throw new Error(
+      err instanceof Error ? `Failed to read package: ${err.message}` : "Failed to read package",
     );
-    if (siblingManifest) manifest = normalizeManifest(siblingManifest, baseName);
-  } catch {
-    /* ignore */
   }
-  const id = manifestId(manifest, { fallback: requestedId, prefix });
-  const target = path.join(userExtensionsDir(userDataDir), `${id}${path.extname(dxtPath) || ".dxt"}`);
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.copyFile(dxtPath, target);
-  const metadata = await readMetadata(userDataDir);
-  const timestamp = nowIso();
-  metadata.extensions[id] = { id, path: target, kind: "archive", manifest, installedAt: metadata.extensions[id]?.installedAt ?? timestamp, updatedAt: timestamp };
-  await writeMetadata(userDataDir, metadata);
-  const settings = await readSettings(userDataDir, id);
-  return toInstalled(metadata.extensions[id]!, settings);
+  if (zipBytes.byteLength === 0) {
+    throw new Error("Package archive is empty (0 bytes).");
+  }
+
+  let files: Record<string, Uint8Array>;
+  try {
+    files = unzipSync(zipBytes);
+  } catch (err) {
+    throw new Error(
+      err instanceof Error
+        ? `Invalid dxt/mcpb zip: ${err.message}`
+        : "Invalid dxt/mcpb zip archive",
+    );
+  }
+
+  const names = Object.keys(files).filter((n) => !n.endsWith("/"));
+  if (names.length === 0) {
+    throw new Error("Package archive is empty.");
+  }
+  const tops = new Set(
+    names.map((n) => n.split("/")[0]).filter(Boolean) as string[],
+  );
+  let stripPrefix = "";
+  if (tops.size === 1) {
+    const only = [...tops][0]!;
+    const hasNested = names.some((n) => n.startsWith(`${only}/`));
+    if (
+      hasNested &&
+      names.every((n) => n === only || n.startsWith(`${only}/`)) &&
+      !names.includes("manifest.json")
+    ) {
+      stripPrefix = `${only}/`;
+    }
+  }
+
+  // Residual GeA: require files["manifest.json"] (after optional single-folder strip).
+  const manifestEntryKey = stripPrefix
+    ? `${stripPrefix}manifest.json`
+    : "manifest.json";
+  const manifestBytes = files[manifestEntryKey];
+  if (!manifestBytes || manifestBytes.byteLength === 0) {
+    throw new Error("No manifest.json found in extension file");
+  }
+  let manifestRaw: unknown;
+  try {
+    const text = new TextDecoder().decode(manifestBytes);
+    manifestRaw = JSON.parse(text);
+  } catch (err) {
+    throw new Error(
+      `Invalid JSON in manifest.json: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  if (!manifestRaw || typeof manifestRaw !== "object" || Array.isArray(manifestRaw)) {
+    throw new Error("Invalid manifest: root must be a JSON object");
+  }
+  const rawRec = manifestRaw as Record<string, unknown>;
+  if (typeof rawRec.name !== "string" || !rawRec.name.trim()) {
+    throw new Error("Invalid manifest: name is required");
+  }
+  if (
+    !(typeof rawRec.manifest_version === "string" && rawRec.manifest_version) &&
+    !(typeof rawRec.dxt_version === "string" && rawRec.dxt_version)
+  ) {
+    throw new Error(
+      "Invalid manifest: Either 'dxt_version' (deprecated) or 'manifest_version' must be provided",
+    );
+  }
+  // Normalize from real package bytes only — never invent from archive basename.
+  const normalized = normalizeManifest(rawRec, rawRec.name.trim());
+
+  // Staging dir before final id path.
+  const stageRoot = path.join(
+    userExtensionsDir(userDataDir),
+    `.stage-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+  );
+  await fs.mkdir(stageRoot, { recursive: true });
+  try {
+    let wroteAny = false;
+    for (const [name, content] of Object.entries(files)) {
+      if (name.endsWith("/")) continue;
+      const rel =
+        stripPrefix && name.startsWith(stripPrefix)
+          ? name.slice(stripPrefix.length)
+          : name;
+      if (!rel || rel.includes("..") || path.isAbsolute(rel)) continue;
+      const dest = path.join(stageRoot, rel);
+      const resolved = path.resolve(dest);
+      if (!resolved.startsWith(path.resolve(stageRoot) + path.sep) && resolved !== path.resolve(stageRoot)) {
+        continue;
+      }
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.writeFile(dest, content);
+      wroteAny = true;
+    }
+    if (!wroteAny) {
+      throw new Error("Package archive contained no extractable files");
+    }
+    // Confirm staged root still has manifest.json (path-traversal may have skipped it).
+    if (!(await exists(path.join(stageRoot, "manifest.json")))) {
+      throw new Error("No manifest.json found in extension file");
+    }
+
+    const id = manifestId(normalized, { fallback: requestedId, prefix });
+    const target = path.join(userExtensionsDir(userDataDir), id);
+    await fs.rm(target, { recursive: true, force: true });
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.cp(stageRoot, target, { recursive: true });
+
+    const metadata = await readMetadata(userDataDir);
+    const timestamp = nowIso();
+    metadata.extensions[id] = {
+      id,
+      path: target,
+      kind: "directory",
+      manifest: normalized,
+      installedAt: metadata.extensions[id]?.installedAt ?? timestamp,
+      updatedAt: timestamp,
+    };
+    await writeMetadata(userDataDir, metadata);
+    const settings = await readSettings(userDataDir, id);
+    return toInstalled(metadata.extensions[id]!, settings);
+  } finally {
+    await fs.rm(stageRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export async function deleteInstalledExtension(userDataDir: string, extensionId: string): Promise<boolean> {

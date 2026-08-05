@@ -110,6 +110,13 @@ export type LocalSession = {
   scheduledTaskId?: string;
   lastActivityAt?: string;
   isRunning?: boolean;
+  /**
+   * Official CodeStatusGlyph / u_e residual:
+   * hasCompleted && isUnread → ready (green status-dot) when not focused.
+   * Cleared on setFocusedSession / open.
+   */
+  hasCompleted?: boolean;
+  isUnread?: boolean;
   origin?: string;
   userSelectedFolders?: string[];
   userSelectedFiles?: string[];
@@ -1047,7 +1054,31 @@ export class LocalSessionStore {
    * open task_started bookends (stop_task). UI must settle (isRunning=false) then;
    * process-exit path still clears the live buffer. Mid-bookend settle must
    * **preserveLiveBuffer** so task bookends / unflushed rows are not dropped.
+   *
+   * Official CodeStatusGlyph unread residual (index-BELzQL5P u_e / unreadIds):
+   * when a turn settles and the session is not focused, mark hasCompleted+isUnread
+   * so the ready status-dot appears in Recents.
    */
+  private focusedSessionId: string | null = null;
+
+  setFocusedSession(id: string | null | undefined): LocalSession | null {
+    const next = typeof id === "string" && id.length > 0 ? id : null;
+    this.focusedSessionId = next;
+    if (!next) return null;
+    const session = this.sessions.get(next);
+    if (!session) return null;
+    // Official unread residual: focus only clears isUnread. Do not bump updatedAt
+    // (Recents sort) or re-save when already read — ready needs hasCompleted && isUnread.
+    if (session.isUnread !== true) return session;
+    session.isUnread = false;
+    this.save();
+    return session;
+  }
+
+  getFocusedSessionId(): string | null {
+    return this.focusedSessionId;
+  }
+
   setRunning(
     id: string,
     isRunning: boolean,
@@ -1065,6 +1096,15 @@ export class LocalSessionStore {
     if (!isRunning && isPlaceholderSessionTitle(session.title, session.kind === "code" ? "code" : "cowork")) {
       const derived = titleFromLiveEvents(this.getLiveEvents(id), session.kind);
       if (derived) session.title = derived;
+    }
+    // Official ready residual: completed turn while not focused → isUnread.
+    if (!isRunning) {
+      session.hasCompleted = true;
+      if (this.focusedSessionId !== id) {
+        session.isUnread = true;
+      } else {
+        session.isUnread = false;
+      }
     }
     // Turn ended → the CLI has flushed these events into the jsonl; drop the in-memory tail
     // so the next getTranscript reads from disk alone (single source of truth, like official).

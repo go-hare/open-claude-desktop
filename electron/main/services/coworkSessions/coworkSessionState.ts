@@ -273,6 +273,14 @@ export function toRendererSession(
     cuGrantFlags: session.cuGrantFlags
       ? { ...session.cuGrantFlags }
       : undefined,
+    // Official getSession cuSelectedDisplayId / cuLastScreenshotDims
+    cuSelectedDisplayId:
+      typeof session.cuSelectedDisplayId === "number"
+        ? session.cuSelectedDisplayId
+        : undefined,
+    cuLastScreenshotDims: session.cuLastScreenshotDims
+      ? { ...session.cuLastScreenshotDims }
+      : undefined,
     cliSessionId: session.cliSessionId,
     createdAt: session.createdAt,
     cwd: session.cwd,

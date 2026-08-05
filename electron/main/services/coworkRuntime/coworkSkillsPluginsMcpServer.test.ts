@@ -16,8 +16,8 @@ afterEach(() => {
   clearCoworkPluginSearchBridgeForTests();
 });
 
-it("merges mcp-registry, skills, and plugins into mcpServers", () => {
-  const merged = withCoworkAlwaysLoadMcpServers("sid-1", {
+it("merges mcp-registry, skills, and plugins into mcpServers", async () => {
+  const merged = await withCoworkAlwaysLoadMcpServers("sid-1", {
     existing: { type: "stdio", command: "echo" },
   });
   expect(merged.existing).toEqual({ type: "stdio", command: "echo" });
@@ -27,8 +27,8 @@ it("merges mcp-registry, skills, and plugins into mcpServers", () => {
   expect(merged["computer-use"]).toBeUndefined();
 });
 
-it("injects computer-use when gFi options provided on supported platform", () => {
-  const merged = withCoworkAlwaysLoadMcpServers(
+it("injects computer-use when gFi options provided on supported platform", async () => {
+  const merged = await withCoworkAlwaysLoadMcpServers(
     "sid-cu",
     undefined,
     undefined,
@@ -70,7 +70,7 @@ it("skills list_skills resolves reverse-RPC when tools present", async () => {
       );
     },
   });
-  const merged = withCoworkAlwaysLoadMcpServers("sid-x", undefined);
+  const merged = await withCoworkAlwaysLoadMcpServers("sid-x", undefined);
   const server = merged.skills as {
     tools?: Array<{
       name: string;

@@ -9,18 +9,33 @@ import {
   saveLocalSkill,
   setLocalSkillEnabled,
 } from "../services/localSessions/localAgentAssets";
+import { getDirectMcpConnectionManager } from "../services/mcp/directMcpConnectionManager";
 import { requestMcpServer } from "../services/mcp/mcpRuntime";
 import type { IpcHandlerContext } from "./context";
 import { assertCoworkIpcOrigin } from "./coworkIpcOrigin";
 import type { InterfaceHandlers, IpcHandler } from "./registerIpc";
+import {
+  abandonBridgeEnvironmentLive,
+  kickBridgePollLive,
+  resetBridgeLive,
+  resetBridgeSessionLive,
+  respondBridgePermissionPreflightLive,
+} from "../services/coworkSessions/sessionsBridgeLifecycle";
+import {
+  deleteBridgeAgentMemoryResidual,
+  deleteBridgeSessionResidual,
+  getBridgeConsent,
+  identityFromSettingsPrefs,
+} from "../services/coworkSessions/sessionsBridgeResidual";
 
 /**
  * Residual LocalAgentModeSessions methods that were preload-listed but unregistered.
  *
  * Official app.asar shapes (nFt / CcA / lFt / oFt / wFt / DFt):
  * - skills: skillId/name/description/enabled + {ok,error?} mutations
- * - bridge: 3p/no remote bridge → consent false, poll/reset no-op, delete false
- * - direct MCP OAuth: no pending → {ok:false,error}; statuses []
+ * - bridge: custom-3p residual → consent/enabled boolean, void poll/reset, delete false; yit status
+ * - direct MCP: residual status bag via DirectMcpConnectionManager (URL remotes);
+ *   custom3p MCP OAuth loopback (authorizeDirectMcpServer → _ni) — not Anthropic login
  * - interactive auth: idle/null residual (no invent Gateway SSO / Anthropic OAuth)
  * - folder TCC: desktop/documents/downloads ∈ {Granted,Denied,NotSupported}
  * - mcp resources: missing session → [] / {contents:[]}
@@ -246,19 +261,31 @@ export function createCoworkLocalAgentResidualHandlers(
       await revealLocalSkill(name);
     }),
 
-    // ── Sessions bridge (no Anthropic remote bridge in 3p product) ─────────
-    // Honest empty/disabled — never soft-true success that implies remote bridge is live.
-    getBridgeConsent: secured(async () => ({
-      granted: false,
-      reason: "sessions_bridge_unavailable",
-    })),
-    kickBridgePoll: secured(async () => false),
-    resetBridge: secured(async () => false),
-    resetBridgeSession: secured(async () => false),
-    abandonBridgeEnvironment: secured(async () => false),
-    deleteBridgeSession: secured(async () => false),
-    deleteBridgeAgentMemory: secured(async () => false),
-    respondBridgePermissionPreflight: secured(async () => false),
+    // ── Sessions bridge shell residual (app.asar custom-3p / yit / QcA) ────
+    // Shape 1:1: consent/enabled boolean; void poll/reset; yit status via store.
+    // Live Anthropic poller not invented — shouldEnableSessionsBridge()=false.
+    getBridgeConsent: secured(async () => {
+      const prefs = context.settings.getPreferences() as Record<string, unknown>;
+      return getBridgeConsent(identityFromSettingsPrefs(prefs));
+    }),
+    // Official: EQ()?.kick / forceNew / abandon / preflight; delete false without full map
+    kickBridgePoll: secured(async () => {
+      await kickBridgePollLive();
+    }),
+    resetBridge: secured(async () => {
+      await resetBridgeLive();
+    }),
+    resetBridgeSession: secured(async () => {
+      await resetBridgeSessionLive();
+    }),
+    abandonBridgeEnvironment: secured(async (_event, deregister) => {
+      await abandonBridgeEnvironmentLive(deregister);
+    }),
+    deleteBridgeSession: secured(async () => deleteBridgeSessionResidual()),
+    deleteBridgeAgentMemory: secured(async () => deleteBridgeAgentMemoryResidual()),
+    respondBridgePermissionPreflight: secured(async (_event, requestId, proceed) => {
+      await respondBridgePermissionPreflightLive(requestId, proceed);
+    }),
 
     // ── Interactive auth residual (no invent OAuth / Gateway SSO success) ──
     triggerInteractiveAuth: secured(async () => ({
@@ -271,20 +298,30 @@ export function createCoworkLocalAgentResidualHandlers(
     // ── Folder TCC residual (official nor) ─────────────────────────────────
     requestFolderTccAccess: secured(async () => requestFolderTccAccessResidual()),
 
-    // ── Direct MCP residual (no fake OAuth authorize success) ──────────────
+    // ── Direct MCP residual (URL remotes via product directMcpHost + custom3p OAuth) ──
     getDirectMcpServerStatuses: secured(async () => {
-      // Official returns connection statuses; product has no OAuth direct MCP manager.
-      // Honest empty list — not soft-true "authorized".
-      return [];
+      const manager = getDirectMcpConnectionManager();
+      // Lazy residual connectMcp: settings bag + managed + org-plugin scan.
+      try {
+        const bag = context.settings?.getMcpServersConfig?.() ?? {};
+        await manager.connectFromConfigBag(bag as Record<string, unknown>);
+      } catch (error) {
+        console.warn(
+          "[custom3p-mcp] connectFromConfigBag failed",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+      return manager.getStatuses();
     }),
     authorizeDirectMcpServer: secured(async (_event, serverName) => {
       const name = requiredString(serverName, "name");
-      return {
-        ok: false,
-        error: `No pending MCP server named "${name}"`,
-      };
+      // Residual authorizeDirectMcpServer → _ni(oauth) loopback (custom3p MCP only).
+      return getDirectMcpConnectionManager().authorizePending(name);
     }),
-    disconnectDirectMcpServer: secured(async () => false),
+    disconnectDirectMcpServer: secured(async (_event, serverName) => {
+      const name = requiredString(serverName, "name");
+      return getDirectMcpConnectionManager().disconnect(name);
+    }),
 
     // ── MCP resources (official sessionId + serverUuid; missing → empty) ───
     mcpListResources: secured(async (_event, sessionId, serverUuid) => {

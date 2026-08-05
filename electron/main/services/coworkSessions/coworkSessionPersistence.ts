@@ -102,6 +102,14 @@ function optionalMetadata(
     cuGrantFlags: session.cuGrantFlags
       ? { ...session.cuGrantFlags }
       : undefined,
+    // Official IXi cuLastScreenshotDims / cuSelectedDisplayId persist.
+    cuLastScreenshotDims: session.cuLastScreenshotDims
+      ? { ...session.cuLastScreenshotDims }
+      : undefined,
+    cuSelectedDisplayId:
+      typeof session.cuSelectedDisplayId === "number"
+        ? session.cuSelectedDisplayId
+        : undefined,
     cliSessionId: session.cliSessionId,
     egressAllowedDomains:
       session.egressAllowedDomains && session.egressAllowedDomains.length > 0

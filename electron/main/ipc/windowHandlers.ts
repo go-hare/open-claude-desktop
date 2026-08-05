@@ -2,6 +2,8 @@ import { app, Menu, screen, shell } from "electron";
 import type { IpcHandlerContext } from "./context";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
 import { dispatchQuickEntrySubmitPayload } from "./settingsHandlers";
+import { isClaudeCurrentlyHealthyResidual } from "../services/health/claudeHealthcheck";
+import { setUserThemeMode } from "../services/settings/userThemeMode";
 import { setOriginalIncognitoTitleBarMode } from "../windows/createMainWindow";
 
 function navigationState(context: IpcHandlerContext) {
@@ -115,7 +117,10 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
         setOriginalIncognitoTitleBarMode(Boolean(enabled));
         return true;
       },
-      setThemeMode: async () => true,
+      /**
+       * Official residual: nativeTheme.themeSource = mode; Yi.set("userThemeMode", mode).
+       */
+      setThemeMode: async (_event, mode) => setUserThemeMode(mode),
     },
     WindowState: {
       getFullscreen: async () => mainWindow.isFullScreen(),
@@ -155,11 +160,33 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
         popupMainMenu(context);
         return true;
       },
-      isClaudeCurrentlyHealthy: async () => true,
+      /**
+       * Official residual: destroyed → false; else (await ocr()) === "healthy".
+       * ocr = net.fetch(app://localhost/healthcheck) → status.
+       */
+      isClaudeCurrentlyHealthy: async () => {
+        if (mainWindow.isDestroyed() || mainView.webContents.isDestroyed()) {
+          return false;
+        }
+        return isClaudeCurrentlyHealthyResidual();
+      },
     },
     AboutWindow: {
       getAppName: async () => app.getName(),
-      getBuildProps: async () => ({ appVersion: app.getVersion(), platform: process.platform, arch: process.arch }),
+      /**
+       * Residual aboutWindow AboutWindow.getBuildProps / id() shape:
+       *   { buildType, commitHash, commitTimestamp, isNestBuild, appVersion }
+       * Renderer shows: `${process.version} (${commitHash.slice(0,6)})`
+       */
+      getBuildProps: async () => ({
+        buildType: app.isPackaged ? "prod" : "dev",
+        commitHash: process.env.CLAUDEX_COMMIT_HASH || "unknown",
+        commitTimestamp: process.env.CLAUDEX_COMMIT_TIMESTAMP || "",
+        isNestBuild: false,
+        appVersion: app.getVersion(),
+        platform: process.platform,
+        arch: process.arch,
+      }),
       getSupport: async () => ({}),
       openHelp: async () => {
         await shell.openExternal("https://support.anthropic.com/");

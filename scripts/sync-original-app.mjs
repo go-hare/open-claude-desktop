@@ -18,18 +18,16 @@ import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const targetApp = path.join(projectRoot, "resources/original-claude.app");
+import { originalAppSyncCandidates, VENDORED_ORIGINAL_APP } from "./originalAppPaths.mjs";
 
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const targetApp = VENDORED_ORIGINAL_APP;
+
+// Sync may read Downloads / CLAUDE_ORIGINAL_APP to refresh OUR vendor tree.
+// Package/align only read resources/original-claude.app after this.
 const sourceCandidates = [
   process.argv[2] ? path.resolve(process.argv[2]) : undefined,
-  process.env.CLAUDE_ORIGINAL_APP,
-  process.env.CLAUDE_ORIGINAL_APP_CONTENTS
-    ? path.dirname(process.env.CLAUDE_ORIGINAL_APP_CONTENTS)
-    : undefined,
-  "/Users/apple/Downloads/Claude code 汉化mac桌面版/Claude-Deepseek.app",
-  path.resolve(projectRoot, "../Claude-Deepseek.app"),
-  path.resolve(projectRoot, "../../Claude-Deepseek.app"),
+  ...originalAppSyncCandidates(),
 ].filter(Boolean);
 
 const sourceApp =

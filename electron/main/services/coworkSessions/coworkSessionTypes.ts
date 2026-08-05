@@ -85,6 +85,22 @@ export type CoworkCuGrantFlags = {
 };
 
 /**
+ * Official IXi cuLastScreenshotDims:
+ *   Vt.object({ width, height, displayWidth, displayHeight,
+ *     displayId?.default(0), originX?.default(0), originY?.default(0) }).optional()
+ * Used by scaleCoord / pixelCompare across tool turns (IFi getLastScreenshotDims).
+ */
+export type CoworkCuLastScreenshotDims = {
+  width: number;
+  height: number;
+  displayWidth: number;
+  displayHeight: number;
+  displayId?: number;
+  originX?: number;
+  originY?: number;
+};
+
+/**
  * Official session.cuMentionedWindows item for noteCuWindowMentions /
  * appendCuWindowHint (title + bundleId).
  */
@@ -334,6 +350,14 @@ export type CoworkPersistedSessionMetadata = {
    * Official IXi cuGrantFlags — clipboard/systemKeyCombos grant flags.
    */
   cuGrantFlags?: CoworkCuGrantFlags;
+  /**
+   * Official IXi cuLastScreenshotDims — last capture dims for scaleCoord.
+   */
+  cuLastScreenshotDims?: CoworkCuLastScreenshotDims;
+  /**
+   * Official IXi cuSelectedDisplayId — multi-display pin residual.
+   */
+  cuSelectedDisplayId?: number;
   cliSessionId?: string;
   createdAt: number;
   cwd: string;
@@ -450,6 +474,52 @@ export type CoworkSessionRuntimeState = {
    */
   cuGrantFlags?: CoworkCuGrantFlags;
   /**
+   * Official session.cuLastScreenshotDims (IXi + IFi getLastScreenshotDims).
+   * Persisted so scaleCoord survives process restart mid-session.
+   */
+  cuLastScreenshotDims?: CoworkCuLastScreenshotDims;
+  /**
+   * Official session.cuSelectedDisplayId (IXi + IFi getSelectedDisplayId).
+   */
+  cuSelectedDisplayId?: number;
+  /**
+   * Official session.cuDisplayPinnedByModel — runtime; cleared when display updated.
+   * Not in IXi persist schema.
+   */
+  cuDisplayPinnedByModel?: boolean;
+  /**
+   * Official session.cuDisplayResolvedForApps — sorted bundleIds key for display resolve.
+   * Runtime residual; not IXi.
+   */
+  cuDisplayResolvedForApps?: string;
+  /**
+   * Official session.cuHiddenDuringTurn — Set of bundleIds hidden this turn.
+   * Runtime; leavingRunning unhide via P_A when chicagoAutoUnhide.
+   */
+  cuHiddenDuringTurn?: Set<string>;
+  /**
+   * Official session.cuHiddenPendingNote — pending hide notes for next tool text.
+   * Runtime; drained by getHiddenPendingNote / drainHiddenPendingNote.
+   */
+  cuHiddenPendingNote?: Set<string>;
+  /**
+   * Official session.cuClipboardStash — clipboard restore on leavingRunning.
+   * Runtime residual; not IXi.
+   */
+  cuClipboardStash?: string;
+  /**
+   * Official session.teachModeActive — set by onTeachModeActivated when
+   * request_teach_access grants with userConsented; cleared on leavingRunning /
+   * finishTurnCleanup / resolveTeachStep exit residual.
+   * Runtime-only (not IXi).
+   */
+  teachModeActive?: boolean;
+  /**
+   * Official session.teachModeEnteredAt — epoch ms when teach mode activated.
+   * Runtime-only analytics residual.
+   */
+  teachModeEnteredAt?: number;
+  /**
    * Official session.cuMentionedWindows — set by noteCuWindowMentions, consumed
    * once by appendCuWindowHint (cleared). Ephemeral; not persisted.
    */
@@ -468,6 +538,11 @@ export type CoworkSessionRuntimeState = {
    * delete via mcp__cowork__allow_cowork_file_delete.
    */
   fileDeleteApprovedMounts?: string[];
+  /**
+   * Official session.webFetchAllowedUrls — Set seeded by seedWebFetchProvenance
+   * from inbound bridge user text (_1i URL extract). Runtime residual.
+   */
+  webFetchAllowedUrls?: Set<string>;
   fsDetectedFiles: Map<string, CoworkDetectedFile>;
   hostLoopMode?: boolean;
   /**
@@ -617,6 +692,11 @@ export type CoworkRendererSession = {
    * Official getSession cuGrantFlags.
    */
   cuGrantFlags?: CoworkCuGrantFlags;
+  /**
+   * Official getSession cuSelectedDisplayId / cuLastScreenshotDims (optional UI hydrate).
+   */
+  cuSelectedDisplayId?: number;
+  cuLastScreenshotDims?: CoworkCuLastScreenshotDims;
   cwd: string;
   enabledMcpTools?: unknown;
   error?: string;
