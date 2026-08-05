@@ -117,7 +117,7 @@ const BATCH_ACTION_ITEM_SCHEMA = {
  */
 export function buildComputerUseTools(
   caps: {
-    screenshotFiltering: 'native' | 'none'
+    screenshotFiltering: 'native' | 'none' | 'mask'
     platform: 'darwin' | 'win32' | 'linux'
     /** Include request_teach_access + teach_step. Read once at server construction. */
     teachMode?: boolean
@@ -154,7 +154,9 @@ export function buildComputerUseTools(
   const screenshotDesc =
     caps.screenshotFiltering === 'native'
       ? 'Take a screenshot of the primary display. Applications not in the session allowlist are excluded at the compositor level — only granted apps and the desktop are visible.'
-      : 'Take a screenshot of the primary display. On this platform, screenshots are NOT filtered — all open windows are visible. Input actions targeting apps not in the session allowlist are rejected.'
+      : caps.screenshotFiltering === 'mask'
+        ? 'Take a screenshot of the primary display. Windows belonging to apps not in the session allowlist are masked (filled) so only granted apps remain readable. Input actions targeting apps not in the session allowlist are rejected.'
+        : 'Take a screenshot of the primary display. On this platform, screenshots are NOT filtered — all open windows are visible. Input actions targeting apps not in the session allowlist are rejected.'
 
   return [
     {

@@ -167,7 +167,7 @@ export interface CuPermissionRequest {
    * `executor.capabilities.screenshotFiltering` so the renderer doesn't
    * need to know about platforms.
    */
-  screenshotFiltering: 'native' | 'none'
+  screenshotFiltering: 'native' | 'none' | 'mask'
   /**
    * Present only when TCC permissions are NOT yet granted. When present,
    * the renderer shows a TCC toggle panel (two rows: Accessibility, Screen
@@ -623,7 +623,7 @@ export interface CuTeachPermissionRequest {
   /** Model-provided reason. Shown in the dialog headline ("guide you through {reason}"). */
   reason: string
   apps: ResolvedAppRequest[]
-  screenshotFiltering: 'native' | 'none'
+  screenshotFiltering: 'native' | 'none' | 'mask'
   /** Present only when TCC is ungranted — same semantics as `CuPermissionRequest.tccState`. */
   tccState?: {
     accessibility: boolean

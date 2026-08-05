@@ -84,7 +84,7 @@ function buildComputerUseTools(caps, coordinateMode, installedAppNames) {
     type: "string",
     description: 'Modifier keys to hold during the click (e.g. "shift", "ctrl+shift"). Supports the same syntax as the key tool.'
   };
-  const screenshotDesc = caps.screenshotFiltering === "native" ? "Take a screenshot of the primary display. Applications not in the session allowlist are excluded at the compositor level \u2014 only granted apps and the desktop are visible." : "Take a screenshot of the primary display. On this platform, screenshots are NOT filtered \u2014 all open windows are visible. Input actions targeting apps not in the session allowlist are rejected.";
+  const screenshotDesc = caps.screenshotFiltering === "native" ? "Take a screenshot of the primary display. Applications not in the session allowlist are excluded at the compositor level — only granted apps and the desktop are visible." : caps.screenshotFiltering === "mask" ? "Take a screenshot of the primary display. Windows belonging to apps not in the session allowlist are masked (filled) so only granted apps remain readable. Input actions targeting apps not in the session allowlist are rejected." : "Take a screenshot of the primary display. On this platform, screenshots are NOT filtered — all open windows are visible. Input actions targeting apps not in the session allowlist are rejected.";
   return [
     {
       name: "request_access",

@@ -7,19 +7,21 @@
  *   }
  * Called on leavingRunning / turn end when chicagoAutoUnhide && cuHiddenDuringTurn.
  *
- * Product Mac-only: Darwin fE().apps.unhide. Win32 not productized.
+ * Product: Darwin fE().apps.unhide; Win32 PE cuUnhideApps via createWin32Executor.
  */
 import { loadClaudeSwiftComputerUse } from "../settings/claudeSwiftAddon";
+import { unhideComputerUseAppsWin32 } from "./computerUse/createWin32Executor";
 
 /**
- * Official P_A Darwin branch. No-op on empty; soft-fail when computerUse missing.
+ * Official P_A — platform unhide. No-op on empty; soft-fail when native missing.
  */
 export async function unhideComputerUseApps(bundleIds: string[]): Promise<void> {
   if (!Array.isArray(bundleIds) || bundleIds.length === 0) return;
-  if (process.platform !== "darwin") {
-    // Win32 residual not productized — honest no-op (not invent success).
+  if (process.platform === "win32") {
+    await unhideComputerUseAppsWin32(bundleIds);
     return;
   }
+  if (process.platform !== "darwin") return;
   try {
     const cu = await loadClaudeSwiftComputerUse();
     await Promise.resolve(cu?.apps?.unhide?.(bundleIds));

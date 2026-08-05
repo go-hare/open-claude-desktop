@@ -65,6 +65,44 @@ export type ClaudeNativeAddon = {
     body?: Buffer | Uint8Array | null;
     error?: string;
   }>;
+  /**
+   * Win PE / shared CU NAPI surface (official createWin32Executor / XZe).
+   * Optional — present on Windows claude-native-binding.node residual.
+   */
+  cuHideApps?: (bundleIds: string[]) => Promise<string[]> | string[];
+  cuUnhideApps?: (bundleIds: string[]) => Promise<void> | void;
+  cuGetAppIcon?: (pathOrBundle: string) => string | null | undefined;
+  cuListDisplays?: () => Array<{
+    displayId: number;
+    width: number;
+    height: number;
+    scaleFactor: number;
+    originX: number;
+    originY: number;
+    isPrimary?: boolean;
+    label?: string;
+  }>;
+  cuAppUnderPoint?: (
+    x: number,
+    y: number,
+  ) =>
+    | Promise<{ bundleId: string; displayName: string } | null>
+    | { bundleId: string; displayName: string }
+    | null;
+  cuDisplayForPid?: (pid: number) => number | null;
+  cuListRunningApps?: () => Array<{
+    bundleId: string;
+    displayName: string;
+    pid?: number;
+  }>;
+  cuExcludedWindowRects?: (
+    bundleIds: string[],
+  ) => Array<{ x: number; y: number; width: number; height: number }>;
+  cuListInstalledApps?: () => Array<{
+    displayName?: string;
+    aumid?: string;
+    targetPath?: string;
+  }>;
 };
 
 let cached: ClaudeNativeAddon | null | undefined;
@@ -99,12 +137,17 @@ function isUsableNative(mod: unknown): mod is ClaudeNativeAddon {
   if (!mod || typeof mod !== "object") return false;
   // Proxy placeholder from vendor/ant/claude-native throws on member call —
   // require a real CU or attestedMach entrypoint (not empty invent object).
-  const candidate = mod as ClaudeNativeAddon;
+  const candidate = mod as ClaudeNativeAddon & {
+    cuListDisplays?: unknown;
+    cuListRunningApps?: unknown;
+  };
   return (
     typeof candidate.keys === "function" ||
     typeof candidate.mouseButton === "function" ||
     typeof candidate.typeText === "function" ||
-    typeof candidate.attestedMachRequest === "function"
+    typeof candidate.attestedMachRequest === "function" ||
+    typeof candidate.cuListDisplays === "function" ||
+    typeof candidate.cuListRunningApps === "function"
   );
 }
 

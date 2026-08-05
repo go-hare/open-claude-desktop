@@ -73,10 +73,28 @@ function versionOf(filePath) {
   }
 }
 
+/** Resolve npm CLI so Windows Git Bash / non-shell spawn works (spawnSync "npm" → ENOENT). */
+function resolveNpmInvocation() {
+  const nodeDir = path.dirname(process.execPath);
+  const npmCli = path.join(nodeDir, "node_modules", "npm", "bin", "npm-cli.js");
+  if (fsSync.existsSync(npmCli)) {
+    return { command: process.execPath, argsPrefix: [npmCli] };
+  }
+  if (process.platform === "win32") {
+    const npmCmd = path.join(nodeDir, "npm.cmd");
+    if (fsSync.existsSync(npmCmd)) {
+      return { command: npmCmd, argsPrefix: [], shell: true };
+    }
+  }
+  return { command: "npm", argsPrefix: [] };
+}
+
 function npmViewTarball(pkg, version) {
-  const out = execFileSync("npm", ["view", `${pkg}@${version}`, "dist.tarball"], {
+  const npm = resolveNpmInvocation();
+  const out = execFileSync(npm.command, [...npm.argsPrefix, "view", `${pkg}@${version}`, "dist.tarball"], {
     encoding: "utf8",
     timeout: 60_000,
+    shell: Boolean(npm.shell),
   }).trim();
   if (!out.startsWith("http")) {
     throw new Error(`npm view tarball failed for ${pkg}@${version}: ${out}`);
@@ -107,7 +125,34 @@ function fetchToFile(url, dest) {
 
 async function extractPackageTgz(tgzPath, extractDir) {
   await fs.mkdir(extractDir, { recursive: true });
-  execFileSync("tar", ["-xzf", tgzPath, "-C", extractDir], { stdio: "ignore" });
+  // Windows: execFileSync("tar") often fails on drive-letter backslash paths
+  // (ENOENT / "Command failed") even when Git Bash tar can extract the same file.
+  // Prefer POSIX-style paths; fall back to node:zlib + tar stream if needed.
+  const tgzPosix = tgzPath.replace(/\\/g, "/");
+  const dirPosix = extractDir.replace(/\\/g, "/");
+  try {
+    execFileSync("tar", ["-xzf", tgzPosix, "-C", dirPosix], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return;
+  } catch (tarError) {
+    const { createGunzip } = await import("node:zlib");
+    const { createReadStream } = await import("node:fs");
+    // Lightweight fallback without external tar: use npm's own tar if present,
+    // else rethrow with the original tar stderr for diagnosis.
+    try {
+      const tar = await import("tar");
+      await tar.x({ file: tgzPath, cwd: extractDir });
+      return;
+    } catch {
+      const detail =
+        (tarError?.stderr && String(tarError.stderr).trim()) ||
+        tarError?.message ||
+        String(tarError);
+      throw new Error(`tar extract failed for ${tgzPath}: ${detail}`);
+    }
+  }
 }
 
 async function downloadPlatformBinary(entry, version, platformsRoot, tmpRoot) {

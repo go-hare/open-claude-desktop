@@ -144,8 +144,8 @@ export type CoworkComputerUseMcpOptions = {
    * Default true when unset (matches SSA chicagoAutoUnhide).
    */
   getAutoUnhideEnabled?: () => boolean;
-  /** Official screenshotFiltering capability residual. */
-  screenshotFiltering?: "native" | "none";
+  /** Official screenshotFiltering capability residual (darwin native / win mask). */
+  screenshotFiltering?: "native" | "none" | "mask";
   /**
    * Inject host adapter for tests. Production builds via createComputerUseHostAdapter.
    */
@@ -246,7 +246,7 @@ export async function handleCoworkComputerUseFeatureDisabledCall(
     getTccState?: () => ComputerUseTccState | Promise<ComputerUseTccState>;
     isChicagoEnabled: () => boolean;
     onPermissionRequest: CoworkComputerUsePermissionHandler;
-    screenshotFiltering: "native" | "none";
+    screenshotFiltering: "native" | "none" | "mask";
   },
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   const tcc = await Promise.resolve(
@@ -342,7 +342,7 @@ function requestedFlagsFromArgs(args: Record<string, unknown>) {
 async function handleEnabledRequestAccess(
   args: Record<string, unknown>,
   options: CoworkComputerUseMcpOptions,
-  screenshotFiltering: "native" | "none",
+  screenshotFiltering: "native" | "none" | "mask",
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   const tcc = await Promise.resolve(
     options.getTccState?.() ?? getComputerUseTccState(),
@@ -550,9 +550,10 @@ export function createCoworkComputerUseMcpServerConfig(
     return null;
   }
 
-  const screenshotFiltering: "native" | "none" =
+  // Official residual: darwin → native compositor exclude; win32 → mask rects.
+  const screenshotFiltering: "native" | "none" | "mask" =
     options.screenshotFiltering ??
-    (process.platform === "win32" ? "none" : "native");
+    (process.platform === "win32" ? "mask" : "native");
   // Official oq residual — frozen at MCP construction like official hMA/oq.
   const coordinateMode =
     options.coordinateMode ?? getComputerUseCoordinateMode();
@@ -582,12 +583,12 @@ export function createCoworkComputerUseMcpServerConfig(
   );
 
   // Kick official aFi prewarm when chicago on and no explicit list (fire-and-forget).
-  // Skip when hostAdapter inject is null (tests / natives unavailable) or non-darwin.
+  // Darwin: listInstalledApps via claude-swift; Win32: AUMID cache via PE.
   if (
     options.installedAppNames === undefined &&
     options.hostAdapter === undefined &&
     options.isChicagoEnabled() &&
-    process.platform === "darwin"
+    (process.platform === "darwin" || process.platform === "win32")
   ) {
     void getCachedInstalledAppNamesForTools(async () => {
       const adapter = createComputerUseHostAdapter({

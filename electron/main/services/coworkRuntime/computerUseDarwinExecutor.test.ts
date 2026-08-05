@@ -69,7 +69,7 @@ describe("computerUseDarwinExecutor residual helpers", () => {
       hostBundleId: "test.host",
     });
     expect(ex.capabilities.platform).toBe("win32");
-    // Product type: native|none (official QZe "mask" → "none" residual)
-    expect(ex.capabilities.screenshotFiltering).toBe("none");
+    // Official QZe residual — win32 mask capture (desktopCapturer + excluded rects).
+    expect(ex.capabilities.screenshotFiltering).toBe("mask");
   });
 });
