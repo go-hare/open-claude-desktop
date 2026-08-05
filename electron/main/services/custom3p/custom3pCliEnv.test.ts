@@ -1,12 +1,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  buildEnterpriseOtlpSpawnEnv,
+  resetCoworkEnterpriseConfigForTests,
+  resolveEnterpriseOtlpConfig,
+} from "../coworkHostLoop/coworkEnterpriseConfig";
 import {
   buildClaudeCliSpawnEnv,
   buildDesktopCustom3pCliEnv,
   custom3pEnterpriseConfigFromUnknown,
   DESKTOP_SHELL_SETTINGS_FILE,
+  enrichClaudeCliSpawnEnvWithEnterpriseAuth,
   readAppliedCustom3pFromDesktopShellSettings,
   resolveCliModelArg,
   serializeAnthropicCustomHeaders,
@@ -15,6 +21,7 @@ import {
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  resetCoworkEnterpriseConfigForTests();
   for (const directory of temporaryDirectories.splice(0)) {
     fs.rmSync(directory, { force: true, recursive: true });
   }
@@ -123,6 +130,31 @@ describe("custom3pCliEnv residual", () => {
     expect(spawnEnv.CLAUDE_CODE_ENTRYPOINT).toBe("claude-desktop-3p");
     expect(spawnEnv.ANTHROPIC_BASE_URL).toBeUndefined();
     expect(spawnEnv.ANTHROPIC_API_KEY).toBe("");
+  });
+
+  it("KHA residual: enterprise otlpEndpoint injects OTEL spawn env", () => {
+    // Pure KHA residual only — do NOT call buildClaudeCliSpawnEnv here: on win32 it
+    // re-enters resolveEnterpriseOtlpConfig without getManagedConfig inject and walks
+    // full reg query for every QB key (seconds). Spawn wiring is Object.assign(env,
+    // buildEnterpriseOtlpSpawnEnv(otlp)) in custom3pCliEnv.ts after strip.
+    const otlp = resolveEnterpriseOtlpConfig({
+      getManagedConfig: () => ({}),
+      getLocalConfig: () => ({
+        otlpEndpoint: "https://otel.corp/v1",
+        otlpProtocol: "http/protobuf",
+        otlpHeaders: { Authorization: "Bearer t" },
+      }),
+    });
+    expect(otlp?.endpoint).toBe("https://otel.corp/v1");
+    const otlpEnv = buildEnterpriseOtlpSpawnEnv(otlp);
+    expect(otlpEnv).toMatchObject({
+      CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+      OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel.corp/v1",
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
+      OTEL_EXPORTER_OTLP_HEADERS: "Authorization: Bearer t",
+      OTEL_METRICS_EXPORTER: "otlp",
+      OTEL_LOGS_EXPORTER: "otlp",
+    });
   });
 
   it("maps vertex / bedrock / foundry provider flags", () => {
@@ -432,5 +464,103 @@ describe("custom3pCliEnv residual", () => {
     expect(resolveCliModelArg("deepseek-v4-pro", dotClaudeEnterprise)).toBeUndefined();
     expect(resolveCliModelArg("grok-4.5", dotClaudeEnterprise)).toBe("grok-4.5");
     expect(resolveCliModelArg("sonnet", dotClaudeEnterprise)).toBe("grok-4.5");
+  });
+
+  it("preserves inferenceCredentialHelper fields on enterprise bag (yL spawn residual)", () => {
+    const enterprise = custom3pEnterpriseConfigFromUnknown({
+      inferenceProvider: "gateway",
+      inferenceGatewayBaseUrl: "https://gw.example",
+      inferenceGatewayApiKey: "static-key",
+      inferenceCredentialHelper: "/abs/helper.sh",
+      inferenceCredentialHelperTtlSec: 120,
+    });
+    expect(enterprise?.inferenceCredentialHelper).toBe("/abs/helper.sh");
+    expect(enterprise?.inferenceCredentialHelperTtlSec).toBe(120);
+  });
+
+  it("enrichClaudeCliSpawnEnvWithEnterpriseAuth injects helper token from typed bag", async () => {
+    const helperMod = await import("./enterpriseCredentialHelper");
+    helperMod.resetEnterpriseCredentialHelperForTests();
+    const runSpy = vi
+      .spyOn(helperMod, "runEnterpriseCredentialHelperWithTtl")
+      .mockResolvedValue({
+        token: "helper-tok",
+        isJson: false,
+      });
+
+    try {
+      const env = await enrichClaudeCliSpawnEnvWithEnterpriseAuth(
+        { PATH: "/usr/bin", ANTHROPIC_API_KEY: "static-key" },
+        {
+          appliedEnterpriseConfig: {
+            inferenceProvider: "gateway",
+            inferenceGatewayApiKey: "static-key",
+            inferenceCredentialHelper: "/abs/helper.sh",
+            inferenceCredentialHelperTtlSec: 60,
+          },
+        },
+      );
+      expect(env.ANTHROPIC_API_KEY).toBe("helper-tok");
+      expect(env.ANTHROPIC_AUTH_TOKEN).toBe("");
+      expect(runSpy).toHaveBeenCalled();
+    } finally {
+      runSpy.mockRestore();
+      helperMod.resetEnterpriseCredentialHelperForTests();
+    }
+  });
+
+  it("enrich loads helper from configLibrary bag via userDataPath (yL not stripped)", async () => {
+    const userData = temporaryDirectory();
+    const appliedId = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+    fs.mkdirSync(path.join(userData, "configLibrary"), { recursive: true });
+    fs.writeFileSync(
+      path.join(userData, "configLibrary", "_meta.json"),
+      JSON.stringify({
+        appliedId,
+        entries: [{ id: appliedId, name: "Gateway+Helper" }],
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(userData, "configLibrary", `${appliedId}.json`),
+      JSON.stringify({
+        inferenceProvider: "gateway",
+        inferenceGatewayBaseUrl: "https://gw.example",
+        inferenceGatewayApiKey: "static-key",
+        inferenceCredentialHelper: "/abs/from-disk-helper.sh",
+        inferenceCredentialHelperTtlSec: 90,
+      }),
+      "utf8",
+    );
+
+    const fromDisk = readAppliedCustom3pFromDesktopShellSettings(userData);
+    expect(fromDisk.enterprise?.inferenceCredentialHelper).toBe(
+      "/abs/from-disk-helper.sh",
+    );
+    expect(fromDisk.enterprise?.inferenceCredentialHelperTtlSec).toBe(90);
+
+    const helperMod = await import("./enterpriseCredentialHelper");
+    helperMod.resetEnterpriseCredentialHelperForTests();
+    const runSpy = vi
+      .spyOn(helperMod, "runEnterpriseCredentialHelperWithTtl")
+      .mockResolvedValue({
+        token: "disk-helper-tok",
+        headers: { "X-Org": "disk" },
+        isJson: true,
+      });
+
+    try {
+      // No appliedEnterpriseConfig — enrich must rehydrate typed bag from userData.
+      const env = await enrichClaudeCliSpawnEnvWithEnterpriseAuth(
+        { PATH: "/usr/bin", ANTHROPIC_API_KEY: "static-key" },
+        { userDataPath: userData },
+      );
+      expect(env.ANTHROPIC_API_KEY).toBe("disk-helper-tok");
+      expect(env.ANTHROPIC_CUSTOM_HEADERS).toBe("X-Org: disk");
+      expect(runSpy).toHaveBeenCalled();
+    } finally {
+      runSpy.mockRestore();
+      helperMod.resetEnterpriseCredentialHelperForTests();
+    }
   });
 });

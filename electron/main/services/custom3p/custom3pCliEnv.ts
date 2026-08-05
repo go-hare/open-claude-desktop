@@ -35,6 +35,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  buildEnterpriseOtlpSpawnEnv,
+  resolveEnterpriseOtlpConfig,
+} from "../coworkHostLoop/coworkEnterpriseConfig";
+import {
   DOT_CLAUDE_DEPLOYMENT_MODE,
   detectDotClaudeCliConfig,
   normalizePersistedDeploymentMode,
@@ -61,14 +65,25 @@ export type Custom3pEnterpriseConfig = {
   inferenceVertexRegion?: string;
   inferenceVertexCredentialsFile?: string;
   inferenceVertexBaseUrl?: string;
+  /** Official h1e residual — Desktop OAuth client (both id+secret required at resolve). */
+  inferenceVertexOAuthClientId?: string;
+  inferenceVertexOAuthClientSecret?: string;
+  inferenceVertexOAuthScopes?: string;
   inferenceBedrockRegion?: string;
   inferenceBedrockBearerToken?: string;
   inferenceBedrockBaseUrl?: string;
   inferenceBedrockProfile?: string;
   inferenceBedrockAwsDir?: string;
+  /** Official GV residual — all four required together at resolve. */
+  inferenceBedrockSsoStartUrl?: string;
+  inferenceBedrockSsoRegion?: string;
+  inferenceBedrockSsoAccountId?: string;
+  inferenceBedrockSsoRoleName?: string;
   inferenceBedrockServiceTier?: string;
   inferenceFoundryResource?: string;
   inferenceFoundryApiKey?: string;
+  /** Official RrA residual — org telemetry tag, not auth. */
+  deploymentOrganizationUuid?: string;
   /**
    * Product multi-vendor residual (claude-code modelType):
    * openai / gemini / grok use native SDK clients via OPENAI_* / GEMINI_* / GROK_*.
@@ -83,6 +98,10 @@ export type Custom3pEnterpriseConfig = {
   inferenceGrokApiKey?: string;
   /** Official SC residual — model picker / probeInference source. */
   inferenceModels?: Custom3pInferenceModel[];
+  /** Official yL residual — absolute local credential helper path. */
+  inferenceCredentialHelper?: string;
+  /** Official yL TTL residual (seconds; default 3600 when absent at run). */
+  inferenceCredentialHelperTtlSec?: number;
   disableNonessentialTelemetry?: boolean;
   disableEssentialTelemetry?: boolean;
 };
@@ -99,6 +118,17 @@ function stringField(value: unknown): string | undefined {
 
 function booleanField(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function positiveIntField(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === "string" && value.trim()) {
+    const n = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return undefined;
 }
 
 function stringMap(value: unknown): Record<string, string> | undefined {
@@ -158,14 +188,24 @@ export function custom3pEnterpriseConfigFromUnknown(
     inferenceVertexRegion: stringField(bag.inferenceVertexRegion),
     inferenceVertexCredentialsFile: stringField(bag.inferenceVertexCredentialsFile),
     inferenceVertexBaseUrl: stringField(bag.inferenceVertexBaseUrl),
+    inferenceVertexOAuthClientId: stringField(bag.inferenceVertexOAuthClientId),
+    inferenceVertexOAuthClientSecret: stringField(
+      bag.inferenceVertexOAuthClientSecret,
+    ),
+    inferenceVertexOAuthScopes: stringField(bag.inferenceVertexOAuthScopes),
     inferenceBedrockRegion: stringField(bag.inferenceBedrockRegion),
     inferenceBedrockBearerToken: stringField(bag.inferenceBedrockBearerToken),
     inferenceBedrockBaseUrl: stringField(bag.inferenceBedrockBaseUrl),
     inferenceBedrockProfile: stringField(bag.inferenceBedrockProfile),
     inferenceBedrockAwsDir: stringField(bag.inferenceBedrockAwsDir),
+    inferenceBedrockSsoStartUrl: stringField(bag.inferenceBedrockSsoStartUrl),
+    inferenceBedrockSsoRegion: stringField(bag.inferenceBedrockSsoRegion),
+    inferenceBedrockSsoAccountId: stringField(bag.inferenceBedrockSsoAccountId),
+    inferenceBedrockSsoRoleName: stringField(bag.inferenceBedrockSsoRoleName),
     inferenceBedrockServiceTier: stringField(bag.inferenceBedrockServiceTier),
     inferenceFoundryResource: stringField(bag.inferenceFoundryResource),
     inferenceFoundryApiKey: stringField(bag.inferenceFoundryApiKey),
+    deploymentOrganizationUuid: stringField(bag.deploymentOrganizationUuid),
     inferenceOpenAIBaseUrl: stringField(bag.inferenceOpenAIBaseUrl),
     inferenceOpenAIApiKey: stringField(bag.inferenceOpenAIApiKey),
     inferenceGeminiBaseUrl: stringField(bag.inferenceGeminiBaseUrl),
@@ -173,6 +213,10 @@ export function custom3pEnterpriseConfigFromUnknown(
     inferenceGrokBaseUrl: stringField(bag.inferenceGrokBaseUrl),
     inferenceGrokApiKey: stringField(bag.inferenceGrokApiKey),
     inferenceModels: inferenceModelsField(bag.inferenceModels),
+    inferenceCredentialHelper: stringField(bag.inferenceCredentialHelper),
+    inferenceCredentialHelperTtlSec: positiveIntField(
+      bag.inferenceCredentialHelperTtlSec,
+    ),
     disableNonessentialTelemetry: booleanField(bag.disableNonessentialTelemetry),
     disableEssentialTelemetry: booleanField(bag.disableEssentialTelemetry),
   };
@@ -697,6 +741,165 @@ export function buildClaudeCliSpawnEnv(options: {
     // Official non-3p desktop residual is claude-desktop; product local sessions historically used sdk-ts.
     // Keep sdk-ts only when no host 3p bag — matches prior product spawn default.
     env.CLAUDE_CODE_ENTRYPOINT = processEnv.CLAUDE_CODE_ENTRYPOINT ?? "sdk-ts";
+  }
+
+  // Official HFi + KHA residual: strip stale OTEL_* then assign enterprise OTLP bag.
+  // resolveEnterpriseOtlpConfig reads vi() (MDM / configLibrary); absent endpoint → no wipe.
+  const otlpReserved = [
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    "OTEL_METRICS_EXPORTER",
+    "OTEL_LOGS_EXPORTER",
+    "OTEL_LOG_USER_PROMPTS",
+    "OTEL_LOG_TOOL_DETAILS",
+    "CLAUDE_CODE_ENABLE_TELEMETRY",
+  ] as const;
+  const otlpDeps = options.userDataPath
+    ? { getUserDataPath: () => options.userDataPath! }
+    : {};
+  const otlp = resolveEnterpriseOtlpConfig(otlpDeps);
+  if (otlp) {
+    for (const key of otlpReserved) delete env[key];
+    Object.assign(env, buildEnterpriseOtlpSpawnEnv(otlp, otlpDeps));
+  }
+
+  // Sync residual only: materialize Vertex ADC file if already authorized (no browser).
+  // Async secrets (Bedrock SSO role keys / credential helper TTL) → enrichClaudeCliSpawnEnvWithEnterpriseAuth.
+  if (enterprise?.inferenceProvider === "vertex" && !enterprise.inferenceVertexCredentialsFile) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { buildVertexOAuthSpawnEnv } = require("./enterpriseVertexAuth") as typeof import("./enterpriseVertexAuth");
+      Object.assign(
+        env,
+        buildVertexOAuthSpawnEnv({
+          getManagedConfig: () => ({}),
+          getLocalConfig: () => enterprise as unknown as Record<string, unknown>,
+          userDataPath: options.userDataPath,
+        }),
+      );
+    } catch {
+      /* safeStorage / missing ADC — leave spawn without GOOGLE_APPLICATION_CREDENTIALS */
+    }
+  }
+
+  return env;
+}
+
+/**
+ * Official writeSessionSecrets residual (async) — Bedrock SSO role keys + credential helper TTL.
+ * Call after buildClaudeCliSpawnEnv before spawn.
+ */
+export async function enrichClaudeCliSpawnEnvWithEnterpriseAuth(
+  env: NodeJS.ProcessEnv,
+  options: {
+    userDataPath?: string;
+    appliedEnterpriseConfig?: Custom3pEnterpriseConfig | null;
+  } = {},
+): Promise<NodeJS.ProcessEnv> {
+  let enterprise = options.appliedEnterpriseConfig;
+  if (enterprise === undefined && options.userDataPath) {
+    enterprise = readAppliedCustom3pFromDesktopShellSettings(
+      options.userDataPath,
+    ).enterprise;
+  }
+
+  // Local bag: configLibrary applied JSON (disk) + typed enterprise overlay.
+  // Prefer this over full vi() for yL / SSO so spawn does not wait on win32
+  // Policies registry walks when the helper already lives on the applied bag.
+  // MDM-only secrets still fall back to getUserDataPath below.
+  let diskRaw: Record<string, unknown> = {};
+  if (options.userDataPath) {
+    try {
+      const snap = readAppliedCustom3pFromDesktopShellSettings(
+        options.userDataPath,
+      );
+      if (
+        snap.config &&
+        typeof snap.config === "object" &&
+        !Array.isArray(snap.config)
+      ) {
+        diskRaw = snap.config as Record<string, unknown>;
+      }
+    } catch {
+      /* ignore unreadable userData */
+    }
+  }
+  const localOverlay: Record<string, unknown> = {
+    ...diskRaw,
+    ...((enterprise as unknown as Record<string, unknown>) ?? {}),
+  };
+  const localOnlyDeps = {
+    getManagedConfig: () => ({}),
+    getLocalConfig: () => localOverlay,
+  };
+  const fullViDeps = options.userDataPath
+    ? { getUserDataPath: () => options.userDataPath! }
+    : localOnlyDeps;
+
+  // Bedrock SSO role keys: typed bag provider=bedrock, or MDM/disk bag without
+  // bearer/profile (vi() may supply SSO when configLibrary typed snapshot is null).
+  const bedrockProvider =
+    enterprise?.inferenceProvider === "bedrock" ||
+    localOverlay.inferenceProvider === "bedrock";
+  if (bedrockProvider) {
+    const hasBearer = Boolean(
+      (enterprise?.inferenceBedrockBearerToken ??
+        localOverlay.inferenceBedrockBearerToken)?.toString().trim(),
+    );
+    const hasProfile = Boolean(
+      (enterprise?.inferenceBedrockProfile ??
+        localOverlay.inferenceBedrockProfile)?.toString().trim(),
+    );
+    if (!hasBearer && !hasProfile) {
+      try {
+        const {
+          resolveBedrockRoleCredentials,
+          bedrockRoleCredentialsToEnv,
+        } = await import("./enterpriseBedrockSsoAuth");
+        // Local/typed bag first; MDM SSO keys only if local bag has none.
+        const creds =
+          (await resolveBedrockRoleCredentials(localOnlyDeps)) ??
+          (options.userDataPath
+            ? await resolveBedrockRoleCredentials(fullViDeps)
+            : null);
+        if (creds) Object.assign(env, bedrockRoleCredentialsToEnv(creds));
+      } catch (error) {
+        console.warn(
+          "[custom-3p] Bedrock SSO role credentials unavailable",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+  }
+
+  // Credential helper wins for gateway-style key injection when configured (yL).
+  // Official residual reads vi() bag — product prefers configLibrary/typed first
+  // so inferenceCredentialHelper is not lost to a stripped snapshot, and so
+  // host spawn does not block on MDM registry when the helper is local-only.
+  try {
+    const {
+      runEnterpriseCredentialHelperWithTtl,
+      credentialHelperTokenToSpawnEnv,
+      hasEnterpriseCredentialHelper,
+    } = await import("./enterpriseCredentialHelper");
+    let helperDeps = localOnlyDeps;
+    if (
+      !hasEnterpriseCredentialHelper(helperDeps) &&
+      options.userDataPath
+    ) {
+      helperDeps = fullViDeps;
+    }
+    if (hasEnterpriseCredentialHelper(helperDeps)) {
+      const token = await runEnterpriseCredentialHelperWithTtl(helperDeps);
+      Object.assign(env, credentialHelperTokenToSpawnEnv(token));
+    }
+  } catch (error) {
+    console.warn(
+      "[custom-3p] credential helper TTL path failed",
+      error instanceof Error ? error.message : String(error),
+    );
   }
 
   return env;

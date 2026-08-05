@@ -1,5 +1,7 @@
 import { app, BrowserWindow, nativeTheme, shell } from "electron";
 import path from "node:path";
+import { SettingsStore } from "../services/settings/settingsStore";
+import { resolveDialogLocale } from "../services/settings/desktopDialogI18n";
 
 let setupWindow: BrowserWindow | null = null;
 
@@ -9,6 +11,39 @@ function isAlive(window: BrowserWindow | null): window is BrowserWindow {
 
 function jsonArg(name: string, value: unknown): string {
   return `${name}=${JSON.stringify(value ?? {})}`;
+}
+
+/**
+ * Official createSetupWindow residual (app.asar `vgr`):
+ *   title: formatMessage("Configure Third-Party Inference…", id 9GRz7bC+rr)
+ * Product: follow DesktopIntl / preferences.locale (same bag as dialog i18n).
+ */
+function resolveSetupWindowTitle(): string {
+  const TITLES: Record<string, string> = {
+    "en-US": "Configure Third-Party Inference…",
+    "zh-CN": "配置第三方推理…",
+    "ja-JP": "サードパーティ推論の設定…",
+    "ko-KR": "타사 추론 구성…",
+    "de-DE": "Drittanbieter-Inferenz konfigurieren…",
+    "fr-FR": "Configurer l’inférence tierce…",
+    "es-ES": "Configurar inferencia de terceros…",
+    "es-419": "Configurar inferencia de terceros…",
+    "pt-BR": "Configurar inferência de terceiros…",
+    "it-IT": "Configura inferenza di terze parti…",
+    "id-ID": "Konfigurasi inferensi pihak ketiga…",
+    "hi-IN": "थर्ड-पार्टी इनफरेंस कॉन्फ़िगर करें…",
+  };
+  try {
+    const prefs = new SettingsStore().getPreferences();
+    const raw =
+      typeof prefs.locale === "string" && prefs.locale.length > 0
+        ? prefs.locale
+        : app.getLocale();
+    const locale = resolveDialogLocale(raw);
+    return TITLES[locale] ?? TITLES["en-US"]!;
+  } catch {
+    return TITLES["en-US"]!;
+  }
 }
 
 /**
@@ -26,8 +61,10 @@ function jsonArg(name: string, value: unknown): string {
  * Official does **not** set parent/modal. Product previously passed parent=mainWindow
  * and served product-web SPA (no setup route) → window showed task/new shell.
  *
- * Page residual lives in ion-dist (`c71860c77-BOaDa5w5.js`); app protocol dual-root
- * must serve residual ion-dist for this path (see staticIonDist RESIDUAL_APP_SPA_PATHS).
+ * Page residual lives in ion-dist (`c71860c77-BOaDa5w5.js`) — full official Setup UI.
+ * app protocol dual-root must serve residual ion-dist for this path
+ * (staticIonDist RESIDUAL_APP_SPA_PATHS). Product owns configLibrary + CLI env +
+ * multi-vendor bag fields (patch-setup-multivendor-providers after sync).
  */
 export async function openCustom3pSetupWindow(_parent?: BrowserWindow): Promise<BrowserWindow | null> {
   if (isAlive(setupWindow)) {
@@ -45,8 +82,8 @@ export async function openCustom3pSetupWindow(_parent?: BrowserWindow): Promise<
     minWidth: 720,
     minHeight: 560,
     backgroundColor,
-    // Product zh-CN chrome title; official defaultMessage is English 9GRz7bC+rr.
-    title: "配置第三方推理…",
+    // Official 9GRz7bC+rr — follow preferences.locale (not hard-coded zh).
+    title: resolveSetupWindowTitle(),
     autoHideMenuBar: true,
     // Official: no parent/modal — independent setup window.
     webPreferences: {
@@ -72,6 +109,7 @@ export async function openCustom3pSetupWindow(_parent?: BrowserWindow): Promise<
     setupWindow = null;
   });
 
+  // Official residual SPA (not product approximate): dual-root serves ion-dist.
   // Official: loadURL immediately (no show:false + ready-to-show gate).
   await setupWindow.loadURL("app://localhost/setup-desktop-3p");
   if (isAlive(setupWindow)) {

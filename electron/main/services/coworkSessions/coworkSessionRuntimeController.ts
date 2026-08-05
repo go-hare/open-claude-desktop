@@ -524,7 +524,7 @@ export class CoworkSessionRuntimeController {
     hostUploadsDir: string | null,
     hostClaudeConfigDir: string | null,
     installedAppNames?: string[] | null,
-  ): CoworkRuntimeQuery {
+  ): CoworkRuntimeQuery | Promise<CoworkRuntimeQuery> {
     if (autoMemoryDir === null && this.getAutoMemoryDir) {
       autoMemoryDir = this.getAutoMemoryDir(session) ?? null;
     }

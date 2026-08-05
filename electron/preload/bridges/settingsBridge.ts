@@ -42,6 +42,29 @@ export const settingsBridgeSpec: NamespaceBridgeSpec = {
   Custom3pHelperRun: {
     invoke: ["getCredentialHelperLastRun", "runCredentialHelper"],
   },
+  /**
+   * Product enterprise interactive auth surface (main also wires official
+   * LocalAgentModeSessions.triggerInteractiveAuth). Preload must list methods
+   * or residual/product UI cannot invoke claude.settings.EnterpriseAuth.*.
+   */
+  EnterpriseAuth: {
+    invoke: [
+      "identityPolicy",
+      "nonessentialServicesDisabled",
+      "needsVertexAuth",
+      "hasVertexAdc",
+      "runVertexAuth",
+      "revokeVertexAuth",
+      "needsBedrockSsoAuth",
+      "runBedrockSsoAuth",
+      "revokeBedrockSsoAuth",
+      "probeBedrockRoleCredentials",
+      "fetchBootstrap",
+      "clearBootstrapOidc",
+      "hasCredentialHelper",
+      "runCredentialHelper",
+    ],
+  },
   Custom3pSetup: {
     invoke: [
       "listConfigs",

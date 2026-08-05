@@ -117,7 +117,7 @@ describe("ClaudeCliRunner Tasks residual", () => {
     expect(openStoppableTasks.size).toBe(0);
   });
 
-  it("runTurn continues on same stdin after parent result (no already_running)", () => {
+  it("runTurn continues on same stdin after parent result (no already_running)", async () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "continue residual" });
     // Seed second user live-tail as sendMessage would
@@ -143,7 +143,7 @@ describe("ClaudeCliRunner Tasks residual", () => {
       activeUserUuid: "uuid-first",
     });
 
-    const ok = runner.runTurn(session.id, "second turn please", {
+    const ok = await runner.runTurn(session.id, "second turn please", {
       messageUuid: "uuid-second",
     });
     expect(ok).toBe(true);
@@ -164,7 +164,7 @@ describe("ClaudeCliRunner Tasks residual", () => {
     ).toBe(false);
   });
 
-  it("runTurn mid-stream still refuses second spawn with already_running", () => {
+  it("runTurn mid-stream still refuses second spawn with already_running", async () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "midstream" });
     store.sendMessage(session.id, "interrupt?", "user");
@@ -188,7 +188,7 @@ describe("ClaudeCliRunner Tasks residual", () => {
       sawAssistantText: false,
     });
 
-    const ok = runner.runTurn(session.id, "interrupt?", {});
+    const ok = await runner.runTurn(session.id, "interrupt?", {});
     expect(ok).toBe(false);
     expect(writes).toHaveLength(0);
     expect(

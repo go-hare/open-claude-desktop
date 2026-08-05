@@ -6,11 +6,17 @@ import readline from "node:readline";
 import { app } from "electron";
 import {
   buildClaudeCliSpawnEnv,
+  enrichClaudeCliSpawnEnvWithEnterpriseAuth,
   readAppliedCustom3pFromDesktopShellSettings,
   resolveCliModelArg,
   type Custom3pEnterpriseConfig,
 } from "../custom3p/custom3pCliEnv";
 import { resolveDeploymentModeFromUserData } from "../custom3p/deploymentMode";
+import { resolveEnterpriseDisallowedTools } from "../coworkHostLoop/coworkEnterpriseConfig";
+import {
+  accumulateEnterpriseTokenUsage,
+  assertEnterpriseTokenCapAllowsTurn,
+} from "../coworkHostLoop/coworkTokenCap";
 import { getLocalSessionEnvironmentSync } from "./localSessionEnvironmentStore";
 import type { LocalSession, LocalSessionStore, LocalToolPermissionRequest } from "./localSessionStore";
 import { resolveSshRemoteCwd, spawnClaudeOverSsh } from "./sshCliSpawn";
@@ -220,6 +226,7 @@ function resolveLocalSessionEnvironment(userDataPath: string | undefined): Recor
   }
 }
 
+/** Sync residual only (Vertex ADC file / OTLP / bag). Prefer resolveClaudeSpawnEnvAsync before spawn. */
 export function resolveClaudeSpawnEnv(): Record<string, string | undefined> {
   const userDataPath = resolveDesktopUserDataPath();
   return buildClaudeCliSpawnEnv({
@@ -229,10 +236,33 @@ export function resolveClaudeSpawnEnv(): Record<string, string | undefined> {
   });
 }
 
-export function spawnClaude(executable: string, args: string[], cwd: string): ChildProcessWithoutNullStreams {
-  const env = resolveClaudeSpawnEnv();
+/**
+ * Official writeSessionSecrets residual — sync bag + async Bedrock SSO / credential helper TTL.
+ */
+export async function resolveClaudeSpawnEnvAsync(): Promise<
+  Record<string, string | undefined>
+> {
+  const userDataPath = resolveDesktopUserDataPath();
+  const base = buildClaudeCliSpawnEnv({
+    processEnv: process.env,
+    localSessionEnv: resolveLocalSessionEnvironment(userDataPath),
+    userDataPath,
+  });
+  return enrichClaudeCliSpawnEnvWithEnterpriseAuth(base, { userDataPath });
+}
+
+export async function spawnClaude(
+  executable: string,
+  args: string[],
+  cwd: string,
+): Promise<ChildProcessWithoutNullStreams> {
+  const env = await resolveClaudeSpawnEnvAsync();
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(executable)) {
-    return spawn("cmd.exe", ["/d", "/s", "/c", executable, ...args], { cwd, env, windowsHide: true });
+    return spawn("cmd.exe", ["/d", "/s", "/c", executable, ...args], {
+      cwd,
+      env,
+      windowsHide: true,
+    });
   }
   return spawn(executable, args, { cwd, env, windowsHide: true });
 }
@@ -241,19 +271,19 @@ export function spawnClaude(executable: string, args: string[], cwd: string): Ch
  * Official WZ(sshConfig) → eAr kind ssh + configureSSHSpawn residual (product host-pipe):
  * when session.sshConfig is set, spawn remote `claude` over ssh instead of local binary.
  */
-export function spawnClaudeForSession(
+export async function spawnClaudeForSession(
   session: LocalSession,
   executable: string,
   args: string[],
   cwd: string,
-): ChildProcessWithoutNullStreams {
+): Promise<ChildProcessWithoutNullStreams> {
   if (session.sshConfig) {
     const remoteCwd = resolveSshRemoteCwd(session);
     return spawnClaudeOverSsh({
       sshConfig: session.sshConfig,
       remoteCwd,
       args,
-      hostEnv: resolveClaudeSpawnEnv(),
+      hostEnv: await resolveClaudeSpawnEnvAsync(),
       localCwd: process.cwd(),
     });
   }
@@ -463,7 +493,15 @@ function buildClaudeArgs(
   pushCliMcpConfig(args, mergedMcpServers);
   pushCliMcpConfig(args, request.remoteMcpServers ?? sessionRaw.remoteMcpServers);
   pushListOption(args, "--allowedTools", request.enabledMcpTools ?? request.allowedTools ?? sessionRaw.enabledMcpTools);
-  pushListOption(args, "--disallowedTools", request.disallowedTools ?? sessionRaw.disallowedTools);
+  // Official d0A(Ti()) residual — merge enterprise disabledBuiltinTools into CLI disallowedTools.
+  {
+    const fromRequest = stringList(
+      request.disallowedTools ?? sessionRaw.disallowedTools,
+    );
+    const fromEnterprise = resolveEnterpriseDisallowedTools();
+    const merged = [...new Set([...fromRequest, ...fromEnterprise])];
+    pushListOption(args, "--disallowedTools", merged.length > 0 ? merged : undefined);
+  }
   pushListOption(args, "--tools", request.tools ?? sessionRaw.tools);
   const settingSources = stringList(request.settingSources);
   if (settingSources.length > 0) args.push("--setting-sources", settingSources.join(","));
@@ -870,54 +908,89 @@ export class ClaudeCliRunner {
         finish(result);
       }, CONTROL_REQUEST_TIMEOUT_MS);
 
-      try {
-        child = spawnClaude(executable, args, process.cwd());
-      } catch {
-        finish(null);
-        return;
-      }
-
-      const stdout = readline.createInterface({ input: child.stdout });
-      let requested = false;
-      // Bare CLI with --input-format stream-json never emits `system init` until it
-      // receives at least one user message — so kick a trivial user turn on a short
-      // timer (matches official control-channel activation), then wait for init
-      // before issuing get_settings.
-      const kickTimer = setTimeout(() => {
+      void (async () => {
         try {
-          writeJsonLine(child!, { type: "user", message: { role: "user", content: [{ type: "text", text: "." }] } });
-        } catch { /* stdin closed */ }
-      }, 800);
-      const finishWithKick = (value: unknown | null) => {
-        clearTimeout(kickTimer);
-        finish(value);
-      };
-      stdout.on("line", (line) => {
-        const event = parseJsonLine(line);
-        const response = controlResponsePayload(event, requestId);
-        if (response !== undefined) {
-          result = response;
-          try { child?.kill("SIGTERM"); } catch { /* already exited */ }
-          finishWithKick(result);
+          child = await spawnClaude(executable, args, process.cwd());
+        } catch {
+          finish(null);
           return;
         }
-        if (!requested && stringValue(event.type) === "system" && stringValue(event.subtype) === "init") {
-          requested = true;
-          writeJsonLine(child!, { type: "control_request", request_id: requestId, request: { subtype: "get_settings" } });
-        }
-      });
-      child.on("error", () => finishWithKick(result));
-      child.on("close", () => {
-        stdout.close();
-        finishWithKick(result);
-      });
-    }).then((response) => (response == null ? null : parseAppliedEffortBag(response)));
+
+        const stdout = readline.createInterface({ input: child.stdout });
+        let requested = false;
+        // Bare CLI with --input-format stream-json never emits `system init` until it
+        // receives at least one user message — so kick a trivial user turn on a short
+        // timer (matches official control-channel activation), then wait for init
+        // before issuing get_settings.
+        const kickTimer = setTimeout(() => {
+          try {
+            writeJsonLine(child!, {
+              type: "user",
+              message: { role: "user", content: [{ type: "text", text: "." }] },
+            });
+          } catch {
+            /* stdin closed */
+          }
+        }, 800);
+        const finishWithKick = (value: unknown | null) => {
+          clearTimeout(kickTimer);
+          finish(value);
+        };
+        stdout.on("line", (line) => {
+          const event = parseJsonLine(line);
+          const response = controlResponsePayload(event, requestId);
+          if (response !== undefined) {
+            result = response;
+            try {
+              child?.kill("SIGTERM");
+            } catch {
+              /* already exited */
+            }
+            finishWithKick(result);
+            return;
+          }
+          if (
+            !requested &&
+            stringValue(event.type) === "system" &&
+            stringValue(event.subtype) === "init"
+          ) {
+            requested = true;
+            writeJsonLine(child!, {
+              type: "control_request",
+              request_id: requestId,
+              request: { subtype: "get_settings" },
+            });
+          }
+        });
+        child.on("error", () => finishWithKick(result));
+        child.on("close", () => {
+          stdout.close();
+          finishWithKick(result);
+        });
+      })();
+    }).then((response) =>
+      response == null ? null : parseAppliedEffortBag(response),
+    );
   }
 
-  runTurn(sessionId: string, prompt: string, request: Record<string, unknown> = {}): boolean {
+  async runTurn(
+    sessionId: string,
+    prompt: string,
+    request: Record<string, unknown> = {},
+  ): Promise<boolean> {
     const session = this.store.getSession(sessionId);
     const text = prompt.trim();
     if (!session || !text) return false;
+    // Official QeA residual — refuse Code turn when enterprise token soft-cap exceeded.
+    try {
+      assertEnterpriseTokenCapAllowsTurn();
+    } catch (error) {
+      this.emitError(
+        sessionId,
+        error instanceof Error ? error.message : "custom3p_token_cap_exceeded",
+      );
+      return false;
+    }
 
     // Prefer explicit request.messageUuid (web createMessageUuid / start seed). Fall back to
     // the live-tail user seed uuid so CLI echo shares identity when home start omitted it.
@@ -1006,7 +1079,12 @@ export class ClaudeCliRunner {
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawnClaudeForSession(session, executable, args, resolveCwd(session));
+      child = await spawnClaudeForSession(
+        session,
+        executable,
+        args,
+        resolveCwd(session),
+      );
       child.stdin.write(
         userInputLine(
           promptWithSelectedFiles(text, request.userSelectedFiles),
@@ -1412,6 +1490,19 @@ export class ClaudeCliRunner {
     if (turn) applyStoppableTaskBookendEvent(turn.openStoppableTasks, event);
     if (turn && event.type === "result") {
       turn.sawResult = true;
+      // Official A6 residual (CCD): accumulate usage from result.usage when token cap set.
+      const usage = asRecord(event.usage);
+      const inTok = numberValue(usage.input_tokens ?? usage.inputTokens);
+      const outTok = numberValue(usage.output_tokens ?? usage.outputTokens);
+      if (inTok > 0 || outTok > 0) {
+        try {
+          accumulateEnterpriseTokenUsage(inTok, outTok, {
+            getUserDataPath: () => app.getPath("userData"),
+          });
+        } catch {
+          /* soft cap — never block result path */
+        }
+      }
       // Parent result = main turn content done. Keep CLI process/stdin open while
       // openStoppableTasks (stop_task residual), but clear host isRunning so web
       // isResponding / main spinner settle (Tasks pane tracks bookends separately).
@@ -1494,28 +1585,34 @@ export class ClaudeCliRunner {
         finish(result);
       }, CONTROL_REQUEST_TIMEOUT_MS);
 
-      try {
-        // SSH sessions probe the remote CLI the same way as runTurn (host-pipe).
-        child = spawnClaudeForSession(session, executable, args, cwd);
-      } catch {
-        finish(null);
-        return;
-      }
+      void (async () => {
+        try {
+          // SSH sessions probe the remote CLI the same way as runTurn (host-pipe).
+          child = await spawnClaudeForSession(session, executable, args, cwd);
+        } catch {
+          finish(null);
+          return;
+        }
 
-      const stdout = readline.createInterface({ input: child.stdout });
-      stdout.on("line", (line) => {
-        const event = parseJsonLine(line);
-        const response = controlResponsePayload(event, requestId);
-        if (response !== undefined) result = response;
-      });
-      child.on("error", () => finish(result));
-      child.on("close", () => {
-        stdout.close();
-        finish(result);
-      });
+        const stdout = readline.createInterface({ input: child.stdout });
+        stdout.on("line", (line) => {
+          const event = parseJsonLine(line);
+          const response = controlResponsePayload(event, requestId);
+          if (response !== undefined) result = response;
+        });
+        child.on("error", () => finish(result));
+        child.on("close", () => {
+          stdout.close();
+          finish(result);
+        });
 
-      writeJsonLine(child, { type: "control_request", request_id: requestId, request });
-      child.stdin.end();
+        writeJsonLine(child, {
+          type: "control_request",
+          request_id: requestId,
+          request,
+        });
+        child.stdin.end();
+      })();
     });
   }
 

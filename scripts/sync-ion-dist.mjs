@@ -26,3 +26,16 @@ await fs.rm(target, { recursive: true, force: true });
 await fs.mkdir(path.dirname(target), { recursive: true });
 await fs.cp(source, target, { recursive: true, preserveTimestamps: true });
 console.log(`ion-dist synced: ${source} -> ${target}`);
+
+// Product multi-vendor (openai/gemini/grok) is not in official residual bytes.
+// resources/ion-dist is gitignored and wiped above — re-apply after every sync so
+// Connection grid keeps product providers while residual UI stays 1:1 official.
+const { spawnSync } = await import("node:child_process");
+const patch = spawnSync(
+  process.execPath,
+  [path.join(root, "scripts/patch-setup-multivendor-providers.mjs")],
+  { stdio: "inherit", cwd: root },
+);
+if (patch.status !== 0) {
+  process.exit(patch.status ?? 1);
+}

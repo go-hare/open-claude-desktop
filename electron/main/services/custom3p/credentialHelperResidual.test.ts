@@ -73,9 +73,15 @@ describe("credentialHelperResidual", () => {
 
   it("runs absolute helper script and records last run", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cred-helper-"));
-    const script = path.join(dir, "helper.sh");
-    await fs.writeFile(script, "#!/bin/sh\necho 'tok-from-helper'\n", "utf8");
-    await fs.chmod(script, 0o755);
+    // winSpawn residual: .cmd via cmd.exe on win32; bare absolute + shebang elsewhere.
+    const isWin = process.platform === "win32";
+    const script = path.join(dir, isWin ? "helper.cmd" : "helper.sh");
+    await fs.writeFile(
+      script,
+      isWin ? "@echo off\r\necho tok-from-helper\r\n" : "#!/bin/sh\necho 'tok-from-helper'\n",
+      "utf8",
+    );
+    if (!isWin) await fs.chmod(script, 0o755);
 
     const result = await runCredentialHelperResidual(script);
     expect(result.ok).toBe(true);

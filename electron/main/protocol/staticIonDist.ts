@@ -1,10 +1,12 @@
-import { net } from "electron";
+import { app, net } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { APP_HOST } from "./constants";
 import { buildAppContentSecurityPolicy, extractInlineScriptHashes } from "./csp";
 import { resolveInsideRoot } from "./safePath";
+import { SettingsStore } from "../services/settings/settingsStore";
+import { resolveDialogLocale } from "../services/settings/desktopDialogI18n";
 
 export type StaticIonDistOptions = {
   root: string;
@@ -18,8 +20,56 @@ export type StaticIonDistOptions = {
 };
 
 /**
- * Official ion-dist routes that product-web (open-claude-web) does not implement.
- * app.asar vgr createSetupWindow → app://localhost/setup-desktop-3p (ion chunk c71860c77-BOaDa5w5).
+ * Residual ion SPA locale bootstrap (index-BELzQL5P):
+ *   const l3t="spa:locale", c3t=a_([localStorage.getItem(l3t), ...navigator.languages])
+ *   document.documentElement.lang=c3t
+ * Product DesktopIntl preference must win over OS language for setup-desktop-3p.
+ * Inject a first inline script + lang so c3t resolves before module graph runs.
+ * CSP hashes recomputed from the modified HTML (extractInlineScriptHashes).
+ */
+function resolvePreferredSpaLocale(): string {
+  try {
+    const prefs = new SettingsStore().getPreferences();
+    const raw =
+      typeof prefs.locale === "string" && prefs.locale.length > 0
+        ? prefs.locale
+        : app.getLocale();
+    return resolveDialogLocale(raw);
+  } catch {
+    return "en-US";
+  }
+}
+
+function injectSpaLocaleBootstrap(html: string, locale: string): string {
+  const safe = locale.replace(/[^A-Za-z0-9-]/g, "") || "en-US";
+  const seed =
+    `<script>try{localStorage.setItem("spa:locale",${JSON.stringify(safe)})}catch(e){}</script>`;
+  let out = html;
+  // Prefer official residual process shim as anchor (always present in ion-dist index).
+  const shim =
+    '<script>void 0===globalThis.process&&(globalThis.process={env:{},cwd:function(){return"/"}}),void 0===globalThis.global&&(globalThis.global=globalThis)</script>';
+  if (out.includes(shim)) {
+    out = out.replace(shim, `${shim}${seed}`);
+  } else if (out.includes("</head>")) {
+    out = out.replace("</head>", `${seed}</head>`);
+  } else {
+    out = seed + out;
+  }
+  // lang= is read by some residual paths; keep in sync with spa:locale.
+  out = out.replace(/<html\b([^>]*)\blang="[^"]*"/, `<html$1lang="${safe}"`);
+  if (!/\blang=/.test(out.slice(0, 200))) {
+    out = out.replace("<html", `<html lang="${safe}"`);
+  }
+  return out;
+}
+
+/**
+ * Official ion-dist SPA routes (1:1 residual UI + styles — not product approximate).
+ * app.asar vgr createSetupWindow → app://localhost/setup-desktop-3p
+ * (chunk c71860c77-BOaDa5w5: full categories / className / layout).
+ * Product owns configLibrary + Custom3pSetup IPC + multi-vendor bag fields;
+ * multi-vendor Connection cards re-applied via patch-setup-multivendor-providers
+ * after sync:ion-dist (ion-dist is gitignored wipe).
  */
 export const RESIDUAL_APP_SPA_PATHS = new Set([
   "/setup-desktop-3p",
@@ -96,8 +146,24 @@ export function createStaticIonDistHandler(options: StaticIonDistOptions) {
     const residualSpa = isResidualSpaPath(pathname) && residualRoot;
 
     // Residual SPA routes always use official ion-dist index (has setup-desktop-3p route).
+    // Seed spa:locale from DesktopIntl preference so setup-desktop-3p follows multi-language config.
     if (residualSpa) {
-      return withContentSecurityPolicy(await net.fetch(residualIndexUrl), await getResidualCsp());
+      const locale = resolvePreferredSpaLocale();
+      const rawHtml = await fs.readFile(residualIndexHtml, "utf8");
+      const html = injectSpaLocaleBootstrap(rawHtml, locale);
+      const scriptHashes = await extractInlineScriptHashes(html);
+      const csp =
+        options.csp ??
+        buildAppContentSecurityPolicy({ scriptHashes });
+      return withContentSecurityPolicy(
+        new Response(html, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+          },
+        }),
+        csp,
+      );
     }
 
     // Prefer primary file (product-web), then residual ion-dist assets.

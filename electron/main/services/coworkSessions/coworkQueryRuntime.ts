@@ -1,3 +1,4 @@
+import { accumulateEnterpriseTokenUsage } from "../coworkHostLoop/coworkTokenCap";
 import type { CoworkSessionEvent } from "./coworkSessionManagerTypes";
 import type {
   CoworkRuntimeQuery,
@@ -358,6 +359,30 @@ export class CoworkQueryRuntime {
   private handleResult(message: CoworkSdkMessage): void {
     // Official: non-stream path flushes pending delta before durable result handling.
     this.flushPendingStreamDelta();
+    // Official A6 residual — accumulate result.usage into enterprise soft-cap window.
+    const usage = asMessageRecord(message).usage;
+    if (usage && typeof usage === "object") {
+      const u = usage as Record<string, unknown>;
+      const inTok =
+        typeof u.input_tokens === "number"
+          ? u.input_tokens
+          : typeof u.inputTokens === "number"
+            ? u.inputTokens
+            : 0;
+      const outTok =
+        typeof u.output_tokens === "number"
+          ? u.output_tokens
+          : typeof u.outputTokens === "number"
+            ? u.outputTokens
+            : 0;
+      if (inTok > 0 || outTok > 0) {
+        try {
+          accumulateEnterpriseTokenUsage(inTok, outTok);
+        } catch {
+          /* soft cap — never block result path */
+        }
+      }
+    }
     const failed = isFailedResult(message);
     // Official failed-result interrupt short-circuit (p = is_error path):
     //   if _turnInterruptRequested || lifecycleState!=="running":

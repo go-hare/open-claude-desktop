@@ -27,6 +27,10 @@ import {
   getBridgeConsent,
   identityFromSettingsPrefs,
 } from "../services/coworkSessions/sessionsBridgeResidual";
+import {
+  revokeEnterpriseInteractiveAuth,
+  triggerEnterpriseInteractiveAuth,
+} from "../services/custom3p/enterpriseInteractiveAuth";
 
 /**
  * Residual LocalAgentModeSessions methods that were preload-listed but unregistered.
@@ -36,7 +40,7 @@ import {
  * - bridge: custom-3p residual → consent/enabled boolean, void poll/reset, delete false; yit status
  * - direct MCP: residual status bag via DirectMcpConnectionManager (URL remotes);
  *   custom3p MCP OAuth loopback (authorizeDirectMcpServer → _ni) — not Anthropic login
- * - interactive auth: idle/null residual (no invent Gateway SSO / Anthropic OAuth)
+ * - interactive auth: Vertex / Bedrock SSO / bootstrap OIDC (never invent Anthropic 1p OAuth)
  * - folder TCC: desktop/documents/downloads ∈ {Granted,Denied,NotSupported}
  * - mcp resources: missing session → [] / {contents:[]}
  */
@@ -287,13 +291,33 @@ export function createCoworkLocalAgentResidualHandlers(
       await respondBridgePermissionPreflightLive(requestId, proceed);
     }),
 
-    // ── Interactive auth residual (no invent OAuth / Gateway SSO success) ──
-    triggerInteractiveAuth: secured(async () => ({
-      ok: false,
-      error: "interactive_auth_not_available",
-    })),
-    // No interactive auth session to revoke in 3p residual path.
-    revokeInteractiveAuth: secured(async () => false),
+    // ── Interactive auth residual (Vertex / Bedrock SSO / bootstrap OIDC) ──
+    // Official: LocalAgentModeSessions.triggerInteractiveAuth → p1e / uHe / dPe.
+    // Never invent { ok:true } without real browser/device/bootstrap success.
+    triggerInteractiveAuth: secured(async () => {
+      let userDataPath: string | undefined;
+      try {
+        userDataPath = path.dirname(context.settings.getSettingsFile());
+      } catch {
+        userDataPath = undefined;
+      }
+      const deps = userDataPath
+        ? { getUserDataPath: () => userDataPath! }
+        : {};
+      return triggerEnterpriseInteractiveAuth(deps);
+    }),
+    revokeInteractiveAuth: secured(async () => {
+      let userDataPath: string | undefined;
+      try {
+        userDataPath = path.dirname(context.settings.getSettingsFile());
+      } catch {
+        userDataPath = undefined;
+      }
+      const deps = userDataPath
+        ? { getUserDataPath: () => userDataPath! }
+        : {};
+      return revokeEnterpriseInteractiveAuth(deps);
+    }),
 
     // ── Folder TCC residual (official nor) ─────────────────────────────────
     requestFolderTccAccess: secured(async () => requestFolderTccAccessResidual()),

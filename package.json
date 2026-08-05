@@ -27,6 +27,7 @@
     "make": "npm run build && npm run restore:product-main && npm run build:product-web && npm run prepare:electron-zip && cross-env electron_config_cache=./.electron-cache node node_modules/@electron-forge/cli/dist/electron-forge.js make && npm run align:bundle && npm run audit:bundle",
     "sync:original-app": "node scripts/sync-original-app.mjs",
     "sync:ion-dist": "node scripts/sync-ion-dist.mjs",
+    "patch:setup-providers": "node scripts/patch-setup-multivendor-providers.mjs",
     "sync:residual": "npm run sync:original-app && npm run sync:ion-dist && npm run sync:helpers && npm run sync:shell-secondary",
     "verify:config": "node scripts/verify-project-config.mjs",
     "audit:shell": "node scripts/audit-shell-alignment.mjs",

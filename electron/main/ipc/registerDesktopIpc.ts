@@ -8,7 +8,12 @@ import {
 } from "../services/coworkAccount/coworkAccountIdentityEffects";
 import { loadCoworkBootstrapIdentity } from "../services/coworkAccount/coworkBootstrapIdentity";
 import { createCoworkHostLoopModeResolver } from "../services/coworkHostLoop/createCoworkHostLoopModeResolver";
-import { isCoworkEnterpriseRequireFullVmSandbox } from "../services/coworkHostLoop/coworkEnterpriseConfig";
+import {
+  isCoworkEnterpriseRequireFullVmSandbox,
+  resolveEnterpriseAllowedWorkspaceFolders,
+  resolveEnterpriseVmEgressPolicy,
+  setCoworkEnterpriseUserDataPath,
+} from "../services/coworkHostLoop/coworkEnterpriseConfig";
 import { isCoworkHostLoopGrowthBookFeatureEnabled } from "../services/coworkHostLoop/coworkGrowthBookFeatures";
 import { getActiveCoworkGrowthBookLifecycle } from "../services/coworkHostLoop/coworkGrowthBookLifecycle";
 import { resolveCoworkRequireFullVmSandbox } from "../services/coworkHostLoop/coworkHostLoopMode";
@@ -63,6 +68,8 @@ import { registerSettingsHandlers } from "./settingsHandlers";
 import { registerStoreStateHandlers } from "./storeStateHandlers";
 import { registerWebMiscHandlers } from "./webMiscHandlers";
 import { registerWindowHandlers } from "./windowHandlers";
+import { registerNamespaceHandlers } from "./registerIpc";
+import { createEnterpriseAuthIpcHandlers } from "../services/custom3p/enterpriseAuthIpc";
 import { setSessionsBridgeStatusListener } from "../services/coworkSessions/sessionsBridgeResidual";
 import {
   configureSessionsBridgeLifecycle,
@@ -100,6 +107,8 @@ export function createDefaultIpcContext(
   // Shared SettingsStore so xn allowAllBrowserActions and AppPreferences IPC
   // see the same preference bag (official Xo()/F_ preferences).
   const settings = new SettingsStore();
+  // Official vi()/Ti() bag root — configLibrary under userData.
+  setCoworkEnterpriseUserDataPath(app.getPath("userData"));
   // Official uHA = vi().requireCoworkFullVmSandbox === true (MDM / configLibrary).
   // Residual env + settings preference still honored when enterprise source is none.
   const requireCoworkFullVmSandbox = () =>
@@ -153,6 +162,10 @@ export function createDefaultIpcContext(
   });
   const localAgentModeSessions = new CoworkSessionManager({
     accountContext: coworkAccount,
+    // Official Th() / vi().allowedWorkspaceFolders from enterprise bag.
+    getAllowedWorkspaceFolders: () => resolveEnterpriseAllowedWorkspaceFolders(),
+    // Official Ii().vmEgressPolicy() from coworkEgressAllowedHosts bag.
+    getVmEgressPolicy: () => resolveEnterpriseVmEgressPolicy(),
     // Official getBridgeActiveSession inject — SessionsBridgeClient owns activeSessions.
     getBridgeActiveSession: (remoteId) => {
       const s = getSessionsBridgeClient()?.getActiveSession(remoteId);
@@ -479,4 +492,24 @@ export function registerDesktopIpc(context: IpcHandlerContext): void {
   registerStoreStateHandlers(context);
   registerWebMiscHandlers(context);
   registerFeatureHandlers(context);
+  // Official nai / bedrock SSO / bootstrap / credential helper residual surface.
+  // Setup / login repair invoke these; never invents tokens without browser flow.
+  // Lives under claude.settings (same family as Custom3pSetup) — not a new product namespace.
+  registerNamespaceHandlers(
+    "claude.settings",
+    createEnterpriseAuthIpcHandlers(),
+    "enterpriseAuth",
+  );
+  // Official r5t residual — non-interactive bootstrap pull when OIDC token already cached.
+  // Does not open a browser; NeedsBootstrapAuthError → skipped until interactive IPC.
+  void import("../services/custom3p/enterpriseBootstrapOidc")
+    .then(({ fetchEnterpriseBootstrapConfig }) =>
+      fetchEnterpriseBootstrapConfig(
+        {},
+        { interactive: false, applyRemoteTier: true },
+      ),
+    )
+    .catch(() => {
+      /* offline / unconfigured / needs interactive auth */
+    });
 }

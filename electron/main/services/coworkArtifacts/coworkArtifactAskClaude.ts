@@ -24,7 +24,11 @@ import { isCoworkGrowthBookFeatureOn } from "../coworkHostLoop/coworkGrowthBookF
 import { resolveClaudeCodeBinaryPath } from "../../ipc/shellSoftTrueResidual";
 import { getCoworkApiToken } from "../coworkAccount/coworkOauthFlow";
 import { resolveCoworkSessionsBridgeOauthConfig } from "../coworkAccount/coworkOauthConfigs";
-import { buildClaudeCliSpawnEnv } from "../custom3p/custom3pCliEnv";
+import {
+  buildClaudeCliSpawnEnv,
+  enrichClaudeCliSpawnEnvWithEnterpriseAuth,
+} from "../custom3p/custom3pCliEnv";
+import { app } from "electron";
 
 /** Official growthbook gate for artifact inference / coworkArtifacts capability. */
 export const ARTIFACT_INFERENCE_FEATURE_FLAG = "2940196192";
@@ -180,15 +184,27 @@ async function defaultRunArtifactSample(
   const samplePrompt = buildArtifactSamplePrompt(prompt, data);
   // Official G4-ish env + artifact_sample tags. Use localSessionEnv overlay so
   // 3p bag still applies when present; token only when OAuth residual returned one.
+  // writeSessionSecrets residual: enrich Bedrock SSO / credential helper TTL before query.
+  let userDataPath: string | undefined;
+  try {
+    userDataPath = app.getPath("userData");
+  } catch {
+    userDataPath = process.env.CLAUDE_USER_DATA_DIR || undefined;
+  }
+  const baseEnv = buildClaudeCliSpawnEnv({
+    localSessionEnv: {
+      ANTHROPIC_AUTH_TOKEN: token,
+      CLAUDE_CODE_ENTRYPOINT: "local-agent",
+      CLAUDE_CODE_TAGS: "artifact_sample",
+      NODE_USE_SYSTEM_CA: "1",
+    },
+    userDataPath,
+  });
+  const enriched = await enrichClaudeCliSpawnEnvWithEnterpriseAuth(baseEnv, {
+    userDataPath,
+  });
   const spawnEnv = {
-    ...buildClaudeCliSpawnEnv({
-      localSessionEnv: {
-        ANTHROPIC_AUTH_TOKEN: token,
-        CLAUDE_CODE_ENTRYPOINT: "local-agent",
-        CLAUDE_CODE_TAGS: "artifact_sample",
-        NODE_USE_SYSTEM_CA: "1",
-      },
-    }),
+    ...enriched,
     CLAUDE_CODE_ENTRYPOINT: "local-agent",
     CLAUDE_CODE_TAGS: "artifact_sample",
     NODE_USE_SYSTEM_CA: "1",

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  ARTIFACT_ALLOWED_CDN_URLS,
+  ARTIFACT_ALLOWED_SCRIPT_CDNS,
+  ARTIFACT_ALLOWED_STYLE_CDNS,
+  buildArtifactContentSecurityPolicy,
   buildCoworkArtifactUrl,
   listOfficialArtifactsOnDisk,
   normalizeCoworkArtifactRecord,
@@ -14,10 +18,32 @@ describe("coworkArtifactViewManager residual helpers", () => {
     );
   });
 
+  it("PJi CSP residual: no CDN when nonessential blocked", () => {
+    const blocked = buildArtifactContentSecurityPolicy(false);
+    expect(blocked).toContain("connect-src 'none'");
+    expect(blocked).toContain("webrtc 'block'");
+    expect(blocked).not.toContain("cdn.jsdelivr.net");
+    expect(blocked).toContain("script-src 'self' 'unsafe-inline'");
+  });
+
+  it("PJi CSP residual: exact qPA/VPA URLs when nonessential allowed", () => {
+    const open = buildArtifactContentSecurityPolicy(true);
+    for (const entry of ARTIFACT_ALLOWED_SCRIPT_CDNS) {
+      expect(open).toContain(entry.url);
+      expect(ARTIFACT_ALLOWED_CDN_URLS.has(entry.url)).toBe(true);
+    }
+    for (const entry of ARTIFACT_ALLOWED_STYLE_CDNS) {
+      expect(open).toContain(entry.url);
+      expect(ARTIFACT_ALLOWED_CDN_URLS.has(entry.url)).toBe(true);
+    }
+    expect(open).toContain("connect-src 'none'");
+    expect(open).not.toContain("unsafe-eval");
+  });
+
   it("resolveOfficialArtifactsRoot uses Documents/Claude/Artifacts", () => {
-    expect(resolveOfficialArtifactsRoot(() => "/Users/me/Documents")).toBe(
-      "/Users/me/Documents/Claude/Artifacts",
-    );
+    const root = resolveOfficialArtifactsRoot(() => "/Users/me/Documents");
+    // path.join is platform-native; normalize for assert.
+    expect(root.replace(/\\/g, "/")).toBe("/Users/me/Documents/Claude/Artifacts");
   });
 
   it("normalizeCoworkArtifactRecord fills uUt-ish fields", () => {
@@ -44,7 +70,8 @@ describe("coworkArtifactViewManager residual helpers", () => {
 
   it("listOfficialArtifactsOnDisk returns only folders with index.html", async () => {
     const readdir = vi.fn(async (p: string) => {
-      if (String(p).endsWith("/versions")) {
+      const norm = String(p).replace(/\\/g, "/");
+      if (norm.endsWith("/versions")) {
         return [
           { name: "1700000000000.html", isFile: () => true },
           { name: "note.txt", isFile: () => true },
@@ -58,7 +85,8 @@ describe("coworkArtifactViewManager residual helpers", () => {
       ];
     });
     const access = vi.fn(async (p: string) => {
-      if (String(p).endsWith("/good/index.html")) return;
+      const norm = String(p).replace(/\\/g, "/");
+      if (norm.endsWith("/good/index.html")) return;
       throw new Error("missing");
     });
     const stat = vi.fn(async () => ({ birthtimeMs: 1_700_000_000_000, mtimeMs: 1_700_000_000_000 }));
@@ -69,7 +97,9 @@ describe("coworkArtifactViewManager residual helpers", () => {
     });
     expect(rows).toHaveLength(1);
     expect(rows[0]?.id).toBe("good");
-    expect(String(rows[0]?.indexHtmlPath)).toContain("/Claude/Artifacts/good/index.html");
+    expect(String(rows[0]?.indexHtmlPath).replace(/\\/g, "/")).toContain(
+      "/Claude/Artifacts/good/index.html",
+    );
     expect(rows[0]?.versions).toEqual([1_700_000_000_000]);
   });
 

@@ -9,6 +9,13 @@
  */
 
 import {
+  resolveEnterpriseBootstrapOidc,
+  resolveEnterpriseDeploymentOrganizationUuid,
+  resolveEnterpriseForceLoginOrgUUIDs,
+} from "../coworkHostLoop/coworkEnterpriseConfig";
+import { needsBedrockSsoInteractiveAuth } from "./enterpriseBedrockSsoAuth";
+import { needsVertexInteractiveAuth } from "./enterpriseVertexAuth";
+import {
   type DeploymentModeResolution,
   type DesktopShellDeploymentSnapshot,
   resolveDeploymentModeFromUserData,
@@ -60,6 +67,20 @@ export type Custom3pLoginDesktopStatus = {
   thirdPartyActivated: boolean;
   degraded: boolean;
   detail: string;
+  /**
+   * Official IHe / eHe residual — org UUID allowlist for 1p login (null = unrestricted).
+   */
+  forceLoginOrgUUIDs?: string[] | null;
+  /** Official deploymentOrganizationUuid residual (telemetry tag). */
+  deploymentOrganizationUuid?: string | null;
+  /**
+   * Official f1e / CHe residual — interactive auth still required (stored ADC/SSO considered).
+   * Product does not invent browser OAuth/SSO tokens; UI can surface setup repair.
+   */
+  needsVertexAuth?: boolean;
+  needsBedrockSsoAuth?: boolean;
+  /** Official bootstrapOidc present (interactive bootstrap still required). */
+  bootstrapOidcConfigured?: boolean;
   /**
    * Product extension: ~/.claude/settings.json has usable routing env, so the
    * login page may offer a "Continue with ~/.claude" card. Never contains the
@@ -240,6 +261,15 @@ export function custom3pLoginDesktopStatus(userDataPath?: string): Custom3pLogin
   const chooserDisabled = enterprise?.disableDeploymentModeChooser === true;
   const dotClaudeMode = snap.persistedDeploymentMode === "dotClaude";
   const enabled = !chooserDisabled && (resolution.thirdPartyActivated || dotClaudeMode);
+  // Official IHe / h1e / CHe residual — identity + interactive-auth needs from bag.
+  // Use userData inject so tests/desktop don't walk win32 registry for status.
+  const enterpriseDeps = {
+    getManagedConfig: () => ({}),
+    getLocalConfig: () =>
+      enterprise && typeof enterprise === "object"
+        ? (enterprise as Record<string, unknown>)
+        : {},
+  };
   return {
     enabled,
     source: dotClaudeMode ? { type: "local", remote: false } : sourceFromResolution(resolution),
@@ -249,6 +279,12 @@ export function custom3pLoginDesktopStatus(userDataPath?: string): Custom3pLogin
     thirdPartyActivated: resolution.thirdPartyActivated,
     degraded: resolution.degraded,
     detail: resolution.detail,
+    forceLoginOrgUUIDs: resolveEnterpriseForceLoginOrgUUIDs(enterpriseDeps),
+    deploymentOrganizationUuid:
+      resolveEnterpriseDeploymentOrganizationUuid(enterpriseDeps) ?? null,
+    needsVertexAuth: needsVertexInteractiveAuth(enterpriseDeps),
+    needsBedrockSsoAuth: needsBedrockSsoInteractiveAuth(enterpriseDeps),
+    bootstrapOidcConfigured: resolveEnterpriseBootstrapOidc(enterpriseDeps) !== null,
     dotClaude: dotClaudeConfig
       ? {
           available: true,

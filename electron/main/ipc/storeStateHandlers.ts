@@ -1,8 +1,14 @@
 import { app } from "electron";
 import path from "node:path";
 import { custom3pBootstrapState } from "../services/custom3p/custom3pStatus";
+import {
+  getInteractiveAuthState,
+  publishInteractiveAuthRecompute,
+  setInteractiveAuthPublisher,
+} from "../services/custom3p/enterpriseInteractiveAuth";
 import { getSupportBundleState } from "../services/support/supportBundle";
 import type { IpcHandlerContext } from "./context";
+import { originalEventSurface } from "./originalEventSurface";
 import { registerInterfaceHandlers, registerInterfaceSyncHandlers, type IpcHandler, type SyncIpcHandler } from "./registerIpc";
 import { getSessionsBridgeStatusState } from "../services/coworkSessions/sessionsBridgeResidual";
 import {
@@ -92,12 +98,25 @@ export function registerStoreStateHandlers(context: IpcHandlerContext): void {
     // No invent status/reason/enabled fields.
     getState: () => getSessionsBridgeStatusState(),
   });
+  // Official interactiveAuth store (lcA): null when no interactive step required,
+  // else { needsAuth, pendingUserCode, kind, … }. Publish via originalEventSurface.
+  setInteractiveAuthPublisher((state) => {
+    originalEventSurface(context).localAgentModeInteractiveAuthUpdated(state);
+  });
+  try {
+    const userDataPath = settingsUserDataPath(context);
+    publishInteractiveAuthRecompute({
+      getUserDataPath: () => userDataPath,
+    });
+  } catch {
+    publishInteractiveAuthRecompute({});
+  }
   registerStoreState({
     namespace: "claude.web",
     iface: "LocalAgentModeSessions",
-    // Official getInitialInteractiveAuthState: null | lcA bag. Product idle residual.
+    // Official getInitialInteractiveAuthState: null | lcA bag.
     storeName: "interactiveAuth",
-    getState: () => null,
+    getState: () => getInteractiveAuthState(),
   });
   registerStoreState({
     namespace: "claude.web",

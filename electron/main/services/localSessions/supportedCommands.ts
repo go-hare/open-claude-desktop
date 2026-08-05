@@ -91,24 +91,39 @@ function getCommandsFromTemporaryQuery(cwd: string): Promise<SupportedSlashComma
     };
     const timer = setTimeout(() => finish([]), temporaryQueryTimeoutMs);
 
-    try {
-      child = spawnClaude(executable, args, cwd);
-    } catch {
-      finish([]);
-      return;
-    }
+    void (async () => {
+      try {
+        child = await spawnClaude(executable, args, cwd);
+      } catch {
+        finish([]);
+        return;
+      }
 
-    const stdout = readline.createInterface({ input: child.stdout });
-    stdout.on("line", (line) => {
-      const event = parseJsonLine(line);
-      if (event?.type !== "system" || event.subtype !== "init" || !Array.isArray(event.slash_commands)) return;
-      finish(event.slash_commands.filter((name): name is string => typeof name === "string" && name.length > 0).map((name) => ({ name, description: name })));
-    });
-    child.on("error", () => finish([]));
-    child.on("close", () => {
-      stdout.close();
-      finish([]);
-    });
+      const stdout = readline.createInterface({ input: child.stdout });
+      stdout.on("line", (line) => {
+        const event = parseJsonLine(line);
+        if (
+          event?.type !== "system" ||
+          event.subtype !== "init" ||
+          !Array.isArray(event.slash_commands)
+        ) {
+          return;
+        }
+        finish(
+          event.slash_commands
+            .filter(
+              (name): name is string =>
+                typeof name === "string" && name.length > 0,
+            )
+            .map((name) => ({ name, description: name })),
+        );
+      });
+      child.on("error", () => finish([]));
+      child.on("close", () => {
+        stdout.close();
+        finish([]);
+      });
+    })();
   });
 }
 

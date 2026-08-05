@@ -3,11 +3,18 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  buildEnterpriseOtlpSpawnEnv,
   COWORK_ENTERPRISE_QB_KEYS,
   COWORK_ENTERPRISE_REQUIRE_FULL_VM_KEY,
+  ENTERPRISE_VERTEX_OAUTH_DEFAULT_SCOPES,
   isCoworkEnterpriseRequireFullVmSandbox,
+  isEnterpriseAutoUpdatesDisabled,
+  isEnterpriseNonessentialServicesDisabled,
   loadCoworkEnterpriseConfig,
+  needsEnterpriseBedrockSsoAuth,
+  needsEnterpriseVertexAuth,
   parseCoworkEnterpriseBoolean,
+  parseForceLoginOrgUUIDs,
   parseRegQueryValue,
   readManagedEnterpriseBag,
   readWindowsRequireCoworkFullVmSandbox,
@@ -16,6 +23,17 @@ import {
   resolveCoworkConfigLibraryMetaPath,
   resolveCoworkManagedPreferencesPlistPaths,
   resolveCoworkWindowsPoliciesKeyPath,
+  resolveEnterpriseAllowedWorkspaceFolders,
+  resolveEnterpriseAutoUpdaterPolicy,
+  resolveEnterpriseBedrockSso,
+  resolveEnterpriseBootstrapOidc,
+  resolveEnterpriseDeploymentOrganizationUuid,
+  resolveEnterpriseDisallowedTools,
+  resolveEnterpriseForceLoginOrgUUIDs,
+  resolveEnterpriseOtlpConfig,
+  resolveEnterpriseTokenCap,
+  resolveEnterpriseVertexOAuth,
+  resolveEnterpriseVmEgressPolicy,
   setCoworkEnterpriseRemoteTier,
 } from "./coworkEnterpriseConfig";
 import { resolveCoworkRequireFullVmSandbox } from "./coworkHostLoopMode";
@@ -264,5 +282,284 @@ describe("resolveCoworkRequireFullVmSandbox enterpriseValue", () => {
         resolveCoworkRequireFullVmSandbox({ enterpriseValue: true }),
     });
     expect(resolveCoworkHostLoopModeForNewSession(policy)).toBe(false);
+  });
+});
+
+describe("enterprise bag consumers residual", () => {
+  /** Skip win32 registry walk — inject empty managed so local bag is used. */
+  function localOnly(local: Record<string, unknown>) {
+    return {
+      getManagedConfig: () => ({}),
+      getLocalConfig: () => local,
+    };
+  }
+
+  it("d0A: maps Bash/WebFetch and bedrock WebSearch", () => {
+    const tools = resolveEnterpriseDisallowedTools(
+      localOnly({
+        disabledBuiltinTools: ["Bash", "NotebookEdit"],
+        inferenceProvider: "bedrock",
+      }),
+    );
+    expect(tools).toEqual(
+      expect.arrayContaining([
+        "Bash",
+        "NotebookEdit",
+        "mcp__workspace__bash",
+        "WebSearch",
+      ]),
+    );
+  });
+
+  it("vmEgressPolicy: * unrestricted, list allowlist, absent null", () => {
+    expect(
+      resolveEnterpriseVmEgressPolicy(
+        localOnly({ coworkEgressAllowedHosts: ["*"] }),
+      ),
+    ).toEqual({ kind: "unrestricted" });
+    expect(
+      resolveEnterpriseVmEgressPolicy(
+        localOnly({
+          coworkEgressAllowedHosts: ["*.corp.example.com", "api.example.com"],
+        }),
+      ),
+    ).toEqual({
+      kind: "allowlist",
+      domains: ["*.corp.example.com", "api.example.com"],
+    });
+    expect(resolveEnterpriseVmEgressPolicy(localOnly({}))).toBeNull();
+  });
+
+  it("Th: absent unrestricted, [] fail-closed", () => {
+    expect(resolveEnterpriseAllowedWorkspaceFolders(localOnly({}))).toBeUndefined();
+    expect(
+      resolveEnterpriseAllowedWorkspaceFolders(
+        localOnly({ allowedWorkspaceFolders: [] }),
+      ),
+    ).toEqual([]);
+    expect(
+      resolveEnterpriseAllowedWorkspaceFolders(
+        localOnly({
+          allowedWorkspaceFolders: ["/Users/me/work", ""],
+        }),
+      ),
+    ).toEqual(["/Users/me/work"]);
+  });
+
+  it("KHA: otlp bag → spawn env", () => {
+    const otlp = resolveEnterpriseOtlpConfig(
+      localOnly({
+        otlpEndpoint: "https://otel.example/v1",
+        otlpProtocol: "http/protobuf",
+        otlpHeaders: { Authorization: "Bearer x" },
+        otlpResourceAttributes: "service.namespace=desk,service.name=drop",
+      }),
+    );
+    expect(otlp?.endpoint).toBe("https://otel.example/v1");
+    const env = buildEnterpriseOtlpSpawnEnv(otlp);
+    expect(env.CLAUDE_CODE_ENABLE_TELEMETRY).toBe("1");
+    expect(env.OTEL_EXPORTER_OTLP_ENDPOINT).toBe("https://otel.example/v1");
+    expect(env.OTEL_EXPORTER_OTLP_PROTOCOL).toBe("http/protobuf");
+    expect(env.OTEL_EXPORTER_OTLP_HEADERS).toBe("Authorization: Bearer x");
+    // service.name is reserved and filtered (BFi residual).
+    expect(env.OTEL_RESOURCE_ATTRIBUTES).toBe("service.namespace=desk");
+  });
+
+  it("token cap requires both fields", () => {
+    expect(
+      resolveEnterpriseTokenCap(
+        localOnly({ inferenceMaxTokensPerWindow: 100 }),
+      ),
+    ).toBeNull();
+    expect(
+      resolveEnterpriseTokenCap(
+        localOnly({
+          inferenceMaxTokensPerWindow: 5000,
+          inferenceTokenWindowHours: 24,
+        }),
+      ),
+    ).toEqual({ maxTokens: 5000, windowHours: 24 });
+  });
+
+  it("disableAutoUpdates enterprise boolean", () => {
+    expect(
+      isEnterpriseAutoUpdatesDisabled(
+        localOnly({ disableAutoUpdates: true }),
+      ),
+    ).toBe(true);
+    expect(isEnterpriseAutoUpdatesDisabled(localOnly({}))).toBeUndefined();
+  });
+
+  it("forceLoginOrgUUID eHe: single + JSON array; malformed null", () => {
+    expect(parseForceLoginOrgUUIDs("AbC")).toEqual(["abc"]);
+    expect(parseForceLoginOrgUUIDs('["AAA","bbb"]')).toEqual(["aaa", "bbb"]);
+    expect(parseForceLoginOrgUUIDs("[")).toBeNull();
+    expect(
+      resolveEnterpriseForceLoginOrgUUIDs(
+        localOnly({ forceLoginOrgUUID: "ORG-1" }),
+      ),
+    ).toEqual(["org-1"]);
+  });
+
+  it("deploymentOrganizationUuid UUID-only", () => {
+    expect(
+      resolveEnterpriseDeploymentOrganizationUuid(
+        localOnly({
+          deploymentOrganizationUuid: "00000000-0000-4000-8000-000000000001",
+        }),
+      ),
+    ).toBe("00000000-0000-4000-8000-000000000001");
+    expect(
+      resolveEnterpriseDeploymentOrganizationUuid(
+        localOnly({ deploymentOrganizationUuid: "not-a-uuid" }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("disableNonessentialServices absent false; true blocks", () => {
+    expect(isEnterpriseNonessentialServicesDisabled(localOnly({}))).toBe(false);
+    expect(
+      isEnterpriseNonessentialServicesDisabled(
+        localOnly({ disableNonessentialServices: true }),
+      ),
+    ).toBe(true);
+  });
+
+  it("h1e vertex OAuth both-or-none + default scopes", () => {
+    expect(
+      resolveEnterpriseVertexOAuth(
+        localOnly({ inferenceVertexOAuthClientId: "only-id" }),
+      ),
+    ).toBeNull();
+    const oauth = resolveEnterpriseVertexOAuth(
+      localOnly({
+        inferenceVertexOAuthClientId: "cid",
+        inferenceVertexOAuthClientSecret: "sec",
+      }),
+    );
+    expect(oauth?.clientId).toBe("cid");
+    expect(oauth?.scopes).toEqual([...ENTERPRISE_VERTEX_OAUTH_DEFAULT_SCOPES]);
+    expect(
+      needsEnterpriseVertexAuth(
+        localOnly({
+          inferenceProvider: "vertex",
+          inferenceVertexOAuthClientId: "cid",
+          inferenceVertexOAuthClientSecret: "sec",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      needsEnterpriseVertexAuth(
+        localOnly({
+          inferenceProvider: "vertex",
+          inferenceVertexOAuthClientId: "cid",
+          inferenceVertexOAuthClientSecret: "sec",
+          inferenceVertexCredentialsFile: "/sa.json",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("GV bedrock SSO all four + region", () => {
+    expect(
+      resolveEnterpriseBedrockSso(
+        localOnly({ inferenceBedrockSsoStartUrl: "https://sso.example" }),
+      ),
+    ).toBeNull();
+    const sso = resolveEnterpriseBedrockSso(
+      localOnly({
+        inferenceBedrockSsoStartUrl: "https://d-123.awsapps.com/start",
+        inferenceBedrockSsoRegion: "us-east-1",
+        inferenceBedrockSsoAccountId: "123456789012",
+        inferenceBedrockSsoRoleName: "BedrockInference",
+      }),
+    );
+    expect(sso).toEqual({
+      startUrl: "https://d-123.awsapps.com/start",
+      ssoRegion: "us-east-1",
+      accountId: "123456789012",
+      roleName: "BedrockInference",
+    });
+    expect(
+      needsEnterpriseBedrockSsoAuth(
+        localOnly({
+          inferenceProvider: "bedrock",
+          inferenceBedrockSsoStartUrl: "https://d-123.awsapps.com/start",
+          inferenceBedrockSsoRegion: "us-east-1",
+          inferenceBedrockSsoAccountId: "123456789012",
+          inferenceBedrockSsoRoleName: "BedrockInference",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      needsEnterpriseBedrockSsoAuth(
+        localOnly({
+          inferenceProvider: "bedrock",
+          inferenceBedrockBearerToken: "tok",
+          inferenceBedrockSsoStartUrl: "https://d-123.awsapps.com/start",
+          inferenceBedrockSsoRegion: "us-east-1",
+          inferenceBedrockSsoAccountId: "123456789012",
+          inferenceBedrockSsoRoleName: "BedrockInference",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("bootstrapOidc requires clientId", () => {
+    expect(resolveEnterpriseBootstrapOidc(localOnly({}))).toBeNull();
+    expect(
+      resolveEnterpriseBootstrapOidc(
+        localOnly({
+          bootstrapOidc: {
+            clientId: "app",
+            issuer: "https://idp.example",
+          },
+        }),
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        clientId: "app",
+        issuer: "https://idp.example",
+      }),
+    );
+  });
+
+  it("autoUpdater policy default 72 hours", () => {
+    expect(resolveEnterpriseAutoUpdaterPolicy(localOnly({}))).toEqual({
+      disabled: false,
+      enforcementHours: 72,
+      hoursExplicit: false,
+    });
+    expect(
+      resolveEnterpriseAutoUpdaterPolicy(
+        localOnly({
+          disableAutoUpdates: true,
+          autoUpdaterEnforcementHours: 12,
+        }),
+      ),
+    ).toEqual({
+      disabled: true,
+      enforcementHours: 12,
+      hoursExplicit: true,
+    });
+  });
+
+  it("KHA tags OTEL resource with deploymentOrganizationUuid", () => {
+    const otlp = resolveEnterpriseOtlpConfig(
+      localOnly({
+        otlpEndpoint: "https://otel.example",
+        deploymentOrganizationUuid: "00000000-0000-4000-8000-000000000099",
+      }),
+    );
+    const env = buildEnterpriseOtlpSpawnEnv(
+      otlp,
+      localOnly({
+        otlpEndpoint: "https://otel.example",
+        deploymentOrganizationUuid: "00000000-0000-4000-8000-000000000099",
+      }),
+    );
+    expect(env.OTEL_RESOURCE_ATTRIBUTES).toContain(
+      "deployment.organization.id=00000000-0000-4000-8000-000000000099",
+    );
   });
 });

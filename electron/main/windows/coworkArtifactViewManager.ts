@@ -13,6 +13,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { isEnterpriseNonessentialServicesDisabled } from "../services/coworkHostLoop/coworkEnterpriseConfig";
 import {
   isOfficialParkedPreviewBounds,
   scalePreviewBoundsWithZoom,
@@ -20,6 +21,67 @@ import {
 
 /** Official AM scheme. */
 export const COWORK_ARTIFACT_SCHEME = "cowork-artifact";
+
+/**
+ * Official qPA residual — script CDNs allowed when !disableNonessentialServices.
+ * data-official-source: app.asar qPA / PJi
+ */
+export const ARTIFACT_ALLOWED_SCRIPT_CDNS = [
+  {
+    url: "https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js",
+    sri: "sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi",
+    hint: "Chart.js v4 (UMD, global `Chart`)",
+  },
+  {
+    url: "https://cdn.jsdelivr.net/npm/gridjs@5.0.2/dist/gridjs.umd.js",
+    sri: "sha384-/XXDzxe4FsGiAe50i/u9pY/Vy/uX654MHB1xoc1BJNnH1WXHhqHga9g3q5tF4gj7",
+    hint: "Grid.js v5 sortable table (UMD, global `gridjs`); pair with its stylesheet below",
+  },
+  {
+    url: "https://cdn.jsdelivr.net/npm/mermaid@11.10.0/dist/mermaid.min.js",
+    sri: "sha384-PY+AFiXLIHkR5jE4nk0JwPQQmmQlT4mJXFlgeT4jJeuARaBQBK+nSwwxzrPRAtUM",
+    hint: 'Mermaid v11 diagrams (global `mermaid`); call `mermaid.initialize({ startOnLoad: true, securityLevel: "strict" })`',
+  },
+] as const;
+
+/** Official VPA residual — style CDNs when nonessential allowed. */
+export const ARTIFACT_ALLOWED_STYLE_CDNS = [
+  {
+    url: "https://cdn.jsdelivr.net/npm/gridjs@5.0.2/dist/theme/mermaid.min.css",
+    sri: "sha384-jZvDSsmGB9oGGT/4l9bHXGoAv1OxvG/cFmSo0dZaSqmBgvQTKDBFAMftlXTmMbNW",
+    hint: "Grid.js default theme",
+  },
+] as const;
+
+/** Official YJi residual — exact URL allowlist for onBeforeRequest. */
+export const ARTIFACT_ALLOWED_CDN_URLS = new Set<string>([
+  ...ARTIFACT_ALLOWED_SCRIPT_CDNS.map((e) => e.url),
+  ...ARTIFACT_ALLOWED_STYLE_CDNS.map((e) => e.url),
+]);
+
+/**
+ * Official PJi CSP residual.
+ * When nonessential disabled: no CDN in CSP, cancel all non-scheme requests.
+ * When allowed: script-src/style-src include exact qPA/VPA URLs; connect-src none.
+ */
+export function buildArtifactContentSecurityPolicy(
+  allowNonessentialCdns: boolean,
+): string {
+  const scripts = allowNonessentialCdns
+    ? ARTIFACT_ALLOWED_SCRIPT_CDNS.map((e) => ` ${e.url}`).join("")
+    : "";
+  const styles = allowNonessentialCdns
+    ? ARTIFACT_ALLOWED_STYLE_CDNS.map((e) => ` ${e.url}`).join("")
+    : "";
+  return (
+    `default-src 'self'; ` +
+    `script-src 'self' 'unsafe-inline'${scripts}; ` +
+    `style-src 'self' 'unsafe-inline'${styles}; ` +
+    `img-src 'self' data:; font-src 'self' data:; ` +
+    `connect-src 'none'; object-src 'none'; frame-src 'none'; ` +
+    `form-action 'none'; base-uri 'self'; webrtc 'block'`
+  );
+}
 /** Official AKe residual: Documents/Claude/Artifacts. */
 export function resolveOfficialArtifactsRoot(
   getDocumentsPath: () => string = () => {
@@ -59,13 +121,26 @@ function notFound(): Response {
  * Product: map artifactId → host baseDir via activeArtifactBaseDir for the shown id only
  * (full multi-id container graph not invented — one active base at a time like show path).
  */
+/**
+ * Official PJi residual: register cowork-artifact protocol + CDN allowlist gate.
+ * `allowNonessential = !Ti().disableNonessentialServices`
+ * onBeforeRequest: cancel unless scheme OR (allowNonessential && YJi.has(url))
+ */
 function ensureArtifactProtocolHandler(): void {
   if (protocolInstalled) return;
   const artifactSession = session.fromPartition(ARTIFACT_PARTITION);
-  artifactSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  // Evaluate at request time so MDM/configLibrary flips apply without relaunch.
+  const allowNonessentialCdns = (): boolean =>
+    !isEnterpriseNonessentialServicesDisabled();
+  artifactSession.setPermissionRequestHandler((_wc, _permission, callback) =>
+    callback(false),
+  );
   artifactSession.setPermissionCheckHandler(() => false);
   artifactSession.webRequest.onBeforeRequest((details, callback) => {
-    callback({ cancel: !details.url.startsWith(`${COWORK_ARTIFACT_SCHEME}://`) });
+    const isScheme = details.url.startsWith(`${COWORK_ARTIFACT_SCHEME}://`);
+    const isAllowedCdn =
+      allowNonessentialCdns() && ARTIFACT_ALLOWED_CDN_URLS.has(details.url);
+    callback({ cancel: !isScheme && !isAllowedCdn });
   });
   artifactSession.protocol.handle(COWORK_ARTIFACT_SCHEME, async (request) => {
     const baseDir = activeArtifactBaseDir;
@@ -99,8 +174,9 @@ function ensureArtifactProtocolHandler(): void {
       headers.set("Cache-Control", "no-store");
       headers.set(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https:; object-src 'none'; frame-src 'self'; form-action 'none'; base-uri 'self'",
+        buildArtifactContentSecurityPolicy(allowNonessentialCdns()),
       );
+      headers.set("X-DNS-Prefetch-Control", "off");
       return new Response(response.body, { status: 200, headers });
     } catch {
       return notFound();

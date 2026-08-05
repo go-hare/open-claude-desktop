@@ -13,6 +13,7 @@ import {
   COWORK_HOST_LOOP_RESUME_REJECTED,
   shouldRejectCoworkHostLoopResume,
 } from "../coworkHostLoop/coworkHostLoopMode";
+import { assertEnterpriseTokenCapAllowsTurn } from "../coworkHostLoop/coworkTokenCap";
 import { coworkHostLoopMountFlagSettings } from "../coworkHostLoop/coworkHostToolPolicy";
 import type { CoworkSessionManagerOptions, CoworkSessionUpdate, CoworkTranscriptOptions } from "./coworkSessionManagerTypes";
 import { extractUrlsForWebFetchProvenance } from "./sessionsBridgeWebFetch";
@@ -248,6 +249,11 @@ export class CoworkSessionManager {
     | readonly string[]
     | null
     | undefined;
+  private readonly getVmEgressPolicy?: () =>
+    | { kind: "unrestricted" }
+    | { kind: "allowlist"; domains: readonly string[] }
+    | null
+    | undefined;
   private readonly openPath?: (target: string) => Promise<string>;
   private readonly onFocusedSessionChanged?: (
     sessionId: string | null,
@@ -373,8 +379,10 @@ export class CoworkSessionManager {
     // Official bridge activeSessions.get for control_request interrupt — inject only.
     this.getBridgeActiveSession =
       options.getBridgeActiveSession ?? (() => null);
-    // Official Th() inject for setDraftSessionFolders eBe — Settings residual.
+    // Official Th() inject for setDraftSessionFolders eBe — enterprise bag residual.
     this.getAllowedWorkspaceFolders = options.getAllowedWorkspaceFolders;
+    // Official Ii().vmEgressPolicy() inject — coworkEgressAllowedHosts bag residual.
+    this.getVmEgressPolicy = options.getVmEgressPolicy;
     // Official gA.shell.openPath for openOutputsDir.
     this.openPath = options.openPath;
     // Official EventEmitter "focusedSessionChanged" residual inject.
@@ -454,6 +462,8 @@ export class CoworkSessionManager {
 
   async start(info: CoworkStartSessionInput): Promise<string> {
     await this.initialize();
+    // Official QeA residual — refuse start when enterprise token soft-cap exceeded.
+    assertEnterpriseTokenCapAllowsTurn();
     const sessionId = info.sessionId ?? this.createSessionId();
     if (!isValidCoworkSessionId(sessionId)) {
       throw new Error("start: invalid sessionId");
@@ -610,6 +620,8 @@ export class CoworkSessionManager {
     messageUuid?: string,
     _toolStates?: CoworkToolState[],
   ): Promise<void> {
+    // Official QeA residual — refuse send when enterprise token soft-cap exceeded.
+    assertEnterpriseTokenCapAllowsTurn();
     const session = this.repository.require(sessionId);
     if (session.lifecycleState === "initializing") {
       this.runtime.queuePendingStart(session, {
@@ -2250,6 +2262,14 @@ export class CoworkSessionManager {
       getHostOutputsDir: (session) => this.getOutputsDir(session),
       getSessionStorageDir: (session) =>
         this.repository.getSessionStorageDir(session),
+      // Official Th() / vi().allowedWorkspaceFolders for P4 + draft folder eBe.
+      getAllowedWorkspaceFolders: this.getAllowedWorkspaceFolders
+        ? (_session) => this.getAllowedWorkspaceFolders!()
+        : undefined,
+      // Official Ii().vmEgressPolicy() for workspace MCP allowedDomains.
+      getVmEgressPolicy: this.getVmEgressPolicy
+        ? (_session) => this.getVmEgressPolicy!()
+        : undefined,
       // Official ft("2979038612") residual for drainPendingNotifications.
       preferSessionNotifications: () => this.preferSessionNotifications(),
       // Official ft("1942781881") residual for success-result suggestion grace.

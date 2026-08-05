@@ -1161,10 +1161,19 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       // Official kot residual — same bag as bootstrapState store getState.
       getInitialBootstrapStateState: async () =>
         custom3pBootstrapState(settingsUserDataPath(context)),
-      triggerBootstrapAuth: async () => {
-        // Official Tot residual: recompute + publish bootstrap bag (no Anthropic OAuth invent).
+      triggerBootstrapAuth: async (_event, oidcHint) => {
+        // Official Tot / _0A residual: interactive bootstrap OIDC pull when configured.
+        // Never invent { ok:true } without a real fetch/auth success.
+        const { triggerEnterpriseBootstrapAuth } = await import(
+          "../services/custom3p/enterpriseInteractiveAuth"
+        );
+        const userDataPath = settingsUserDataPath(context);
+        const result = await triggerEnterpriseBootstrapAuth(
+          { getUserDataPath: () => userDataPath },
+          oidcHint,
+        );
         const state = publishCustom3pBootstrapState(context);
-        return { ok: true, state };
+        return { ...result, state };
       },
       openSetupWindow: async () => {
         await openCustom3pSetupWindow(context.windows.mainWindow);

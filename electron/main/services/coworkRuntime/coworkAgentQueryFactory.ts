@@ -15,7 +15,11 @@ import {
   createCoworkHostProcessRegistry,
   createMacDisclaimerResolver,
 } from "../coworkHostLoop/coworkHostProcess";
-import { buildClaudeCliSpawnEnv } from "../custom3p/custom3pCliEnv";
+import {
+  buildClaudeCliSpawnEnv,
+  enrichClaudeCliSpawnEnvWithEnterpriseAuth,
+} from "../custom3p/custom3pCliEnv";
+import { resolveEnterpriseDisallowedTools } from "../coworkHostLoop/coworkEnterpriseConfig";
 import {
   createCoworkHostFileDenyResult,
   coworkAutoMemoryAllowedToolRules,
@@ -325,6 +329,7 @@ export function buildCoworkSdkOptions(
   input: CoworkQueryFactoryInput,
   options: CoworkAgentQueryFactoryOptions = {},
 ): Options {
+  // Sync residual — prefer buildCoworkSdkOptionsAsync before live query spawn.
   const folders = hostFolders(input.userSelectedFolders);
   const enabled = stringArray(input.enabledMcpTools) ?? [];
   // Official UXe/V1i host-loop allowedTools:
@@ -428,14 +433,51 @@ export function buildCoworkSdkOptions(
   if (sdkOptions.permissionMode === "bypassPermissions") {
     sdkOptions.allowDangerouslySkipPermissions = true;
   }
+  // Official d0A(Ti()) residual — merge enterprise disabledBuiltinTools into disallowedTools.
+  const enterpriseDisallowed = resolveEnterpriseDisallowedTools(
+    userDataPath ? { getUserDataPath: () => userDataPath } : {},
+  );
   if (input.hostLoopMode) {
-    sdkOptions.disallowedTools = [...HOST_LOOP_DIRECT_DISALLOWED_TOOLS];
+    const merged = new Set<string>([
+      ...HOST_LOOP_DIRECT_DISALLOWED_TOOLS,
+      ...enterpriseDisallowed,
+    ]);
+    sdkOptions.disallowedTools = [...merged];
     sdkOptions.tools = [...HOST_LOOP_TOOL_NAMES];
     sdkOptions.spawnClaudeCodeProcess = options.spawnClaudeCodeProcess;
-  } else if (input.vmProcessName) {
+  } else {
+    if (enterpriseDisallowed.length > 0) {
+      sdkOptions.disallowedTools = [
+        ...(sdkOptions.disallowedTools ?? []),
+        ...enterpriseDisallowed,
+      ];
+    }
+  }
+  if (!input.hostLoopMode && input.vmProcessName) {
     // Official dual-exec: spawn Claude Code inside guest (tGi), not host shell.
     sdkOptions.spawnClaudeCodeProcess = resolveDualExecSpawn(input, options);
   }
+  return sdkOptions;
+}
+
+/**
+ * Official HFi + writeSessionSecrets residual — bag env + Bedrock SSO / credential helper TTL.
+ */
+export async function buildCoworkSdkOptionsAsync(
+  input: CoworkQueryFactoryInput,
+  options: CoworkAgentQueryFactoryOptions = {},
+): Promise<Options> {
+  const sdkOptions = buildCoworkSdkOptions(input, options);
+  let userDataPath: string | undefined;
+  try {
+    userDataPath = app.getPath("userData");
+  } catch {
+    userDataPath = process.env.CLAUDE_USER_DATA_DIR || undefined;
+  }
+  sdkOptions.env = await enrichClaudeCliSpawnEnvWithEnterpriseAuth(
+    { ...(sdkOptions.env ?? {}) },
+    { userDataPath },
+  );
   return sdkOptions;
 }
 
@@ -455,14 +497,16 @@ export function createCoworkAgentQueryFactory(
   const query = options.query ?? sdkQuery;
   const spawnClaudeCodeProcess =
     options.spawnClaudeCodeProcess ?? defaultHostSpawn(options.onStderr);
-  return (input) =>
-    query({
-      options: buildCoworkSdkOptions(input, {
-        ...options,
-        spawnClaudeCodeProcess,
-      }),
+  return async (input) => {
+    const sdkOptions = await buildCoworkSdkOptionsAsync(input, {
+      ...options,
+      spawnClaudeCodeProcess,
+    });
+    return query({
+      options: sdkOptions,
       prompt: input.prompt as AsyncIterable<SDKUserMessage>,
     }) as unknown as CoworkRuntimeQuery;
+  };
 }
 
 export function coworkPermissionMode(value: CoworkPermissionMode): PermissionMode {

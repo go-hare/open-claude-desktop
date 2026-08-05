@@ -16,6 +16,7 @@ import {
   searchCoworkAddableSkills,
   type CoworkSlashSkill,
 } from "./coworkSkillsSlashBridge";
+import { isEnterpriseNonessentialServicesDisabled } from "../coworkHostLoop/coworkEnterpriseConfig";
 import { createCoworkMcpRegistryServerConfig } from "./coworkMcpRegistryServer";
 import { wrapLocalMcpToolHandler } from "./coworkLocalMcpPathTranslate";
 import {
@@ -228,10 +229,11 @@ export async function withCoworkAlwaysLoadMcpServers(
   resolvePathContext?: CoworkMcpPathContextResolver,
   computerUse?: CoworkComputerUseMcpOptions | null,
 ): Promise<Record<string, unknown>> {
-  const registry = createCoworkMcpRegistryServerConfig(
-    sessionId,
-    resolvePathContext,
-  );
+  // Official disableNonessentialServices residual: skip mcp-registry directory.
+  const skipRegistry = isEnterpriseNonessentialServicesDisabled();
+  const registry = skipRegistry
+    ? null
+    : createCoworkMcpRegistryServerConfig(sessionId, resolvePathContext);
   const skills = createCoworkSkillsMcpServerConfig(sessionId, resolvePathContext);
   const plugins = createCoworkPluginsMcpServerConfig(
     sessionId,
@@ -239,7 +241,7 @@ export async function withCoworkAlwaysLoadMcpServers(
   );
   const out: Record<string, unknown> = {
     ...(existing ?? {}),
-    "mcp-registry": registry,
+    ...(registry ? { "mcp-registry": registry } : {}),
     skills,
     plugins,
   };
@@ -261,10 +263,10 @@ export function withCoworkAlwaysLoadMcpServersSync(
   computerUse?: CoworkComputerUseMcpOptions | null,
 ): Record<string, unknown> {
   // Same body — kept sync for tests that don't need aFi await.
-  const registry = createCoworkMcpRegistryServerConfig(
-    sessionId,
-    resolvePathContext,
-  );
+  const skipRegistry = isEnterpriseNonessentialServicesDisabled();
+  const registry = skipRegistry
+    ? null
+    : createCoworkMcpRegistryServerConfig(sessionId, resolvePathContext);
   const skills = createCoworkSkillsMcpServerConfig(sessionId, resolvePathContext);
   const plugins = createCoworkPluginsMcpServerConfig(
     sessionId,
@@ -272,7 +274,7 @@ export function withCoworkAlwaysLoadMcpServersSync(
   );
   const out: Record<string, unknown> = {
     ...(existing ?? {}),
-    "mcp-registry": registry,
+    ...(registry ? { "mcp-registry": registry } : {}),
     skills,
     plugins,
   };

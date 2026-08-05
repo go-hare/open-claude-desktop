@@ -206,17 +206,18 @@ describe("createCoworkLocalAgentResidualHandlers", () => {
     ).resolves.toEqual({ contents: [] });
   });
 
-  it("triggerInteractiveAuth is residual false without invent OAuth", async () => {
+  it("triggerInteractiveAuth does not invent ok when no interactive auth needed", async () => {
     const handlers = createCoworkLocalAgentResidualHandlers(contextStub());
+    // Empty bag → recompute finds nothing → { ok:true } means "nothing to do",
+    // not invent OAuth success for a configured provider.
     await expect(handlers.triggerInteractiveAuth?.(event)).resolves.toEqual({
-      ok: false,
-      error: "interactive_auth_not_available",
+      ok: true,
     });
   });
 
-  it("revokeInteractiveAuth is residual false (no session to clear)", async () => {
+  it("revokeInteractiveAuth clears enterprise interactive secrets (best-effort true)", async () => {
     const handlers = createCoworkLocalAgentResidualHandlers(contextStub());
-    await expect(handlers.revokeInteractiveAuth?.(event)).resolves.toBe(false);
+    await expect(handlers.revokeInteractiveAuth?.(event)).resolves.toBe(true);
   });
 
   it("bridge poll/reset/preflight are residual void (official custom-3p no-ops)", async () => {

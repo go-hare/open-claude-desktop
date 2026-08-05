@@ -6,6 +6,10 @@ import { createFileSystemHandlers } from "./fileSystemHandlers";
 import { dispatchBridgeEvent, registerNamespaceHandlers } from "./registerIpc";
 import { doAuthInBrowserResidual } from "../services/auth/doAuthInBrowserResidual";
 import { applyRecentChatsFromWeb } from "../services/settings/quickEntryNative";
+import {
+  isEnterpriseAutoUpdatesDisabled,
+  resolveEnterpriseAutoUpdaterPolicy,
+} from "../services/coworkHostLoop/coworkEnterpriseConfig";
 import { cancelPendingRestart as residualCancelPendingRestart } from "../services/updater/pendingRestart";
 
 const SEARCH_FILE_LIMIT = 500;
@@ -178,13 +182,48 @@ export function registerWebMiscHandlers(context: IpcHandlerContext): void {
       },
     },
     AutoUpdater: {
-      checkForUpdates: async () => ({ updateAvailable: false, reason: "third_party_shell" }),
+      /**
+       * Official jsr residual: Ti().disableAutoUpdates → skip updater + analytics.
+       * autoUpdaterEnforcementHours residual: hours before force-install (default 72).
+       * Product third-party shell has no Anthropic feed; still honor enterprise block + hours.
+       */
+      checkForUpdates: async () => {
+        const policy = resolveEnterpriseAutoUpdaterPolicy();
+        if (policy.disabled) {
+          return {
+            updateAvailable: false,
+            reason: "enterprise_policy",
+            enforcementHours: policy.enforcementHours,
+            hoursExplicit: policy.hoursExplicit,
+          };
+        }
+        return {
+          updateAvailable: false,
+          reason: "third_party_shell",
+          enforcementHours: policy.enforcementHours,
+          hoursExplicit: policy.hoursExplicit,
+        };
+      },
+      getEnforcementHours: async () => {
+        const policy = resolveEnterpriseAutoUpdaterPolicy();
+        return {
+          hours: policy.enforcementHours,
+          explicit: policy.hoursExplicit,
+          disabled: policy.disabled,
+        };
+      },
       restartToUpdate: async () => {
+        if (isEnterpriseAutoUpdatesDisabled() === true) {
+          return false;
+        }
         app.relaunch();
         app.exit(0);
         return true;
       },
       restartToUpdateWhenIdle: async () => {
+        if (isEnterpriseAutoUpdatesDisabled() === true) {
+          return { scheduled: false, restarted: false, reason: "enterprise_policy" };
+        }
         if (context.localSessions.getAll().length + context.localAgentModeSessions.getAll().length > 0) return { scheduled: true, waitingForSessions: true };
         app.relaunch();
         app.exit(0);

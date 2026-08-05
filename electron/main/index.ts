@@ -22,6 +22,7 @@ import {
   installAnthropicClientRequestHeaders,
   installAnthropicDesktopUserAgent,
 } from "./services/network/anthropicClientHeaders";
+import { installEnterpriseNonessentialNetworkGate } from "./services/network/enterpriseNonessentialGate";
 import {
   claimClaudeProtocolClients,
   createWindowStateKeeper,
@@ -316,6 +317,9 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   // Official Frr residual (before vst/loadAll): inject anthropic-client-* headers so
   // claude.ai/task/new serves desktop product shell, not public marketing landing.
   installAnthropicClientRequestHeaders();
+  // Official Ob connector-favicons residual — cancel Google favicon proxies when
+  // Ti().disableNonessentialServices is true (evaluated per request).
+  installEnterpriseNonessentialNetworkGate();
   // Official Urr / DJn residual: claim claude:// so login magic-link does not open a
   // stale Launch Services handler (Finder "找不到该文件").
   claimClaudeProtocolClients(app);
@@ -331,7 +335,7 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   // userData/desktop-shell-settings applied bag (Hzt/SM). Empty bag → 1p logged-out.
   installAppProtocolHandler({
     ionDistRoot: options.ionDistRoot ?? paths.ionDistRoot,
-    // Official setup-desktop-3p SPA lives in residual ion-dist, not product-web.
+    // Official setup-desktop-3p SPA lives in residual ion-dist (full enterprise UI).
     residualIonDistRoot: paths.residualIonDistRoot,
     custom3p: {
       getUserDataPath: () => app.getPath("userData"),

@@ -355,9 +355,18 @@ export type CoworkSessionManagerOptions = {
   /**
    * Official Th() / vi().allowedWorkspaceFolders for setDraftSessionFolders eBe.
    * null/undefined → unrestricted (copy). Empty [] drops all drafts.
-   * Settings product store residual when unset.
+   * Product default: resolveEnterpriseAllowedWorkspaceFolders (configLibrary / MDM).
    */
   getAllowedWorkspaceFolders?: () => readonly string[] | null | undefined;
+  /**
+   * Official Ii().vmEgressPolicy() inject for workspace MCP allowedDomains.
+   * Product default: resolveEnterpriseVmEgressPolicy (coworkEgressAllowedHosts bag).
+   */
+  getVmEgressPolicy?: () =>
+    | { kind: "unrestricted" }
+    | { kind: "allowlist"; domains: readonly string[] }
+    | null
+    | undefined;
   /**
    * Official gA.shell.openPath for openOutputsDir (after getOutputsDir + Ss residual).
    * Product injects Electron shell.openPath in registerDesktopIpc.
