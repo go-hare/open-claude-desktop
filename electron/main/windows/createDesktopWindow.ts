@@ -54,15 +54,40 @@ function installMainWindowEvents(
     coworkArtifacts.relayout();
   };
 
+  const revealMainWindow = () => {
+    safeWindowAction(mainWindow, () => {
+      // Boot residual is opacity:0; must become opaque + front after paint.
+      // After app.relaunch macOS may leave us backgrounded — always show+focus here.
+      try {
+        if (mainWindow.getOpacity() < 0.99) mainWindow.setOpacity(1);
+      } catch {
+        try {
+          mainWindow.setOpacity(1);
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!mainWindow.isVisible()) mainWindow.show();
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      try {
+        mainWindow.moveTop();
+        mainWindow.focus();
+      } catch {
+        /* ignore */
+      }
+      syncTrafficLightPosition(mainWindow, mainView);
+      layout();
+      options.onMainWindowReady?.(mainWindow);
+    });
+  };
+
+  // Shell HTML finish — official path. Also arm mainView finish so SPA paint
+  // still reveals if shell did-finish-load already fired before listeners attach.
   mainWindow.webContents.on("did-finish-load", () => {
-    setTimeout(() => {
-      safeWindowAction(mainWindow, () => {
-        mainWindow.setOpacity(1);
-        syncTrafficLightPosition(mainWindow, mainView);
-        layout();
-        options.onMainWindowReady?.(mainWindow);
-      });
-    }, 50);
+    setTimeout(revealMainWindow, 50);
+  });
+  mainView.webContents.on("did-finish-load", () => {
+    setTimeout(revealMainWindow, 50);
   });
 
   mainWindow.on("resize", layout);

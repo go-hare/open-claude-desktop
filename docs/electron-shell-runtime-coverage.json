@@ -1,15 +1,16 @@
 {
-  "generated_at": "2026-08-06T03:13:26.902Z",
+  "generated_at": "2026-08-06T12:14:46.737Z",
   "packaged": true,
-  "signal": null,
+  "signal": "SIGKILL",
   "marker": {
     "ok": true,
-    "appPath": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\app.asar",
-    "resourcesPath": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources",
+    "appPath": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/app.asar",
+    "resourcesPath": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources",
     "mainWindowVisible": true,
     "mainViewUrl": "app://localhost/login?returnTo=%2Ftask%2Fnew",
     "findInPageVisible": false,
     "applicationMenu": [
+      "Claudex",
       "文件",
       "编辑",
       "视图",
@@ -97,8 +98,8 @@
       "fallbackByInterface": {}
     },
     "claudeCode": {
-      "executable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
-      "bundledExecutable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
+      "executable": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/claude-code-bin/platforms/darwin-arm64/claude",
+      "bundledExecutable": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/claude-code-bin/platforms/darwin-arm64/claude",
       "usesBundledExecutable": true
     }
   },
@@ -182,8 +183,8 @@
     "fallbackByInterface": {}
   },
   "claudeCode": {
-    "executable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
-    "bundledExecutable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
+    "executable": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/claude-code-bin/platforms/darwin-arm64/claude",
+    "bundledExecutable": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/claude-code-bin/platforms/darwin-arm64/claude",
     "usesBundledExecutable": true
   }
 }

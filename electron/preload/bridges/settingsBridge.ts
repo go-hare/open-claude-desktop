@@ -88,11 +88,12 @@ export const settingsBridgeSpec: NamespaceBridgeSpec = {
       "openDeviceCodeWindowForE2e",
       "getLoginDesktop3pStatus",
       "relaunchApp",
+      "confirmProcessRelaunch",
       "setDeploymentMode",
       "bootstrapState_$store$_getState",
     ],
     sync: ["bootstrapState_$store$_getStateSync"],
-    events: ["bootstrapState_$store$_update"],
+    events: ["bootstrapState_$store$_update", "applyRelaunchRequested"],
   },
   Extensions: {
     invoke: [

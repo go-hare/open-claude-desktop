@@ -108,3 +108,22 @@ await fs.cp(distRoot, targetRoot, { recursive: true, preserveTimestamps: true })
 const indexHtml = await fs.readFile(path.join(targetRoot, "index.html"), "utf8");
 const buildId = indexHtml.match(/data-build-id="([^"]+)"/)?.[1] ?? "unknown";
 console.log(`product-web ready: ${targetRoot} (data-build-id=${buildId})`);
+
+// Residual setup SPA chunks may be copied from open-claude-web public/assets.
+// Re-apply product Setup patches so dual-root product-web stays in sync after rebuild.
+const { spawnSync } = await import("node:child_process");
+for (const script of [
+  "patch-setup-multivendor-providers.mjs",
+  "patch-setup-proxy-fields.mjs",
+  "patch-setup-apply-relaunch.mjs",
+]) {
+  const scriptPath = path.join(projectRoot, "scripts", script);
+  if (!fsSync.existsSync(scriptPath)) continue;
+  const r = spawnSync(process.execPath, [scriptPath], {
+    stdio: "inherit",
+    cwd: projectRoot,
+  });
+  if (r.status !== 0) {
+    throw new Error(`${script} failed with status ${r.status ?? 1}`);
+  }
+}

@@ -33,6 +33,7 @@ import {
   installSingleInstanceGuard,
   installWindowStateEventDispatch,
   takePendingClaudeOpenUrl,
+  bringMainWindowToFront,
   type LaunchTarget,
 } from "./lifecycle";
 import {
@@ -523,6 +524,19 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
 
   // Create + load main window immediately (official vst + loadAll after protocol).
   await runtime.createAndLoadWindow();
+
+  // After create (including app.relaunch cold start): force opaque + front.
+  // Without this, macOS often leaves the new process running with a window that
+  // exists but is not activated — user must click Dock (reported after Setup apply).
+  const bootWindows = runtime.getWindows();
+  if (bootWindows?.mainWindow && !bootWindows.mainWindow.isDestroyed()) {
+    bringMainWindowToFront(bootWindows.mainWindow);
+    // Second pass after SPA first paint / opacity race (shell did-finish-load @50ms).
+    setTimeout(() => {
+      const w = runtime.getWindows()?.mainWindow;
+      if (w && !w.isDestroyed()) bringMainWindowToFront(w);
+    }, 200);
+  }
 
   if (initialTarget.deepLink || initialTarget.extensionPath || initialTarget.filePaths.length > 0) {
     dispatchLaunchTarget(runtime.getWindows(), initialTarget);

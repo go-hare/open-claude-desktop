@@ -179,6 +179,10 @@ const QB = [
   "inferenceGeminiApiKey",
   "inferenceGrokBaseUrl",
   "inferenceGrokApiKey",
+  // product optional outbound proxy (bag → HTTP_PROXY / health session)
+  "inferenceHttpProxy",
+  "inferenceHttpsProxy",
+  "inferenceNoProxy",
 ];
 
 const PRODUCT_EXT = new Set([
@@ -188,6 +192,9 @@ const PRODUCT_EXT = new Set([
   "inferenceGeminiApiKey",
   "inferenceGrokBaseUrl",
   "inferenceGrokApiKey",
+  "inferenceHttpProxy",
+  "inferenceHttpsProxy",
+  "inferenceNoProxy",
 ]);
 
 const CATEGORY = {
@@ -210,6 +217,9 @@ const CATEGORY = {
     "inferenceGatewayApiKey",
     "inferenceGatewayAuthScheme",
     "inferenceGatewayHeaders",
+    "inferenceHttpProxy",
+    "inferenceHttpsProxy",
+    "inferenceNoProxy",
     "inferenceVertexProjectId",
     "inferenceVertexRegion",
     "inferenceVertexCredentialsFile",

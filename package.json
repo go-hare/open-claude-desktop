@@ -28,6 +28,8 @@
     "sync:original-app": "node scripts/sync-original-app.mjs",
     "sync:ion-dist": "node scripts/sync-ion-dist.mjs",
     "patch:setup-providers": "node scripts/patch-setup-multivendor-providers.mjs",
+    "patch:setup-proxy": "node scripts/patch-setup-proxy-fields.mjs",
+    "patch:setup-apply-relaunch": "node scripts/patch-setup-apply-relaunch.mjs",
     "sync:residual": "npm run sync:original-app && npm run sync:ion-dist && npm run sync:helpers && npm run sync:shell-secondary",
     "verify:config": "node scripts/verify-project-config.mjs",
     "audit:shell": "node scripts/audit-shell-alignment.mjs",

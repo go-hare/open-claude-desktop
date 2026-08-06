@@ -1,6 +1,7 @@
 import type { App, BrowserWindow } from "electron";
 import fs from "node:fs";
 import { extractLaunchTarget, type LaunchTarget } from "./deepLinks";
+import { bringMainWindowToFront } from "./bringMainWindowToFront";
 
 export type SingleInstanceOptions = {
   app: App;
@@ -10,11 +11,7 @@ export type SingleInstanceOptions = {
 };
 
 export function restoreMainWindow(mainWindow: BrowserWindow | null | undefined): boolean {
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
-  if (!mainWindow.isVisible()) mainWindow.show();
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.focus();
-  return true;
+  return bringMainWindowToFront(mainWindow);
 }
 
 /**

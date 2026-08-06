@@ -59,7 +59,10 @@ import {
   probeMcpServer,
 } from "../services/mcp/custom3pMcpProbe";
 import { handleSupportBundleAction } from "../services/support/supportBundle";
-import { openCustom3pSetupWindow } from "../windows/custom3pSetupWindow";
+import {
+  closeCustom3pSetupWindow,
+  openCustom3pSetupWindow,
+} from "../windows/custom3pSetupWindow";
 import { openDeviceCodeWindowForE2e } from "../windows/custom3pDeviceCodeWindow";
 import {
   applyKeepAwakeEnabled,
@@ -140,6 +143,96 @@ function settingsUserDataPath(context: IpcHandlerContext): string {
     return path.dirname(context.settings.getSettingsFile());
   } catch {
     return app.getPath("userData");
+  }
+}
+
+/** Single-flight process exit — prevents dual Dock icons from overlapping relaunches. */
+let processRelaunchScheduled = false;
+
+/**
+ * Official-aligned process restart. Use setImmediate so IPC can return before exit,
+ * and never schedule relaunch twice in one process lifetime.
+ */
+function performProcessRelaunchOnce(reason: string): void {
+  if (processRelaunchScheduled) {
+    console.info("[custom3p] process relaunch already scheduled", reason);
+    return;
+  }
+  processRelaunchScheduled = true;
+  console.info("[custom3p] process relaunch", reason);
+  // Close Setup if still open (e.g. confirm from main after soft-close failed).
+  try {
+    closeCustom3pSetupWindow();
+  } catch {
+    /* ignore */
+  }
+  setImmediate(() => {
+    try {
+      app.relaunch();
+    } catch (error) {
+      console.error(
+        "[custom3p] app.relaunch failed",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    app.exit(0);
+  });
+}
+
+/**
+ * Setup Apply → Relaunch now:
+ * close small Setup window, show apply countdown on main product SPA, then exit once
+ * when main calls confirmProcessRelaunch (after d2t-style 3s overlay).
+ *
+ * Residual setup SPA (c71860c77) used to run countdown on the setup window and call
+ * relaunchApp immediately; product main-process owns close + main overlay trigger.
+ *
+ * No force-exit timer: Cancel on main overlay must leave the process alive (user
+ * can re-open Setup). If main SPA never receives the event, fall back to immediate
+ * process relaunch only when mainView is missing/destroyed.
+ */
+function scheduleApplyRelaunchWithMainCountdown(context: IpcHandlerContext): void {
+  if (processRelaunchScheduled) return;
+
+  try {
+    closeCustom3pSetupWindow();
+  } catch {
+    /* ignore */
+  }
+
+  const mainWindow = context.windows.mainWindow;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      if (!mainWindow.isVisible()) mainWindow.show();
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    } catch {
+      /* continue — still emit / exit */
+    }
+  }
+
+  const mainView = context.windows.mainView;
+  const wc = mainView?.webContents;
+  if (!wc || wc.isDestroyed()) {
+    // No main SPA to host countdown — process relaunch immediately (still single-flight).
+    performProcessRelaunchOnce("apply-relaunch-no-main-view");
+    return;
+  }
+
+  try {
+    dispatchBridgeEvent(
+      wc,
+      "claude.settings",
+      "Custom3pSetup",
+      "applyRelaunchRequested",
+      { variant: "apply" },
+    );
+  } catch (error) {
+    console.warn(
+      "[custom3p] applyRelaunchRequested dispatch failed — falling back to process relaunch",
+      error instanceof Error ? error.message : String(error),
+    );
+    performProcessRelaunchOnce("apply-relaunch-dispatch-failed");
   }
 }
 
@@ -1182,9 +1275,21 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       // Official: only when CLAUDE_CDP_AUTH; not unconditional true invent.
       openDeviceCodeWindowForE2e: async () => openDeviceCodeWindowForE2e(),
       getLoginDesktop3pStatus: async () => custom3pLoginDesktopStatus(settingsUserDataPath(context)),
+      /**
+       * Product path B (locked): after Setup "Relaunch now" —
+       *   close Setup → main SPA apply interstitial → confirmProcessRelaunch.
+       * Official residual instead runs d2t on the Setup window then vot relaunch;
+       * we intentionally diverge (patch L→void A) for dual-root + dual-Dock fixes.
+       * No force-exit timer: Cancel on main overlay must leave the process alive.
+       * Single-flight: concurrent relaunchApp / confirmProcessRelaunch share one exit.
+       */
       relaunchApp: async () => {
-        app.relaunch();
-        app.exit(0);
+        scheduleApplyRelaunchWithMainCountdown(context);
+        return true;
+      },
+      /** Called by main SPA after apply countdown (or Cancel is not used for process exit). */
+      confirmProcessRelaunch: async () => {
+        performProcessRelaunchOnce("confirmProcessRelaunch");
         return true;
       },
       // Official residual pot/got/jsA (app.asar):

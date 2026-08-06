@@ -38,6 +38,10 @@ it("Cgr/Igr/Egr residual: create + write + read full gateway bag with inferenceM
     inferenceGatewayApiKey: "sk-test",
     inferenceModels: [{ name: "deepseek-v4-pro", supports1m: true }],
     coworkEgressAllowedHosts: ["*"],
+    // Product proxy extension — library is pass-through; must survive write/read.
+    inferenceHttpProxy: "http://127.0.0.1:12000",
+    inferenceHttpsProxy: "http://127.0.0.1:12000",
+    inferenceNoProxy: "127.0.0.1,localhost",
   });
   expect(write).toEqual({ ok: true });
 
@@ -50,6 +54,9 @@ it("Cgr/Igr/Egr residual: create + write + read full gateway bag with inferenceM
   expect(read.config.inferenceModels).toEqual([
     { name: "deepseek-v4-pro", supports1m: true },
   ]);
+  expect(read.config.inferenceHttpProxy).toBe("http://127.0.0.1:12000");
+  expect(read.config.inferenceHttpsProxy).toBe("http://127.0.0.1:12000");
+  expect(read.config.inferenceNoProxy).toBe("127.0.0.1,localhost");
 
   const listed = listCustom3pConfigLibrary(userData);
   expect(listed.appliedId).toBe(entry.id);

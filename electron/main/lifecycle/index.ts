@@ -2,6 +2,7 @@ export { extractLaunchTarget, isClaudeDeepLink, isDesktopExtensionPackage } from
 export { installDesktopAppLifecycle } from "./appLifecycle";
 export { createQuitState, installQuitState } from "./quitState";
 export { installSingleInstanceGuard, restoreMainWindow } from "./singleInstance";
+export { bringMainWindowToFront } from "./bringMainWindowToFront";
 export { dispatchLaunchTarget } from "./launchDispatch";
 export {
   handleClaudeDeepLink,

@@ -1,4 +1,4 @@
-import type { App, BrowserWindow } from "electron";
+import type { App } from "electron";
 import { nativeTheme } from "electron";
 import type { DesktopWindowParts } from "../windows/types";
 import {
@@ -6,6 +6,7 @@ import {
   queuePendingClaudeOpenUrl,
 } from "./claudeUrlHandler";
 import { isClaudeDeepLink } from "./deepLinks";
+import { bringMainWindowToFront } from "./bringMainWindowToFront";
 
 export type DesktopLifecycleOptions = {
   app: App;
@@ -20,13 +21,9 @@ export type DesktopLifecycleOptions = {
   platform?: NodeJS.Platform;
 };
 
-function showMainWindow(mainWindow: BrowserWindow): void {
-  if (mainWindow.isDestroyed()) return;
-  if (!mainWindow.isVisible()) mainWindow.show();
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  // Login callback residual: always raise above other apps.
-  mainWindow.moveTop();
-  mainWindow.focus();
+function showMainWindow(mainWindow: import("electron").BrowserWindow): void {
+  // After app.relaunch / Dock activate: must steal focus + clear opacity:0 boot.
+  bringMainWindowToFront(mainWindow);
 }
 
 /**

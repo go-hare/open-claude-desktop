@@ -9,6 +9,8 @@ import {
 } from "../coworkHostLoop/coworkEnterpriseConfig";
 import {
   buildClaudeCliSpawnEnv,
+  buildCustom3pElectronProxyConfig,
+  buildCustom3pProxySpawnEnv,
   buildDesktopCustom3pCliEnv,
   custom3pEnterpriseConfigFromUnknown,
   DESKTOP_SHELL_SETTINGS_FILE,
@@ -69,6 +71,66 @@ describe("custom3pCliEnv residual", () => {
       ANTHROPIC_AUTH_TOKEN: "",
       ANTHROPIC_BASE_URL: "https://api.example.com",
     });
+  });
+
+  it("product proxy: parses inferenceHttp(s)Proxy / NoProxy and injects CLI env", () => {
+    const enterprise = custom3pEnterpriseConfigFromUnknown({
+      inferenceProvider: "gateway",
+      inferenceGatewayBaseUrl: "http://204.44.121.220:8317",
+      inferenceGatewayApiKey: "sk-test",
+      inferenceHttpProxy: "http://127.0.0.1:12000",
+      inferenceNoProxy: "127.0.0.1,localhost",
+    });
+    expect(enterprise).toMatchObject({
+      inferenceHttpProxy: "http://127.0.0.1:12000",
+      inferenceNoProxy: "127.0.0.1,localhost",
+    });
+    expect(buildCustom3pProxySpawnEnv(enterprise)).toEqual({
+      HTTP_PROXY: "http://127.0.0.1:12000",
+      HTTPS_PROXY: "http://127.0.0.1:12000",
+      NO_PROXY: "127.0.0.1,localhost",
+    });
+    const env = buildDesktopCustom3pCliEnv(enterprise);
+    expect(env).toMatchObject({
+      ANTHROPIC_BASE_URL: "http://204.44.121.220:8317",
+      HTTP_PROXY: "http://127.0.0.1:12000",
+      HTTPS_PROXY: "http://127.0.0.1:12000",
+      NO_PROXY: "127.0.0.1,localhost",
+    });
+    expect(buildCustom3pElectronProxyConfig(enterprise)).toEqual({
+      mode: "fixed_servers",
+      proxyRules: "http://127.0.0.1:12000",
+      proxyBypassRules: "127.0.0.1,localhost",
+    });
+  });
+
+  it("product proxy: separate https proxy uses scheme-specific Electron rules", () => {
+    const cfg = {
+      inferenceProvider: "gateway" as const,
+      inferenceHttpProxy: "http://127.0.0.1:12000",
+      inferenceHttpsProxy: "http://127.0.0.1:12001",
+    };
+    expect(buildCustom3pProxySpawnEnv(cfg)).toEqual({
+      HTTP_PROXY: "http://127.0.0.1:12000",
+      HTTPS_PROXY: "http://127.0.0.1:12001",
+    });
+    expect(buildCustom3pElectronProxyConfig(cfg)).toEqual({
+      mode: "fixed_servers",
+      proxyRules: "http=127.0.0.1:12000;https=127.0.0.1:12001",
+    });
+  });
+
+  it("product proxy: empty bag fields inject nothing", () => {
+    const bag = {
+      inferenceProvider: "gateway" as const,
+      inferenceGatewayBaseUrl: "https://gw.example",
+    };
+    const env = buildDesktopCustom3pCliEnv(bag);
+    expect(env).not.toHaveProperty("HTTP_PROXY");
+    expect(env).not.toHaveProperty("HTTPS_PROXY");
+    expect(env).not.toHaveProperty("NO_PROXY");
+    expect(buildCustom3pElectronProxyConfig(bag)).toBeNull();
+    expect(buildCustom3pProxySpawnEnv(bag)).toEqual({});
   });
 
   it("does not invent ANTHROPIC_BASE_URL when gateway bag has no baseUrl", () => {

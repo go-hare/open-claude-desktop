@@ -17,8 +17,9 @@
  * getConfigHealth returns cached zJ; recheckConfigHealth recomputes X6t.
  */
 
-import { net } from "electron";
+import { net, session } from "electron";
 import {
+  buildCustom3pElectronProxyConfig,
   type Custom3pEnterpriseConfig,
   type Custom3pInferenceModel,
   resolveCustom3pProviderEndpoint,
@@ -176,6 +177,46 @@ function safeRequestUrl(url: string): string {
   }
 }
 
+/**
+ * Product: bag-mode health probe must honor inferenceHttp(s)Proxy.
+ * Electron `net.fetch` uses the default session and ignores process HTTP_PROXY.
+ * When bag has proxy fields, route the probe through a dedicated partition so we
+ * never mutate the app default session's proxy for renderer traffic.
+ */
+async function probeFetch(
+  enterprise: Custom3pEnterpriseConfig,
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  const proxy = buildCustom3pElectronProxyConfig(enterprise);
+  if (!proxy) {
+    return net.fetch(url, {
+      ...init,
+      redirect: "error",
+    } as RequestInit);
+  }
+
+  // Persist:false partition — probe-only, no disk cache of credentials.
+  const probeSession = session.fromPartition("temp:custom3p-health-probe", {
+    cache: false,
+  });
+  await probeSession.setProxy({
+    mode: proxy.mode,
+    proxyRules: proxy.proxyRules,
+    ...(proxy.proxyBypassRules
+      ? { proxyBypassRules: proxy.proxyBypassRules }
+      : {}),
+  });
+  // Ensure Chromium picks up proxy rules before the first request.
+  if (typeof probeSession.forceReloadProxyConfig === "function") {
+    await probeSession.forceReloadProxyConfig();
+  }
+  return probeSession.fetch(url, {
+    ...init,
+    redirect: "error",
+  } as RequestInit);
+}
+
 async function probeGateway(
   enterprise: Custom3pEnterpriseConfig,
   timeoutMs: number,
@@ -219,7 +260,7 @@ async function probeGateway(
   const started = Date.now();
   try {
     const response = model
-      ? await net.fetch(url, {
+      ? await probeFetch(enterprise, url, {
           method: "POST",
           headers: {
             ...headers,
@@ -230,12 +271,10 @@ async function probeGateway(
             max_tokens: 1,
             messages: [PROBE_USER_MESSAGE],
           }),
-          redirect: "error",
           signal: AbortSignal.timeout(timeoutMs),
         })
-      : await net.fetch(url, {
+      : await probeFetch(enterprise, url, {
           headers,
-          redirect: "error",
           signal: AbortSignal.timeout(timeoutMs),
         });
     if (response.ok) return { ok: true, latencyMs: Date.now() - started };

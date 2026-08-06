@@ -39,3 +39,24 @@ const patch = spawnSync(
 if (patch.status !== 0) {
   process.exit(patch.status ?? 1);
 }
+
+// Product optional proxy fields on gateway Setup (bag → HTTP_PROXY / health session).
+const proxyPatch = spawnSync(
+  process.execPath,
+  [path.join(root, "scripts/patch-setup-proxy-fields.mjs")],
+  { stdio: "inherit", cwd: root },
+);
+if (proxyPatch.status !== 0) {
+  process.exit(proxyPatch.status ?? 1);
+}
+
+// Product: Setup "Relaunch now" skips Setup-local countdown (main process closes
+// Setup + main SPA apply interstitial). Must re-apply after ion-dist wipe/sync.
+const applyRelaunchPatch = spawnSync(
+  process.execPath,
+  [path.join(root, "scripts/patch-setup-apply-relaunch.mjs")],
+  { stdio: "inherit", cwd: root },
+);
+if (applyRelaunchPatch.status !== 0) {
+  process.exit(applyRelaunchPatch.status ?? 1);
+}

@@ -102,6 +102,17 @@ export type Custom3pEnterpriseConfig = {
   inferenceCredentialHelper?: string;
   /** Official yL TTL residual (seconds; default 3600 when absent at run). */
   inferenceCredentialHelperTtlSec?: number;
+  /**
+   * Product extension (not official Setup residual): outbound HTTP(S) proxy for
+   * host-managed 3p CLI spawn + main-process health probe. Mirrors the keys users
+   * put in ~/.claude/settings.json env (HTTP_PROXY / HTTPS_PROXY / NO_PROXY) but
+   * lives on the configLibrary bag so bag mode does not need dotClaude passthrough.
+   * Optional — empty means no proxy inject (process inheritance only).
+   */
+  inferenceHttpProxy?: string;
+  inferenceHttpsProxy?: string;
+  /** Comma-separated host list (e.g. 127.0.0.1,localhost) — not a proxy URL. */
+  inferenceNoProxy?: string;
   disableNonessentialTelemetry?: boolean;
   disableEssentialTelemetry?: boolean;
 };
@@ -217,8 +228,72 @@ export function custom3pEnterpriseConfigFromUnknown(
     inferenceCredentialHelperTtlSec: positiveIntField(
       bag.inferenceCredentialHelperTtlSec,
     ),
+    inferenceHttpProxy: stringField(bag.inferenceHttpProxy),
+    inferenceHttpsProxy: stringField(bag.inferenceHttpsProxy),
+    inferenceNoProxy: stringField(bag.inferenceNoProxy),
     disableNonessentialTelemetry: booleanField(bag.disableNonessentialTelemetry),
     disableEssentialTelemetry: booleanField(bag.disableEssentialTelemetry),
+  };
+}
+
+/**
+ * Product proxy env for host-managed 3p CLI spawn (HTTP_PROXY / HTTPS_PROXY / NO_PROXY).
+ * When only HTTP is set, HTTPS reuses it (same convention as common shell setups).
+ * Returns {} when bag has no proxy fields — caller does not strip process inheritance.
+ */
+export function buildCustom3pProxySpawnEnv(
+  config: Custom3pEnterpriseConfig | null | undefined,
+): Record<string, string> {
+  if (!config) return {};
+  const http = config.inferenceHttpProxy?.trim();
+  const https = config.inferenceHttpsProxy?.trim();
+  const noProxy = config.inferenceNoProxy?.trim();
+  if (!http && !https && !noProxy) return {};
+  const env: Record<string, string> = {};
+  if (http) env.HTTP_PROXY = http;
+  if (https) env.HTTPS_PROXY = https;
+  else if (http) env.HTTPS_PROXY = http;
+  if (noProxy) env.NO_PROXY = noProxy;
+  return env;
+}
+
+/**
+ * Electron ProxyConfig fragment for main-process health probes.
+ * `net.fetch` ignores process HTTP_PROXY — use session.setProxy + session.fetch instead.
+ */
+export function buildCustom3pElectronProxyConfig(
+  config: Custom3pEnterpriseConfig | null | undefined,
+): { mode: "fixed_servers"; proxyRules: string; proxyBypassRules?: string } | null {
+  if (!config) return null;
+  const http = config.inferenceHttpProxy?.trim();
+  const https = config.inferenceHttpsProxy?.trim();
+  if (!http && !https) return null;
+
+  const normalize = (raw: string): string => {
+    const value = raw.trim();
+    if (!value) return value;
+    // Electron accepts "http://host:port" or "host:port". Keep scheme when present.
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) return value;
+    return `http://${value}`;
+  };
+
+  let proxyRules: string;
+  if (http && https && http !== https) {
+    // Scheme-specific rules: "http=…;https=…"
+    const stripForScheme = (raw: string): string => {
+      const n = normalize(raw);
+      return n.replace(/^https?:\/\//i, "");
+    };
+    proxyRules = `http=${stripForScheme(http)};https=${stripForScheme(https)}`;
+  } else {
+    proxyRules = normalize(https || http || "");
+  }
+  if (!proxyRules) return null;
+  const noProxy = config.inferenceNoProxy?.trim();
+  return {
+    mode: "fixed_servers",
+    proxyRules,
+    ...(noProxy ? { proxyBypassRules: noProxy } : {}),
   };
 }
 
@@ -506,6 +581,10 @@ export function buildDesktopCustom3pCliEnv(
   for (const key of ["DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING"] as const) {
     if (env[key] === "") delete env[key];
   }
+
+  // Product proxy extension: inject bag HTTP(S)_PROXY so bag-mode CLI can reach
+  // gateways that require a local forwarder (same role as ~/.claude env in dotClaude).
+  Object.assign(env, buildCustom3pProxySpawnEnv(config));
 
   return env;
 }

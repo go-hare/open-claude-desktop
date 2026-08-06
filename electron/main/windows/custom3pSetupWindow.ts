@@ -135,3 +135,27 @@ export async function openCustom3pSetupWindow(_parent?: BrowserWindow): Promise<
 export function getCustom3pSetupWindow(): BrowserWindow | null {
   return isAlive(setupWindow) ? setupWindow : null;
 }
+
+/**
+ * Close the independent Setup BrowserWindow without quitting the app.
+ * Used by relaunchApp so countdown can run on the main window (official UX:
+ * close small Setup first → main shows "Relaunching in n").
+ */
+export function closeCustom3pSetupWindow(): void {
+  if (!isAlive(setupWindow)) {
+    setupWindow = null;
+    return;
+  }
+  try {
+    setupWindow.removeAllListeners("close");
+    setupWindow.close();
+  } catch {
+    try {
+      setupWindow.destroy();
+    } catch {
+      /* already gone */
+    }
+  } finally {
+    setupWindow = null;
+  }
+}
