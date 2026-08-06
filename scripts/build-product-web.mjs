@@ -37,6 +37,41 @@ const distRoot = path.join(webRoot, "dist");
 const targetRoot = path.join(projectRoot, "resources/product-web");
 const skipBuild = process.env.CLAUDE_PRODUCT_WEB_SKIP_BUILD === "1";
 
+/**
+ * Windows: bare `npx`/`npm` via execFileSync is ENOENT (need .cmd + shell).
+ * Prefer local vite bin via process.execPath — no PATH/shell dependency.
+ */
+function runWebBuild(strict) {
+  const env = process.env;
+  const isWin = process.platform === "win32";
+  if (strict) {
+    const npmCmd = isWin ? "npm.cmd" : "npm";
+    execFileSync(npmCmd, ["run", "build"], {
+      cwd: webRoot,
+      stdio: "inherit",
+      env,
+      shell: isWin,
+    });
+    return;
+  }
+  const viteJs = path.join(webRoot, "node_modules", "vite", "bin", "vite.js");
+  if (fsSync.existsSync(viteJs)) {
+    execFileSync(process.execPath, [viteJs, "build"], {
+      cwd: webRoot,
+      stdio: "inherit",
+      env,
+    });
+    return;
+  }
+  const npxCmd = isWin ? "npx.cmd" : "npx";
+  execFileSync(npxCmd, ["vite", "build"], {
+    cwd: webRoot,
+    stdio: "inherit",
+    env,
+    shell: isWin,
+  });
+}
+
 if (!skipBuild) {
   console.log(`building product web: ${webRoot}`);
   // Packaging serves static dist over app://. Prefer vite build even when
@@ -44,19 +79,7 @@ if (!skipBuild) {
   // Set CLAUDE_PRODUCT_WEB_STRICT=1 to require full `npm run build` (tsc + vite).
   const strict = process.env.CLAUDE_PRODUCT_WEB_STRICT === "1";
   try {
-    if (strict) {
-      execFileSync("npm", ["run", "build"], {
-        cwd: webRoot,
-        stdio: "inherit",
-        env: process.env,
-      });
-    } else {
-      execFileSync("npx", ["vite", "build"], {
-        cwd: webRoot,
-        stdio: "inherit",
-        env: process.env,
-      });
-    }
+    runWebBuild(strict);
   } catch (error) {
     // Default: fail closed so package cannot silently ship stale dist.
     // Escape hatch for local iteration only:
