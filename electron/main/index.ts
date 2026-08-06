@@ -115,10 +115,23 @@ function applyUserDataOverride(): void {
  * Product display name for menus / about panel.
  * Must NOT be bare "Claude" — that collides with official Claude Desktop in Dock
  * naming and confuses TCC. Bundle ID is the real separator; name should match product.
+ *
+ * Win32: AppUserModelID must be set early so taskbar / jump lists use Claudex
+ * identity + our residual icon, not the host Electron default grouping.
+ * Matches forge packagerConfig.appBundleId.
  */
 function applyProductAppName(): void {
   const productName = process.env.CLAUDE_PRODUCT_NAME ?? "Claudex";
   if (app.getName() !== productName) app.setName(productName);
+  if (process.platform === "win32") {
+    try {
+      app.setAppUserModelId(
+        process.env.CLAUDE_APP_USER_MODEL_ID ?? "com.local.claudex.desktop",
+      );
+    } catch {
+      /* older Electron */
+    }
+  }
 }
 
 /**

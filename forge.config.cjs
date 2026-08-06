@@ -160,6 +160,15 @@ module.exports = {
     name: "Claudex",
     executableName: "Claudex",
     appBundleId: "com.local.claudex.desktop",
+    // Win PE VERSIONINFO + rcedit icon (resources/electron.ico via icon path).
+    // Keep FileDescription/ProductName = Claudex so Explorer / taskbar never say Electron.
+    win32metadata: {
+      CompanyName: "local reconstruction",
+      FileDescription: "Claudex",
+      InternalName: "Claudex",
+      ProductName: "Claudex",
+      OriginalFilename: "Claudex.exe",
+    },
     // Official residual category.
     appCategoryType: "public.app-category.developer-tools",
     // Official residual deep link.

@@ -62,11 +62,17 @@ export function setOriginalIncognitoTitleBarMode(enabled: boolean): void {
   }
 }
 
+/** Product shell title — not residual SPA / "Claude Desktop Shell" dump. */
+function resolveProductWindowTitle(): string {
+  return process.env.CLAUDE_PRODUCT_NAME ?? "Claudex";
+}
+
 export function createMainWindow(options: DesktopWindowOptions): BrowserWindow {
   const persisted = options.windowState;
   // Win taskbar / linux DE: residual PNG or electron.ico (icns is unreadable by Chromium).
   // Packaged mac still uses Info.plist CFBundleIconFile electron.icns for Dock/Finder.
   const appIconPath = resolveBrowserWindowIconPath(options.paths.resourcesRoot);
+  const productTitle = resolveProductWindowTitle();
   const mainWindow = new BrowserWindow({
     x: persisted?.x,
     y: persisted?.y,
@@ -74,6 +80,8 @@ export function createMainWindow(options: DesktopWindowOptions): BrowserWindow {
     height: options.height ?? persisted?.height ?? 800,
     minWidth: options.minWidth ?? 600,
     minHeight: options.minHeight ?? 400,
+    // Product identity (Claudex). Shell HTML + SPA must not leave "Claude Desktop Shell".
+    title: productTitle,
     titleBarStyle: "hidden",
     titleBarOverlay: options.titleBarOverlay ?? ORIGINAL_TITLE_BAR_OVERLAY,
     trafficLightPosition: options.trafficLightPosition ?? getOriginalTrafficLightPosition(),
@@ -85,6 +93,12 @@ export function createMainWindow(options: DesktopWindowOptions): BrowserWindow {
       preload: options.paths.mainWindowPreload,
       enableBlinkFeatures: undefined,
     },
+  });
+
+  // Keep product title when shell HTML / mainView document.title updates.
+  mainWindow.on("page-title-updated", (event) => {
+    event.preventDefault();
+    if (!mainWindow.isDestroyed()) mainWindow.setTitle(productTitle);
   });
 
   applyOriginalTitleBarOverlay(mainWindow);

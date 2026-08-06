@@ -1,11 +1,11 @@
 # Electron 壳运行时 IPC 覆盖率
 
-生成时间：2026-07-31T13:29:04.364Z
+生成时间：2026-08-06T02:04:53.585Z
 
 - packaged：true
-- real handlers：577
+- real handlers：593
 - fallback handlers：0
-- total active handlers：577
+- total active handlers：593
 - fallbackByInterface：{}
-- Claude Code bundled executable：/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/claude-code-bin/platforms/darwin-arm64/claude
+- Claude Code bundled executable：D:\work\py\claude\open-claude-desktop\out\Claudex-win32-x64\resources\claude-code-bin\platforms\win32-x64\claude.exe
 - Claude Code uses bundled executable：true
