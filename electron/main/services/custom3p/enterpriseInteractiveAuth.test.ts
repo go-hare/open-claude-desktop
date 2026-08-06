@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { resetCoworkEnterpriseConfigForTests } from "../coworkHostLoop/coworkEnterpriseConfig";
+import { clearBedrockSso } from "./enterpriseBedrockSsoAuth";
 import {
   getInteractiveAuthState,
   publishInteractiveAuthRecompute,
@@ -8,6 +10,8 @@ import {
   triggerEnterpriseBootstrapAuth,
   triggerEnterpriseInteractiveAuth,
 } from "./enterpriseInteractiveAuth";
+import { resetEnterpriseSecretsForTests } from "./enterpriseSecureStore";
+import { clearVertexAuthorizedUser } from "./enterpriseVertexAuth";
 
 const localOnly = (bag: Record<string, unknown>) => ({
   getManagedConfig: () => ({}),
@@ -16,7 +20,12 @@ const localOnly = (bag: Record<string, unknown>) => ({
 
 describe("enterpriseInteractiveAuth residual", () => {
   afterEach(() => {
+    // Parallel suite files share process-level secret/ADC stores — isolate.
     resetEnterpriseInteractiveAuthForTests();
+    resetEnterpriseSecretsForTests();
+    clearVertexAuthorizedUser();
+    clearBedrockSso();
+    resetCoworkEnterpriseConfigForTests();
   });
 
   it("recompute is null when bag has no interactive providers", () => {
