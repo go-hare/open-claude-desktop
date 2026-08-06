@@ -223,32 +223,110 @@ module.exports = nativeBinding || fallback;
   console.log(`native-safe-loader:${moduleName} -> ${path.relative(projectRoot, target)}`);
 }
 
+/**
+ * Package/build offline path: when resources/original-runtime-node_modules already
+ * has node-pty + official runtime roots, we do NOT require resources/original-claude.app
+ * (or any live Downloads Claude.app). Package only consumes the project resources tree.
+ *
+ * Force full asar re-extract: CLAUDE_FORCE_ORIGINAL_RUNTIME=1 (requires app.asar).
+ */
+async function hasVendoredModule(moduleName) {
+  return exists(path.join(targetNodeModules, moduleName, "package.json"));
+}
+
+async function vendoredRuntimeIsUsable() {
+  if (!(await hasVendoredModule("node-pty"))) return false;
+  for (const moduleName of originalRuntimeModuleRoots) {
+    if (!(await hasVendoredModule(moduleName))) return false;
+  }
+  return true;
+}
+
 await fs.mkdir(targetNodeModules, { recursive: true });
 
-if (!(await exists(originalAsar))) throw new Error(`original app.asar not found: ${originalAsar}`);
+const forceAsar = process.env.CLAUDE_FORCE_ORIGINAL_RUNTIME === "1";
+const hasAsar = await exists(originalAsar);
 
-if (process.platform === "win32") {
-  // The checked-in reference is a macOS .app. For terminal PTY on Windows we must copy the
-  // locally installed native node-pty binary, otherwise loadOriginalNodePty() would try to load
-  // a Darwin .node file and silently lose the real PTY runtime.
-  await copyInstalledModule("node-pty");
+if (!hasAsar) {
+  if (forceAsar) {
+    throw new Error(
+      `CLAUDE_FORCE_ORIGINAL_RUNTIME=1 but original app.asar not found: ${originalAsar}\n` +
+        `Fix: npm run sync:original-app  (or CLAUDE_ORIGINAL_RESOURCES=/path/with/app.asar)`,
+    );
+  }
+  if (!(await vendoredRuntimeIsUsable())) {
+    throw new Error(
+      [
+        `original app.asar not found: ${originalAsar}`,
+        `and resources/original-runtime-node_modules is incomplete (need node-pty + ${originalRuntimeModuleRoots.join(", ")}).`,
+        `Package does not read Downloads — use OUR vendored residual:`,
+        `  npm run sync:original-app && npm run copy:original-runtime`,
+        `  or set CLAUDE_ORIGINAL_RESOURCES=/path/with/app.asar`,
+        `If the vendored runtime tree is already complete, re-run without deleting it.`,
+      ].join("\n"),
+    );
+  }
+
+  console.log(
+    `[copy:original-runtime] skip asar extract — vendored tree present at ${path.relative(projectRoot, targetNodeModules)}`,
+  );
+  console.log(
+    `[copy:original-runtime] asar missing (${originalAsar}); refreshing local builtins` +
+      (process.platform === "win32" ? " + win32 node-pty" : " only"),
+  );
+
+  // Win32: always prefer locally built node-pty over any Darwin .node left in the tree.
+  if (process.platform === "win32") {
+    await copyInstalledModule("node-pty");
+    if (await hasVendoredModule("@ant/claude-native")) {
+      await writeNativeSafeLoader("@ant/claude-native", "claude-native-binding.node");
+    }
+  }
+
+  for (const moduleName of localBuiltinModuleRoots) {
+    await copyLocalBuiltinModule(moduleName);
+  }
+
+  const executableFilesSkip = [
+    path.join(targetNodeModules, "node-pty/build/Release/spawn-helper"),
+  ];
+  for (const filePath of executableFilesSkip) {
+    if (await exists(filePath)) await fs.chmod(filePath, 0o755);
+  }
+
+  console.log(
+    `runtime modules preserved (vendored, no asar): original=${originalRuntimeModuleRoots.length + 1} builtin=${localBuiltinModuleRoots.length}`,
+  );
 } else {
-  await copyOriginalModule("node-pty");
-}
-for (const moduleName of originalRuntimeModuleRoots) await copyOriginalModule(moduleName);
-if (process.platform === "win32") {
-  // The reference app bundle checked into this workspace is macOS. Keep the official native
-  // binding file for evidence/package parity, but replace the eager NAPI entrypoint with a
-  // safe loader so Windows smoke/import checks do not crash on Darwin binaries.
-  await writeNativeSafeLoader("@ant/claude-native", "claude-native-binding.node");
-}
-for (const moduleName of localBuiltinModuleRoots) await copyLocalBuiltinModule(moduleName);
+  if (process.platform === "win32") {
+    // The checked-in reference is a macOS .app. For terminal PTY on Windows we must copy the
+    // locally installed native node-pty binary, otherwise loadOriginalNodePty() would try to load
+    // a Darwin .node file and silently lose the real PTY runtime.
+    await copyInstalledModule("node-pty");
+  } else {
+    await copyOriginalModule("node-pty");
+  }
+  for (const moduleName of originalRuntimeModuleRoots) {
+    await copyOriginalModule(moduleName);
+  }
+  if (process.platform === "win32") {
+    // The reference app bundle checked into this workspace is macOS. Keep the official native
+    // binding file for evidence/package parity, but replace the eager NAPI entrypoint with a
+    // safe loader so Windows smoke/import checks do not crash on Darwin binaries.
+    await writeNativeSafeLoader("@ant/claude-native", "claude-native-binding.node");
+  }
+  for (const moduleName of localBuiltinModuleRoots) {
+    await copyLocalBuiltinModule(moduleName);
+  }
 
-const executableFiles = [
-  path.join(targetNodeModules, "node-pty/build/Release/spawn-helper"),
-];
-for (const filePath of executableFiles) {
-  if (await exists(filePath)) await fs.chmod(filePath, 0o755);
-}
+  const executableFiles = [
+    path.join(targetNodeModules, "node-pty/build/Release/spawn-helper"),
+  ];
+  for (const filePath of executableFiles) {
+    if (await exists(filePath)) await fs.chmod(filePath, 0o755);
+  }
 
-console.log(`runtime modules copied: original=${originalRuntimeModuleRoots.length + 1} builtin=${localBuiltinModuleRoots.length}`);
+  console.log(
+    `runtime modules copied: original=${originalRuntimeModuleRoots.length + 1} builtin=${localBuiltinModuleRoots.length}`,
+  );
+}
