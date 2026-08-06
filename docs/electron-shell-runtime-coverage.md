@@ -1,6 +1,6 @@
 # Electron 壳运行时 IPC 覆盖率
 
-生成时间：2026-08-06T02:04:53.585Z
+生成时间：2026-08-06T03:13:26.902Z
 
 - packaged：true
 - real handlers：593

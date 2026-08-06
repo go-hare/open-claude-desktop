@@ -1,6 +1,6 @@
 # Electron packaged bundle 对齐审计
 
-生成时间：2026-08-06T02:25:17.250Z
+生成时间：2026-08-06T03:07:35.438Z
 
 ## Windows packaged 结论
 

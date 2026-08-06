@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-08-06T02:25:17.250Z",
+  "generated_at": "2026-08-06T03:07:35.438Z",
   "project_root": "D:\\work\\py\\claude\\open-claude-desktop",
   "platform": "win32",
   "packaged_root": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64",
   "executable": {
     "exists": true,
-    "sha256": "c3d7a553765aef1dc6cbdbdc68f187d20a4fcb1e27ef72e1c967a33f2d5bf86f"
+    "sha256": "394af55ebb3bd317be2df09c4ec099f477d616cbd355aae14760a59b82e3da7b"
   },
   "resources": {
     "app_asar_exists": true,

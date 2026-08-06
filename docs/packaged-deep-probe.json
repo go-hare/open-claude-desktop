@@ -1,0 +1,275 @@
+{
+  "generatedAt": "2026-08-06T03:12:10.841Z",
+  "platform": "win32",
+  "arch": "x64",
+  "packagedRoot": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64",
+  "dual": {
+    "ok": true,
+    "reason": null,
+    "productBuildId": "react-shell",
+    "residualBuildId": "spa-dev",
+    "productOk": true,
+    "residualOk": true,
+    "rootsDistinct": true,
+    "residualIsNotProduct": true
+  },
+  "smokeMarker": {
+    "ok": true,
+    "appPath": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\app.asar",
+    "resourcesPath": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources",
+    "mainWindowVisible": true,
+    "mainViewUrl": "app://localhost/login?returnTo=%2Ftask%2Fnew",
+    "findInPageVisible": false,
+    "applicationMenu": [
+      "文件",
+      "编辑",
+      "视图",
+      "开发者",
+      "窗口",
+      "帮助"
+    ],
+    "ipcHandlers": {
+      "total": 593,
+      "real": 593,
+      "fallback": 0,
+      "byOwner": {
+        "claude.web.WindowControl": 6,
+        "claude.web.WindowState": 3,
+        "claude.web.BrowserNavigation": 4,
+        "claude.internal.ui.MainWindowTitleBar": 4,
+        "claude.internal.ui.AboutWindow": 4,
+        "claude.internal.ui.QuickWindow": 3,
+        "claudeAppBindings": 3,
+        "claude.internal.findInPage.FindInPage": 3,
+        "claude.web.FindInPageProvider": 2,
+        "claude.web.LocalSessions": 129,
+        "claude.web.LocalSessionEnvironment": 2,
+        "claude.web.LocalAgentModeSessions": 62,
+        "claude.web.LocalAgentModeSessions.store": 4,
+        "claude.web.CCDScheduledTasks": 9,
+        "claude.web.CoworkScheduledTasks": 9,
+        "claude.settings.AppConfig": 4,
+        "claude.settings.AppFeatures": 1,
+        "claude.settings.AppPreferences": 2,
+        "claude.settings.Startup": 4,
+        "claude.settings.GlobalShortcut": 2,
+        "claude.settings.MCP": 7,
+        "claude.settings.FilePickers": 2,
+        "claude.settings.DesktopInfo": 2,
+        "claude.settings.WakeScheduler": 2,
+        "claude.settings.Custom3pHelperRun": 2,
+        "claude.settings.Custom3pSetup": 23,
+        "claude.settings.Custom3pSetup.store": 2,
+        "claude.settings.Extensions": 26,
+        "claude.settings.SupportBundle": 1,
+        "claude.hybrid.DesktopIntl": 3,
+        "claude.settings.SupportBundle.store": 2,
+        "claude.simulator.Simulator": 6,
+        "claude.simulator.Simulator.store": 1,
+        "claude.officeAddin.OfficeAddinFiles": 6,
+        "claude.officeAddin.OfficeAddinFiles.store": 1,
+        "claude.web.AutoUpdater.store": 2,
+        "claude.web.BrowserNavigation.store": 2,
+        "claude.web.GrandPrix": 3,
+        "claude.web.GrandPrix.store": 1,
+        "claude.web.Launch": 28,
+        "claude.web.Launch.store": 1,
+        "claude.web.ClaudeVM": 13,
+        "claude.web.ClaudeVM.store": 1,
+        "claude.web.QuickEntry": 1,
+        "claude.web.Account": 1,
+        "claude.web.Auth": 1,
+        "claude.web.AutoUpdater": 6,
+        "claude.web.DesktopNotifications": 4,
+        "claude.web.FileSystem": 17,
+        "claude.web.Resources": 6,
+        "claude.buddy.Buddy": 12,
+        "claude.buddy.BuddyBleTransport": 3,
+        "claude.coworkArtifact.CoworkArtifactBridge": 5,
+        "claude.web.AgentModeFeedback": 3,
+        "claude.web.BuddyRemoteFeed": 1,
+        "claude.web.ChromeExtension": 3,
+        "claude.web.ClaudeCode": 4,
+        "claude.web.ComputerUseTcc": 7,
+        "claude.web.CoworkArtifacts": 18,
+        "claude.web.CoworkFilePreview": 5,
+        "claude.web.CoworkMemory": 7,
+        "claude.web.CoworkRadar": 7,
+        "claude.web.CoworkSpaces": 20,
+        "claude.web.CustomPlugins": 16,
+        "claude.web.LocalPlugins": 15,
+        "claude.web.FramebufferPreview": 10,
+        "claude.web.FloatingPenguinMini": 2,
+        "claude.web.NestDev": 2,
+        "claude.web.OpenDocuments": 2,
+        "claude.web.OrbitDeploys": 4,
+        "enterpriseAuth": 14
+      },
+      "fallbackByInterface": {}
+    },
+    "claudeCode": {
+      "executable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
+      "bundledExecutable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
+      "usesBundledExecutable": true
+    }
+  },
+  "pass": 31,
+  "fail": 0,
+  "results": [
+    {
+      "name": "dual-root ok",
+      "ok": true,
+      "detail": "product=react-shell residual=spa-dev"
+    },
+    {
+      "name": "product-web is not spa-dev",
+      "ok": true,
+      "detail": "react-shell"
+    },
+    {
+      "name": "residual ion is spa-dev (or residual id)",
+      "ok": true,
+      "detail": "spa-dev"
+    },
+    {
+      "name": "asar product main",
+      "ok": true,
+      "detail": "chunks=true"
+    },
+    {
+      "name": "bundled claude CLI present",
+      "ok": true,
+      "detail": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\claude.exe"
+    },
+    {
+      "name": "packaged product-web/index.html",
+      "ok": true,
+      "detail": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\product-web\\index.html"
+    },
+    {
+      "name": "packaged ion-dist/index.html",
+      "ok": true,
+      "detail": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\ion-dist\\index.html"
+    },
+    {
+      "name": "asar js readable",
+      "ok": true,
+      "detail": "4008640 chars from 2 files"
+    },
+    {
+      "name": "asar has enterpriseInteractiveAuth",
+      "ok": true,
+      "detail": "triggerEnterpriseInteractiveAuth|enterpriseInteractiveAuth"
+    },
+    {
+      "name": "asar has enterpriseVertexAuth",
+      "ok": true,
+      "detail": "enterpriseVertexAuth|needsVertexInteractiveAuth|Vertex"
+    },
+    {
+      "name": "asar has enterpriseBedrockSso",
+      "ok": true,
+      "detail": "enterpriseBedrockSso|needsBedrockSso|BedrockSso"
+    },
+    {
+      "name": "asar has enterpriseBootstrapOidc",
+      "ok": true,
+      "detail": "enterpriseBootstrapOidc|triggerEnterpriseBootstrapAuth"
+    },
+    {
+      "name": "asar has credentialHelper",
+      "ok": true,
+      "detail": "runEnterpriseCredentialHelperWithTtl|credentialHelperTokenToSpawnEnv"
+    },
+    {
+      "name": "asar has nonessentialGate",
+      "ok": true,
+      "detail": "installEnterpriseNonessentialNetworkGate|isEnterpriseNonessentialServicesDisabled"
+    },
+    {
+      "name": "asar has tokenCap",
+      "ok": true,
+      "detail": "assertEnterpriseTokenCapAllowsTurn|coworkTokenCap"
+    },
+    {
+      "name": "asar has configLibrary",
+      "ok": true,
+      "detail": "configLibrary|listCustom3pConfigs|custom3pConfigLibrary"
+    },
+    {
+      "name": "asar has buildClaudeCliSpawnEnv",
+      "ok": true,
+      "detail": "buildClaudeCliSpawnEnv|enrichClaudeCliSpawnEnvWithEnterpriseAuth"
+    },
+    {
+      "name": "packaged binary exists",
+      "ok": true,
+      "detail": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\Claudex.exe"
+    },
+    {
+      "name": "CDP /json/list up",
+      "ok": true,
+      "detail": "3 targets"
+    },
+    {
+      "name": "smoke marker ok",
+      "ok": true,
+      "detail": "ipc real=593 fallback=0 url=app://localhost/login?returnTo=%2Ftask%2Fnew"
+    },
+    {
+      "name": "IPC zero fallback",
+      "ok": true,
+      "detail": "fallback=0"
+    },
+    {
+      "name": "enterpriseAuth handlers registered",
+      "ok": true,
+      "detail": "enterpriseAuth=14"
+    },
+    {
+      "name": "Custom3pSetup handlers registered",
+      "ok": true,
+      "detail": "Custom3pSetup=23"
+    },
+    {
+      "name": "uses bundled claude",
+      "ok": true,
+      "detail": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe"
+    },
+    {
+      "name": "main page target",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "renderer on app:// product route",
+      "ok": true,
+      "detail": "app://localhost/login?returnTo=%2Ftask%2Fnew"
+    },
+    {
+      "name": "renderer document ready",
+      "ok": true,
+      "detail": "readyState=complete title=Claudex"
+    },
+    {
+      "name": "preload bridge keys",
+      "ok": true,
+      "detail": "WARN: global keys=[\"claude.web\",\"claude.settings\",\"claude.hybrid\",\"claude.skills\",\"claude.simulator\",\"claude.officeAddin\",\"claude.buddy\",\"claudeAppBindings\",\"claudeAppSettings\",\"desktopBootFeatures\",\"desktopEnterpriseConfig\",\"desktopTelemetryConfig\",\"desktopNestLocalUsername\",\"electronWindowControl\",\"electronIntl\"] has={\"claude\":\"undefined\",\"desktop\":\"undefined\",\"electron\":\"undefined\",\"require\":\"undefined\"}"
+    },
+    {
+      "name": "navigated setup-desktop-3p",
+      "ok": true,
+      "detail": "app://localhost/setup-desktop-3p"
+    },
+    {
+      "name": "setup page rendered content",
+      "ok": true,
+      "detail": "htmlLen=31984 buildId=spa-dev title=Claude body=配置第三方推理 Default 连接 3 沙箱与工作区 连接器与扩展 遥测与更新 用量限制 插件与 Skills 出站要求 连接 选择 Claude Desktop 将推理请求发送到何处。 Gateway Anthropic-compatible Bedrock AWS Vertex Google Cloud Foundry Azure AI OpenAI Chat Completions Gem"
+    },
+    {
+      "name": "device-code-verify route loads",
+      "ok": true,
+      "detail": "app://localhost/device-code-verify"
+    }
+  ]
+}
