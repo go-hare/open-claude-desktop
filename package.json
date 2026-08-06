@@ -48,6 +48,7 @@
     "compare:official-deps": "node scripts/compare-official-desktop-deps.mjs --write-doc docs/desktop-official-dependency-parity.md",
     "verify:builtins": "node scripts/verify-builtin-modules.mjs",
     "audit:internal": "node scripts/audit-desktop-internal-functions.mjs",
+    "audit:enterprise-bag": "node scripts/audit-enterprise-bag-consumption.mjs",
     "copy:claude-code-binary": "node scripts/copy-claude-code-binary.mjs",
     "sync:helpers": "node scripts/sync-helpers-and-locales.mjs",
     "ensure:secondary-shell": "node scripts/ensure-secondary-shell.mjs",
