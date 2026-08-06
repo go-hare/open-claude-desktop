@@ -1,19 +1,19 @@
 {
-  "source": "@go-hare/claude-code@2.7.24",
+  "source": "@go-hare/claude-code@2.7.28",
   "package": "@go-hare/claude-code",
-  "version": "2.7.24",
+  "version": "2.7.28",
   "binary": "claude.exe",
   "platform": "win32",
   "arch": "x64",
-  "size": 147862528,
-  "sha256": "549b39b0469fc28c8a7c6ee9000e5203cf69b7c01c2b4d298992d7a7c279aff9",
-  "versionLabel": "2.7.24 (Claude Code)",
+  "size": 130927616,
+  "sha256": "db4199f140bd5fe09001f895b9b36417eca18b86363af02b9df4ef0e4313a769",
+  "versionLabel": "2.7.28 (Claude Code)",
   "topLevel": {
     "claude.exe": {
       "from": "platforms/win32-x64/claude.exe",
-      "size": 147862528,
-      "sha256": "549b39b0469fc28c8a7c6ee9000e5203cf69b7c01c2b4d298992d7a7c279aff9",
-      "version": "2.7.24 (Claude Code)"
+      "size": 130927616,
+      "sha256": "db4199f140bd5fe09001f895b9b36417eca18b86363af02b9df4ef0e4313a769",
+      "version": "2.7.28 (Claude Code)"
     }
   },
   "vendor": {
@@ -28,9 +28,9 @@
     "win32-x64": {
       "binary": "claude.exe",
       "path": "platforms/win32-x64/claude.exe",
-      "size": 147862528,
-      "sha256": "549b39b0469fc28c8a7c6ee9000e5203cf69b7c01c2b4d298992d7a7c279aff9",
-      "version": "2.7.24 (Claude Code)"
+      "size": 130927616,
+      "sha256": "db4199f140bd5fe09001f895b9b36417eca18b86363af02b9df4ef0e4313a769",
+      "version": "2.7.28 (Claude Code)"
     }
   },
   "mode": "host-only",

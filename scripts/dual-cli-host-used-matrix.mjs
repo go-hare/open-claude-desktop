@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Full dual-CLI matrix for **host-used** surfaces only (claudeCliRunner residual).
- * official 2.1.218 vs desktop-bundled 2.7.24.
+ * official 2.1.218 vs desktop-bundled 2.7.28.
  *
  * Surfaces covered:
  *  P*  permission modes init + write docs (and .claude where relevant)

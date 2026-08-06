@@ -9,7 +9,7 @@
  * is opt-in for CI / dual-exec guest prep that needs every npm optional package.
  *
  * Env:
- *   CLAUDE_CODE_NPM_VERSION   default 2.7.24
+ *   CLAUDE_CODE_NPM_VERSION   default 2.7.28
  *   CLAUDE_CODE_BINARY_SOURCE / CLAUDE_CODE_EXECUTABLE  optional override for host binary only
  *   CLAUDE_CODE_ALL_PLATFORMS=1  fetch all PLATFORM_PACKAGES (opt-in fat tree)
  *   CLAUDE_CODE_SKIP_PLATFORMS=1  legacy alias of host-only (default; kept for scripts)
@@ -27,7 +27,7 @@ import { pipeline } from "node:stream/promises";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetRoot = path.join(projectRoot, "resources", "claude-code-bin");
-const VERSION = process.env.CLAUDE_CODE_NPM_VERSION || "2.7.24";
+const VERSION = process.env.CLAUDE_CODE_NPM_VERSION || "2.7.28";
 /** Opt-in fat matrix. Default is host-only (mac packages mac, win packages win). */
 const ALL_PLATFORMS = process.env.CLAUDE_CODE_ALL_PLATFORMS === "1";
 /** Legacy env: when set to 1, force host-only even if ALL_PLATFORMS is also set. */

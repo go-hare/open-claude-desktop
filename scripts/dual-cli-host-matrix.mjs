@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Host-equivalent dual-CLI matrix: Anthropic local 2.1.218 vs desktop-bundled 2.7.24.
+ * Host-equivalent dual-CLI matrix: Anthropic local 2.1.218 vs desktop-bundled 2.7.28.
  *
  * Mirrors open-claude-desktop claudeCliRunner.buildArgs residual:
  *   --print --output-format stream-json --verbose --input-format stream-json
