@@ -16,6 +16,7 @@
  * (node-pty / @ant/*) must be injected into app.asar here. We also keep
  * resources/original-runtime-node_modules for originalRuntimeModules candidates.
  */
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
@@ -36,6 +37,62 @@ const productWebSource = path.join(projectRoot, "resources/product-web");
 const residualIonSource = path.join(projectRoot, "resources/ion-dist");
 const claudeCodeBinSource = path.join(projectRoot, "resources/claude-code-bin");
 const originalRuntimeSource = path.join(projectRoot, "resources/original-runtime-node_modules");
+const appIconIco = path.join(projectRoot, "resources/electron.ico");
+
+/**
+ * Re-stamp Claudex.exe PE icon after forge.
+ *
+ * electron-packager/rcedit may leave Explorer showing the stock Electron atom when
+ * the ICO is PNG-only or the shell icon cache is sticky. We re-apply
+ * resources/electron.ico (BMP small sizes + PNG 256) via rcedit so Explorer /
+ * taskbar resolve the residual Claude mark, not Atom.
+ */
+function stampWin32ExeIcon(exePath) {
+  if (!fs.existsSync(appIconIco)) {
+    return { ok: false, reason: "resources/electron.ico missing" };
+  }
+  const rceditCandidates = [
+    path.join(projectRoot, "node_modules/electron-winstaller/vendor/rcedit.exe"),
+    path.join(projectRoot, "node_modules/rcedit/bin/rcedit.exe"),
+    path.join(projectRoot, "node_modules/rcedit/bin/rcedit-x64.exe"),
+  ];
+  const rcedit = rceditCandidates.find((p) => fs.existsSync(p));
+  if (!rcedit) {
+    return { ok: false, reason: "rcedit.exe not found (electron-winstaller vendor)" };
+  }
+  const result = spawnSync(
+    rcedit,
+    [
+      exePath,
+      "--set-icon",
+      appIconIco,
+      "--set-version-string",
+      "FileDescription",
+      "Claudex",
+      "--set-version-string",
+      "ProductName",
+      "Claudex",
+      "--set-version-string",
+      "InternalName",
+      "Claudex",
+      "--set-version-string",
+      "OriginalFilename",
+      "Claudex.exe",
+      "--set-version-string",
+      "CompanyName",
+      "local reconstruction",
+    ],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      reason: `rcedit failed status=${result.status}`,
+      stderr: (result.stderr || result.stdout || "").slice(0, 400),
+    };
+  }
+  return { ok: true, rcedit: path.relative(projectRoot, rcedit), icon: "resources/electron.ico" };
+}
 
 function existsSync(p) {
   try {
@@ -143,6 +200,13 @@ if (!claudeExeExists) {
   );
 }
 
+// PE icon must be residual Claude mark (not stock Electron atom). Re-stamp after
+// forge so Explorer/taskbar pick up BMP+PNG ICO even when shell cache is sticky.
+const exeIconStamp = stampWin32ExeIcon(packagedExe);
+if (!exeIconStamp.ok) {
+  console.warn("[align:win32] exe icon stamp skipped:", exeIconStamp.reason);
+}
+
 console.log(
   JSON.stringify(
     {
@@ -158,6 +222,7 @@ console.log(
       claudeCodeBinPrune,
       claudeExeExists,
       asarRuntimeInjected: asarInject.ok,
+      exeIconStamp,
       load: "app://localhost → resources/product-web (setup residual → ion-dist)",
     },
     null,
