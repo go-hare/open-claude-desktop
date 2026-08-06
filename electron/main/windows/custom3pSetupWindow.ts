@@ -1,5 +1,6 @@
 import { app, BrowserWindow, nativeTheme, shell } from "electron";
 import path from "node:path";
+import { resolveBrowserWindowIconPath } from "../services/settings/officialAppIcon";
 import { SettingsStore } from "../services/settings/settingsStore";
 import { resolveDialogLocale } from "../services/settings/desktopDialogI18n";
 
@@ -75,6 +76,9 @@ export async function openCustom3pSetupWindow(_parent?: BrowserWindow): Promise<
 
   // Official I8 residual.
   const backgroundColor = nativeTheme.shouldUseDarkColors ? "#1f1f1e" : "#fdfdfc";
+  const setupTitle = resolveSetupWindowTitle();
+  // Win taskbar: residual PNG/ICO (icns empty → Electron Atom default).
+  const appIconPath = resolveBrowserWindowIconPath(process.resourcesPath || app.getAppPath());
 
   setupWindow = new BrowserWindow({
     width: 900,
@@ -83,8 +87,9 @@ export async function openCustom3pSetupWindow(_parent?: BrowserWindow): Promise<
     minHeight: 560,
     backgroundColor,
     // Official 9GRz7bC+rr — follow preferences.locale (not hard-coded zh).
-    title: resolveSetupWindowTitle(),
+    title: setupTitle,
     autoHideMenuBar: true,
+    ...(appIconPath ? { icon: appIconPath } : {}),
     // Official: no parent/modal — independent setup window.
     webPreferences: {
       preload: path.join(app.getAppPath(), ".vite/build/mainView.js"),
@@ -101,6 +106,13 @@ export async function openCustom3pSetupWindow(_parent?: BrowserWindow): Promise<
     },
   });
 
+  // Residual ion-dist SPA may set document.title to "Claude Desktop Setup" (web
+  // brand). Keep official BrowserWindow title (Configure Third-Party Inference…).
+  setupWindow.on("page-title-updated", (event) => {
+    event.preventDefault();
+    if (isAlive(setupWindow)) setupWindow.setTitle(setupTitle);
+  });
+
   setupWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: "deny" };
@@ -113,6 +125,7 @@ export async function openCustom3pSetupWindow(_parent?: BrowserWindow): Promise<
   // Official: loadURL immediately (no show:false + ready-to-show gate).
   await setupWindow.loadURL("app://localhost/setup-desktop-3p");
   if (isAlive(setupWindow)) {
+    setupWindow.setTitle(setupTitle);
     setupWindow.show();
     setupWindow.focus();
   }

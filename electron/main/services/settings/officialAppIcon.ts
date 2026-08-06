@@ -38,12 +38,36 @@ export function resolveOfficialAppIconPath(resourcesRoot: string): string | null
   return null;
 }
 
-function resolveOfficialAppIconPngPath(resourcesRoot: string): string | null {
+export function resolveOfficialAppIconPngPath(resourcesRoot: string): string | null {
   for (const root of candidateRoots(resourcesRoot)) {
     const candidate = path.join(root, OFFICIAL_APP_ICON_PNG);
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+/**
+ * Path for BrowserWindow `{ icon }` / setIcon.
+ *
+ * Win32: Chromium cannot decode residual electron.icns (ic07) → empty image →
+ * Electron default Atom taskbar icon. Prefer residual PNG (same bitmap as icns
+ * extract), then electron.ico when packager produced it.
+ * Darwin/Linux: icns path is fine for packager / LaunchServices; PNG still works.
+ */
+export function resolveBrowserWindowIconPath(resourcesRoot: string): string | null {
+  const png = resolveOfficialAppIconPngPath(resourcesRoot);
+  if (process.platform === "win32") {
+    // Prefer ICO for taskbar identity when present (packaged exe resource).
+    for (const root of candidateRoots(resourcesRoot)) {
+      const ico = path.join(root, "electron.ico");
+      if (fs.existsSync(ico)) return ico;
+    }
+    if (png) return png;
+    return null;
+  }
+  // mac/linux: PNG is reliable for nativeImage; icns path as last resort.
+  if (png) return png;
+  return resolveOfficialAppIconPath(resourcesRoot);
 }
 
 function loadNativeImage(filePath: string): NativeImage | null {

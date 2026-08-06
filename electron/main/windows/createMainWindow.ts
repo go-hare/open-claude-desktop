@@ -1,5 +1,5 @@
 import { BrowserWindow, nativeTheme } from "electron";
-import { resolveOfficialAppIconPath } from "../services/settings/officialAppIcon";
+import { resolveBrowserWindowIconPath } from "../services/settings/officialAppIcon";
 import type { DesktopWindowOptions } from "./types";
 
 const ORIGINAL_TITLEBAR_HEIGHT = 45;
@@ -64,9 +64,9 @@ export function setOriginalIncognitoTitleBarMode(enabled: boolean): void {
 
 export function createMainWindow(options: DesktopWindowOptions): BrowserWindow {
   const persisted = options.windowState;
-  // Official CFBundleIconFile electron.icns — also BrowserWindow.icon (win taskbar /
-  // some linux DEs). Packaged mac uses Info.plist; still pass path when present.
-  const appIconPath = resolveOfficialAppIconPath(options.paths.resourcesRoot);
+  // Win taskbar / linux DE: residual PNG or electron.ico (icns is unreadable by Chromium).
+  // Packaged mac still uses Info.plist CFBundleIconFile electron.icns for Dock/Finder.
+  const appIconPath = resolveBrowserWindowIconPath(options.paths.resourcesRoot);
   const mainWindow = new BrowserWindow({
     x: persisted?.x,
     y: persisted?.y,

@@ -106,11 +106,16 @@ for (const screenAsset of [
   if (fs.existsSync(screenPath)) extraResource.push(screenPath);
 }
 
-// Residual-extracted PNG for Electron dock.setIcon. Chromium nativeImage cannot
-// decode official electron.icns (ic07-only → empty); LaunchServices still uses icns.
+// Residual-extracted PNG for Electron dock.setIcon / BrowserWindow.icon.
+// Chromium nativeImage cannot decode official electron.icns (ic07-only → empty);
+// LaunchServices still uses icns on mac. Win taskbar needs PNG or electron.ico.
 const electronAppIconPng = path.join(resourcesDir, "electron-app-icon.png");
 if (fs.existsSync(electronAppIconPng)) {
   extraResource.push(electronAppIconPng);
+}
+const electronAppIconIco = path.join(resourcesDir, "electron.ico");
+if (fs.existsSync(electronAppIconIco)) {
+  extraResource.push(electronAppIconIco);
 }
 
 // Official Swift Quick Entry i18n residual: Contents/Resources/*.lproj/Localizable.strings
