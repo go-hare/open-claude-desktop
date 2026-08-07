@@ -23,6 +23,9 @@ import {
   installAnthropicDesktopUserAgent,
 } from "./services/network/anthropicClientHeaders";
 import { installEnterpriseNonessentialNetworkGate } from "./services/network/enterpriseNonessentialGate";
+import { applyRendererProxyFromUserData } from "./services/network/applyRendererProxyFromBag";
+import { installArtifactSandboxFrameAncestorBridge } from "./services/network/artifactSandboxFrameAncestorBridge";
+import { installArtifactSandboxAllowedParentOriginBridge } from "./services/network/artifactSandboxAllowedParentOriginBridge";
 import {
   claimClaudeProtocolClients,
   createWindowStateKeeper,
@@ -224,11 +227,26 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
 
   const createAndLoadWindow = async () => {
     const initialMainViewUrl = getInitialMainViewUrlOverride(options);
-    // Official Cbe({defaultWidth:1200,defaultHeight:800}) — always shell defaults.
-    // LoginRoute jn resizes to 600×600 only after SPA mounts /login.
+    // Official Cbe defaults 1200×800 for signed-in shell. After Sign out clear (F1t
+    // unlinks window-state) the next cold start paints LoginRoute — if we still open
+    // 1200 under opacity:0 then jn resizes to 600 after reveal races, user sees
+    // "主窗口一闪再小窗". When chooser mode is void (no persisted deploymentMode),
+    // start at LoginRoute residual size so reveal lands on the chooser geometry.
+    let defaultWidth = 1200;
+    let defaultHeight = 800;
+    try {
+      const snap = resolveDeploymentModeFromUserData(app.getPath("userData"));
+      const persisted = snap.persistedDeploymentMode;
+      if (persisted !== "1p" && persisted !== "3p" && persisted !== "dotClaude") {
+        defaultWidth = 600;
+        defaultHeight = 600;
+      }
+    } catch {
+      /* keep shell defaults */
+    }
     const windowState = createWindowStateKeeper({
-      defaultWidth: 1200,
-      defaultHeight: 800,
+      defaultWidth,
+      defaultHeight,
     });
     // context is created after window, but close residual needs settings.menuBarEnabled.
     // Wire tray-disabled quit after IPC context exists (see below).
@@ -334,6 +352,38 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
   // Official Ob connector-favicons residual — cancel Google favicon proxies when
   // Ti().disableNonessentialServices is true (evaluated per request).
   installEnterpriseNonessentialNetworkGate();
+  // Product: bag inferenceHttp(s)Proxy → defaultSession + artifact-sandbox so
+  // official MermaidIframe (claudeusercontent.com) can load when direct egress
+  // is blocked. Must run after whenReady, before createAndLoadWindow.
+  try {
+    await applyRendererProxyFromUserData(app.getPath("userData"));
+  } catch (error) {
+    console.warn(
+      "[proxy] boot applyRendererProxyFromUserData failed",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  // Product: sandbox CSP frame-ancestors allows app://localhost (packaged residual)
+  // but not Vite http://127.0.0.1:5176 → ERR_BLOCKED_BY_RESPONSE. Extend only.
+  try {
+    installArtifactSandboxFrameAncestorBridge();
+  } catch (error) {
+    console.warn(
+      "[artifact-sandbox] frame-ancestors bridge failed",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  // Product: sandbox JS allowedParentOrigins only lists app://localhost + claude.ai
+  // hosts. Dev Vite origin is rejected by residual communicator → no ReadyForContent.
+  // Rewrite sandbox HTML Document responses to inject MAIN_VIEW origins (Fetch CDP).
+  try {
+    installArtifactSandboxAllowedParentOriginBridge();
+  } catch (error) {
+    console.warn(
+      "[artifact-sandbox] allowedParentOrigins bridge failed",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
   // Official Urr / DJn residual: claim claude:// so login magic-link does not open a
   // stale Launch Services handler (Finder "找不到该文件").
   claimClaudeProtocolClients(app);

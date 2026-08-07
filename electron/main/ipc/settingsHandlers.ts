@@ -17,10 +17,11 @@ import {
   writeCustom3pConfigLibrary,
 } from "../services/custom3p/custom3pConfigLibrary";
 import {
+  deploymentModeIs3p,
   deploymentModeToPersistAfterApply,
   normalizePersistedDeploymentMode,
+  resolveDeploymentModeFromUserData,
 } from "../services/custom3p/deploymentMode";
-import { resolveMainWindowLoadUrl } from "../windows/routeMode";
 import { clearCoworkOauthTokenCache } from "../services/coworkAccount/coworkOauthTokenCache";
 import { revokeEnterpriseInteractiveAuth } from "../services/custom3p/enterpriseInteractiveAuth";
 import {
@@ -37,6 +38,7 @@ import {
   invalidateConfigHealthCache,
   recheckConfigHealth as recheckCustom3pConfigHealth,
 } from "../services/custom3p/custom3pConfigHealth";
+import { applyRendererProxyFromUserData } from "../services/network/applyRendererProxyFromBag";
 import { custom3pBootstrapState, custom3pLoginDesktopStatus } from "../services/custom3p/custom3pStatus";
 import {
   getCredentialHelperLastRunResidual,
@@ -1123,6 +1125,9 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
           custom3pConfigInput(config),
         );
         publishCustom3pBootstrapState(context);
+        // Product: bag proxy fields must reach Chromium sessions without waiting for relaunch
+        // so MermaidIframe (claudeusercontent) can load after Network Proxy edit.
+        void applyRendererProxyFromUserData(settingsUserDataPath(context)).catch(() => {});
         return result;
       },
       createConfig: async (_event, input) => {
@@ -1229,6 +1234,8 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
           }
         }
         publishCustom3pBootstrapState(context);
+        // Same as writeConfig: applied bag proxy must hit defaultSession for residual iframes.
+        void applyRendererProxyFromUserData(settingsUserDataPath(context)).catch(() => {});
         return ok;
       },
       revealConfig: async (_event, id) => {
@@ -1295,34 +1302,58 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         performProcessRelaunchOnce("confirmProcessRelaunch");
         return true;
       },
-      // Official residual pot/got/jsA (app.asar):
-      //   pot(e) → got(e==="clear"?void 0:e, enterprise)
-      //   jsA writes preferences.deploymentMode (void on clear)
-      //   jsA mode change → F1t resetMainWindowBounds (n5.unmanage + unlink window-state)
-      //   if mode !== "3p" → clear session residual + relaunchApp
-      //   if mode === "3p" → soft loadURL(CUSTOM_3P_ORIGIN) without process relaunch
+      // Official residual pot/got/jsA (app.asar index.js):
+      //   pot(e) → got(e==="clear"?void 0:e, vi())
+      //   async function got(e,A){
+      //     const t=SM(A); await jsA(e);
+      //     if(e!=="3p"){ clearAllSessionCredentials; relaunchApp(); return }
+      //     const r=SM(A);
+      //     if(t===r){ if(!r)return; await mainView.loadURL(CUSTOM_3P_ORIGIN) }
+      //     else relaunchApp()
+      //   }
+      //   jsA writes deploymentMode; when mode *changes* → F1t (unmanage+unlink window-state)
+      //   SM = Hzt(enterprise) && (IHe || krA()!=="1p")
       // Tjt validation: mode ∈ {"1p","3p","clear"}
-      // Product extension: "dotClaude" — same soft loadURL path as "3p" (product shell origin).
+      // Product extension: "dotClaude" maps to 3p shell residual (same soft/relaunch gate).
       setDeploymentMode: async (_event, mode) => {
         if (mode !== "1p" && mode !== "3p" && mode !== "clear" && mode !== "dotClaude") {
           throw new Error(
             'Argument "mode" at position 0 to method "setDeploymentMode" in interface "Custom3pSetup" failed to pass validation',
           );
         }
+
+        // Official got: t = SM(A) *before* jsA so soft vs relaunch sees activation flip.
+        const userDataPath = settingsUserDataPath(context);
+        let smBefore = false;
+        try {
+          const before = resolveDeploymentModeFromUserData(userDataPath);
+          smBefore = deploymentModeIs3p(before.enterprise, before.persistedDeploymentMode);
+        } catch {
+          smBefore = false;
+        }
+
+        // Official jsA: only F1t when persisted mode actually changes.
+        const prevPersisted = normalizePersistedDeploymentMode(
+          settings.getPreferences()?.deploymentMode,
+        );
+        const nextPersisted =
+          mode === "1p" || mode === "3p" || mode === "dotClaude" ? mode : undefined;
+        const modeChanged = prevPersisted !== nextPersisted;
+
         if (mode === "1p" || mode === "3p" || mode === "dotClaude") {
           settings.setPreference("deploymentMode", mode);
         } else {
           // Official jsA(undefined): delete persisted chooser mode.
           settings.deletePreference("deploymentMode");
         }
-        publishCustom3pBootstrapState(context);
+        // Never publish bootstrap into the live SPA before exit / loadURL (product dual-root
+        // soft SPA gate would remount LoginDesktop/DesktopFrame under d2t — not residual got).
+        invalidateConfigHealthCache();
 
-        // Official F1t (jsA when mode changes): drop window-state so LoginRoute 600×600
-        // is not re-persisted across leave / relaunch.
+        // Official F1t (jsA when A!==e only): n5.unmanage + unlink window-state.json.
         const resetMainWindowBoundsF1t = async () => {
           try {
             context.windowState?.unmanage();
-            context.windowState?.resetStateToDefault();
           } catch {
             /* continue unlink */
           }
@@ -1333,12 +1364,13 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
             /* ignore */
           }
         };
+        if (modeChanged) {
+          await resetMainWindowBoundsF1t();
+        }
 
-        // Official got: mode !== "3p" → clear session credentials (Lm / oauth cache) + relaunch.
-        // Product residual: clearCoworkOauthTokenCache is Lm (C5++ / qu={}/persist empty).
-        // Also revoke enterprise interactive secrets (Vertex ADC / Bedrock SSO / bootstrap OIDC)
-        // so 1p/clear does not leave needsAuth sticky after Sign out / switch to Anthropic.
-        // Do NOT invent full session.clearStorageData unless residual got body does so.
+        // Official got: mode !== "3p" → clear session credentials + relaunchApp.
+        // Product residual: clearCoworkOauthTokenCache + revoke enterprise interactive auth.
+        // Do NOT invent session.clearStorageData.
         const clearSessionCredentialsResidual = async () => {
           try {
             const had = clearCoworkOauthTokenCache();
@@ -1352,14 +1384,8 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
             );
           }
           try {
-            let userDataPath: string | undefined;
-            try {
-              userDataPath = settingsUserDataPath(context);
-            } catch {
-              userDataPath = undefined;
-            }
             await revokeEnterpriseInteractiveAuth(
-              userDataPath ? { getUserDataPath: () => userDataPath! } : {},
+              userDataPath ? { getUserDataPath: () => userDataPath } : {},
             );
           } catch (error) {
             console.warn(
@@ -1369,76 +1395,122 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
           }
         };
 
-        if (mode === "1p" || mode === "clear") {
-          // Official got(e,A):
-          //   await jsA(e)  // clear → void
-          //   if e !== "3p": clear session credentials + relaunchApp(); return
-          //   // only "3p" may soft loadURL without relaunch
-          // 1p cold start: Cbe 1200×800 + mN via resolveMainWindowLoadUrl(persisted 1p);
-          // clear cold start: void chooser → product LoginDesktop (no persisted mode).
-          // Do NOT soft loadURL before exit — double-paints / flash under d2t.
-          // Single-flight performProcessRelaunchOnce avoids dual Dock icons.
+        // Official: only literal "3p" may soft-load; product "dotClaude" is 3p-shell residual.
+        const isSoft3pShell = mode === "3p" || mode === "dotClaude";
+
+        if (!isSoft3pShell) {
+          // Official got: e !== "3p" → clear + relaunchApp(); return
+          // Do NOT soft loadURL before exit (double-paint under d2t).
           await clearSessionCredentialsResidual();
-          await resetMainWindowBoundsF1t();
-          performProcessRelaunchOnce(mode === "clear" ? "got-clear" : "got-1p");
-        } else if (mode === "3p" || mode === "dotClaude") {
-          // Official got("3p"): jsA + F1t + soft loadURL(CUSTOM_3P_ORIGIN) — no process relaunch.
-          // M5t renderer only NQt("3p"); document tear-down fires LoginRoute pagehide →
-          // resize(1200,800). Product: same loadURL on product shell origin (/task/new).
-          // Opaque soft host: apply shell bounds before loadURL so new paint is not at 600
-          // (official cold path hides this under opacity:0; soft path cannot).
-          await resetMainWindowBoundsF1t();
-          // Align Cowork home residual (Pos / uAe → /task/new).
+          // Product dual-root: hide current shell before setImmediate exit so the gap
+          // cannot flash DesktopFrame. Next process creates at opacity:0 (createMainWindow).
           try {
-            settings.setPreference("sidebarMode", "task");
+            const mw = context.windows.mainWindow;
+            if (mw && !mw.isDestroyed()) mw.setOpacity(0);
           } catch {
-            /* loadURL still forces /task/new */
+            /* relaunch still proceeds */
           }
-          const mainWindow = context.windows.mainWindow;
-          const wc = context.windows.mainView?.webContents;
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            try {
-              const current = mainWindow.getBounds();
-              const w = 1200;
-              const h = 800;
-              const display =
-                screen.getDisplayMatching(
-                  current.width > 0 ? current : { x: 0, y: 0, width: 0, height: 0 },
-                ) || screen.getPrimaryDisplay();
-              const { workArea } = display;
-              const next = {
-                width: w,
-                height: h,
-                x: Math.round(workArea.x + Math.max(0, (workArea.width - w) / 2)),
-                y: Math.round(workArea.y + Math.max(0, (workArea.height - h) / 2)),
-              };
-              // Opaque visible window: animate:false (same as WindowControl.resize soft path).
-              mainWindow.setBounds(next, false);
-              if (!mainWindow.isVisible()) mainWindow.show();
-            } catch {
-              /* loadURL still proceeds */
-            }
+          performProcessRelaunchOnce(mode === "clear" ? "got-clear" : "got-1p");
+          return true;
+        }
+
+        // Official 3p branch (verbatim):
+        //   const r = SM(A);
+        //   if (t === r) { if (!r) return; await mainView.loadURL(CUSTOM_3P_ORIGIN) }
+        //   else relaunchApp()
+        // No setOpacity(0), no setBounds(1200), no chrome wait.
+        // LoginRoute jn pagehide → mnr resize(1200,800) during loadURL tear-down.
+        let smAfter = false;
+        try {
+          const after = resolveDeploymentModeFromUserData(userDataPath);
+          smAfter = deploymentModeIs3p(after.enterprise, after.persistedDeploymentMode);
+        } catch {
+          smAfter = false;
+        }
+
+        if (smBefore !== smAfter) {
+          // Official: SM flipped (e.g. 1p → 3p) → full process relaunch, not soft loadURL.
+          performProcessRelaunchOnce(mode === "dotClaude" ? "got-dotClaude-sm-flip" : "got-3p-sm-flip");
+          return true;
+        }
+        if (!smAfter) {
+          // Official: if (!r) return — still 3p write but not activated shell.
+          return true;
+        }
+
+        // Official got soft (SM same && r): loadURL(CUSTOM_3P_ORIGIN) only.
+        // Product dual-root delta when LoginRoute jn left the window at 600×600 opaque:
+        //   jn pagehide → mnr setBounds(1200,800, animate:true) while open-claude-web
+        //   still composites the chooser → user sees "从左上角往右扩展到 1200 才进主页".
+        // Official ion-dist blanks on navigation in the same turn so the animate paints
+        // empty chrome; product SPA keeps LoginDesktop through the grow.
+        // Login-sized → process relaunch (createMainWindow opacity:0 + cold /task/new),
+        // same end state as official cold 3p after jsA. Already shell-sized → soft loadURL.
+        try {
+          settings.setPreference("sidebarMode", "task");
+        } catch {
+          /* SPA home residual still redirects */
+        }
+
+        const mw = context.windows.mainWindow;
+        let loginSized = false;
+        try {
+          if (mw && !mw.isDestroyed()) {
+            const b = mw.getBounds();
+            // LoginRoute jn residual size (exact 600×600). Shell is Cbe 1200×800.
+            loginSized =
+              b.width === 600
+              && b.height === 600
+              && !mw.isMaximized()
+              && !mw.isFullScreen();
           }
-          if (wc && !wc.isDestroyed()) {
-            const shellUrl = resolveMainWindowLoadUrl({
-              // product dotClaude maps to 3p shell residual for account + route.
-              deploymentMode: "3p",
-              persistedDeploymentMode: mode,
-              // Prefer baseUrl path so resolveInitialMainViewUrl stamps /task/new
-              // (productMainViewUrl short-circuits without path).
-              baseUrl: process.env.CLAUDE_DESKTOP_MAIN_VIEW_URL?.trim() || "app://localhost",
-              hasRendererConfig: true,
-              sidebarMode: "task",
-            });
-            try {
-              await wc.loadURL(shellUrl);
-            } catch (error) {
-              console.warn(
-                "[custom3p] setDeploymentMode soft loadURL failed",
-                mode,
-                error instanceof Error ? error.message : error,
-              );
+        } catch {
+          loginSized = false;
+        }
+
+        if (loginSized) {
+          try {
+            if (mw && !mw.isDestroyed()) mw.setOpacity(0);
+          } catch {
+            /* relaunch still proceeds */
+          }
+          performProcessRelaunchOnce(
+            mode === "dotClaude" ? "got-dotClaude-from-login" : "got-3p-from-login",
+          );
+          return true;
+        }
+
+        const wc = context.windows.mainView?.webContents;
+        if (wc && !wc.isDestroyed()) {
+          // Official: const {CUSTOM_3P_ORIGIN:n}=…; await o.webContents.loadURL(n)
+          // Product shell origin may be Vite CLAUDE_DESKTOP_MAIN_VIEW_URL; strip path.
+          const raw =
+            process.env.CLAUDE_DESKTOP_MAIN_VIEW_URL?.trim() || "app://localhost";
+          let shellUrl = "app://localhost";
+          try {
+            const u = new URL(raw);
+            u.pathname = "/";
+            u.search = "";
+            u.hash = "";
+            // Normalize 127.0.0.1 → localhost (preload trust residual).
+            if (
+              (u.hostname === "127.0.0.1" || u.hostname === "::1")
+              && (u.protocol === "http:" || u.protocol === "https:")
+            ) {
+              u.hostname = "localhost";
             }
+            shellUrl = u.toString();
+          } catch {
+            shellUrl = "app://localhost";
+          }
+          try {
+            await wc.loadURL(shellUrl);
+          } catch (error) {
+            console.warn(
+              "[custom3p] setDeploymentMode soft loadURL failed",
+              mode,
+              error instanceof Error ? error.message : error,
+            );
           }
         }
         return true;

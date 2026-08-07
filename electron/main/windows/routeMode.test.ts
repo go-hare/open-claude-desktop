@@ -37,6 +37,38 @@ it("void 1p (no jsA chooser) keeps product LoginDesktop — not force claude.ai"
   expect(url).toBe("http://localhost:5176/login");
 });
 
+it("void chooser stamps /login onto bare product origin (Sign out clear cold start)", () => {
+  delete process.env.CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW;
+  delete process.env.CLAUDE_FORCE_PRODUCT_MAIN_VIEW;
+  // Dev CLAUDE_DESKTOP_MAIN_VIEW_URL is origin-only — must not paint /task/new first.
+  const url = resolveMainWindowLoadUrl({
+    deploymentMode: "1p",
+    persistedDeploymentMode: undefined,
+    productMainViewUrl: "http://127.0.0.1:5176",
+  });
+  expect(url).toBe("http://localhost:5176/login");
+});
+
+it("void chooser stamps /login onto app:// base (packaged clear residual)", () => {
+  const url = resolveMainWindowLoadUrl({
+    deploymentMode: "1p",
+    persistedDeploymentMode: undefined,
+    baseUrl: "app://localhost",
+  });
+  expect(url).toBe("app://localhost/login");
+});
+
+it("3p stamps /task/new onto bare product origin", () => {
+  const url = resolveMainWindowLoadUrl({
+    deploymentMode: "3p",
+    persistedDeploymentMode: "3p",
+    productMainViewUrl: "http://127.0.0.1:5176",
+    hasRendererConfig: true,
+    sidebarMode: "task",
+  });
+  expect(url).toBe("http://localhost:5176/task/new");
+});
+
 it("persisted 1p after NQt loads official mN + /task/new?coldLaunch=1 (loadAll residual)", () => {
   delete process.env.CLAUDE_FORCE_ANTHROPIC_MAIN_VIEW;
   delete process.env.CLAUDE_FORCE_PRODUCT_MAIN_VIEW;
@@ -51,9 +83,14 @@ it("persisted 1p after NQt loads official mN + /task/new?coldLaunch=1 (loadAll r
 });
 
 it("3p main window uses product main view URL (localhost normalize)", () => {
+  // Residual: only jsA("3p") / persistedDeploymentMode enters shell path.
+  // Bag-only N1e 3p without chooser still loads LoginDesktop (account null).
   const url = resolveMainWindowLoadUrl({
     deploymentMode: "3p",
+    persistedDeploymentMode: "3p",
     productMainViewUrl: "http://127.0.0.1:5176/task/new",
+    hasRendererConfig: true,
+    sidebarMode: "task",
   });
   expect(url).toBe("http://localhost:5176/task/new");
 });
@@ -61,6 +98,7 @@ it("3p main window uses product main view URL (localhost normalize)", () => {
 it("3p without product override uses app:// task residual", () => {
   const url = resolveMainWindowLoadUrl({
     deploymentMode: "3p",
+    persistedDeploymentMode: "3p",
     baseUrl: "app://localhost",
     hasRendererConfig: true,
     sidebarMode: "task",

@@ -47,7 +47,7 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
   registerNamespaceHandlers("claude.web", {
     WindowControl: {
       /**
-       * Official app.asar residual `mnr` (WindowControl.resize) — exact math:
+       * Official app.asar residual `mnr` (WindowControl.resize) — verbatim math:
        *   n = e.getBounds()
        *   o = { width:t, height:i, x:n.x, y:n.y }
        *   if n.width>0 && n.height>0:
@@ -60,14 +60,8 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
        *     o.y = max(0, floor((a.height-i)/2))
        *   e.setBounds(o, true); e.show()
        *
-       * Official LoginRoute jn: resize(600,600,{center:true}) usually runs after
-       * process relaunch while main window still opacity:0 (createMainWindow), so
-       * animated setBounds is invisible. Product soft SPA → /login keeps opacity 1;
-       * Electron/macOS animated setBounds then paints a corner-shrink (window origin
-       * path) before landing centered — looks like "从左上角缩到小窗口".
-       * For center:true while window is already opaque/visible, apply final bounds
-       * without animate so the chooser appears centered in one frame (same end
-       * geometry as official mnr).
+       * No invent: always animate true (including jn pagehide 1200 restore during
+       * got soft loadURL). Center uses workAreaSize only — not workArea origin.
        */
       resize: async (_event, width, height, opts) => {
         if (typeof width !== "number" || typeof height !== "number") return true;
@@ -84,24 +78,21 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
           typeof opts === "object" && opts !== null && (opts as { center?: boolean }).center === true;
         if (center) {
           const display =
-            screen.getDisplayMatching(current.width > 0 ? current : { x: 0, y: 0, width: 0, height: 0 })
+            screen.getDisplayMatching(
+              current.width > 0 && current.height > 0
+                ? current
+                : { x: 0, y: 0, width: 0, height: 0 },
+            )
             || screen.getPrimaryDisplay();
           if (display) {
-            // Official mnr residual uses workAreaSize only (assumes primary origin 0,0).
-            // Product: center within workArea (taskbar / multi-monitor safe) so LoginRoute
-            // jn resize(600,600,{center:true}) does not land at global (0,0) top-left.
-            const { workArea } = display;
-            next.x = Math.round(workArea.x + Math.max(0, (workArea.width - w) / 2));
-            next.y = Math.round(workArea.y + Math.max(0, (workArea.height - h) / 2));
+            // Official mnr: {workAreaSize:a}=display; o.x/y = max(0, floor((a.*-size)/2))
+            const { workAreaSize } = display;
+            next.x = Math.max(0, Math.floor((workAreaSize.width - w) / 2));
+            next.y = Math.max(0, Math.floor((workAreaSize.height - h) / 2));
           }
         }
-        // Official mnr: setBounds(o, true) while createMainWindow still opacity:0 after
-        // process relaunch — animation is invisible. Soft SPA is already opaque;
-        // animate:true paints shrink/grow frames ("闪"), and setOpacity(0) blinks
-        // the whole window. Always animate:false when the window is already opaque.
-        const opaqueVisible =
-          mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.getOpacity() > 0.01;
-        mainWindow.setBounds(next, !opaqueVisible);
+        // Official mnr: e.setBounds(o, !0); e.show()
+        mainWindow.setBounds(next, true);
         if (!mainWindow.isVisible()) mainWindow.show();
         return true;
       },

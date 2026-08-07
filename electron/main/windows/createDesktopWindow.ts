@@ -3,6 +3,7 @@ import { createFindInPageView } from "./createFindInPageView";
 import { createMainView } from "./createMainView";
 import { createMainWindow, updateOriginalTrafficLightPosition } from "./createMainWindow";
 import { layoutDesktopViews } from "./layoutChildViews";
+import { MAIN_VIEW_CHROME_PROBE_JS } from "./mainWindowRevealHold";
 import { installNavigationGuards } from "./navigationPolicy";
 import { normalizeSidebarMode, resolveInitialMainViewUrl } from "./routeMode";
 import { createSecondaryWindowManager } from "./secondaryWindows";
@@ -40,6 +41,35 @@ function installCloseBehavior(mainWindow: BrowserWindow, options: DesktopWindowO
   });
 }
 
+/**
+ * Product delta (not in official got soft path):
+ * Official cold reveal is mainWindow shell did-finish-load +50ms setOpacity(1)
+ * (app.asar createDesktopWindow residual). Official mainView is ion-dist and paints
+ * LoginRoute/shell in that budget.
+ * Product mainView is open-claude-web SPA — bare HTML finish is empty /login or
+ * /task/new before React chrome. First opaque reveal waits for residual chrome so
+ * Sign out cold start does not flash blank 600. Soft got("3p") loadURL does not
+ * re-run this (coldRevealStarted); window stays opaque like official.
+ */
+async function waitForMainViewChrome(
+  mainView: WebContentsView,
+  timeoutMs = 12_000,
+): Promise<void> {
+  const wc = mainView.webContents;
+  if (wc.isDestroyed()) return;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (wc.isDestroyed()) return;
+    try {
+      const state = (await wc.executeJavaScript(MAIN_VIEW_CHROME_PROBE_JS)) as string;
+      if (state === "ready") return;
+    } catch {
+      /* navigation in flight */
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 function installMainWindowEvents(
   mainWindow: BrowserWindow,
   mainView: WebContentsView,
@@ -53,6 +83,8 @@ function installMainWindowEvents(
     coworkFilePreview.relayout();
     coworkArtifacts.relayout();
   };
+
+  let coldRevealStarted = false;
 
   const revealMainWindow = () => {
     safeWindowAction(mainWindow, () => {
@@ -81,13 +113,32 @@ function installMainWindowEvents(
     });
   };
 
-  // Shell HTML finish — official path. Also arm mainView finish so SPA paint
-  // still reveals if shell did-finish-load already fired before listeners attach.
-  mainWindow.webContents.on("did-finish-load", () => {
-    setTimeout(revealMainWindow, 50);
-  });
+  /**
+   * Cold first paint only (process start / relaunch).
+   * Official: mainWindow shell did-finish-load +50ms reveal.
+   * Product: shell HTML is empty MainWindowPage — first-reveal from mainView after
+   * residual chrome so LoginRoute / DesktopFrame is not blank when opacity hits 1.
+   * Soft got("3p") loadURL: coldRevealStarted already true → no re-reveal (official
+   * also does not re-opacity on mainView soft loadURL).
+   */
+  const scheduleColdRevealFromMainView = () => {
+    if (coldRevealStarted) return;
+    coldRevealStarted = true;
+    void (async () => {
+      try {
+        await new Promise((r) => setTimeout(r, 50));
+        if (mainWindow.isDestroyed()) return;
+        await waitForMainViewChrome(mainView);
+        if (mainWindow.isDestroyed()) return;
+        revealMainWindow();
+      } catch {
+        if (!mainWindow.isDestroyed()) revealMainWindow();
+      }
+    })();
+  };
+
   mainView.webContents.on("did-finish-load", () => {
-    setTimeout(revealMainWindow, 50);
+    scheduleColdRevealFromMainView();
   });
 
   mainWindow.on("resize", layout);

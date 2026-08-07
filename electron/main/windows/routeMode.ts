@@ -109,6 +109,42 @@ export function resolveAnthropicMainWindowUrl(sidebarMode?: SidebarMode): string
   return url.toString();
 }
 
+/**
+ * Stamp residual entry path onto a product origin (dev Vite / CLAUDE_DESKTOP_MAIN_VIEW_URL).
+ * Official ion Pos: void/clear → LoginRoute; 3p shell → /task/new (or /epitaxy).
+ * Prior product short-circuit returned bare origin → cold start after Sign out painted
+ * main shell then soft-nav /login + resize(600) → "主窗口一闪再小窗".
+ */
+function productMainViewUrlWithResidualPath(
+  productMainViewUrl: string,
+  persistedDeploymentMode: DesktopDeploymentMode | undefined,
+  sidebarMode?: SidebarMode,
+  hasRendererConfig = false,
+): string {
+  const origin = normalizeProductMainViewUrl(productMainViewUrl);
+  if (persistedDeploymentMode === "3p" || persistedDeploymentMode === "dotClaude") {
+    return resolveInitialMainViewUrl(
+      origin,
+      normalizeSidebarMode(sidebarMode),
+      hasRendererConfig,
+    );
+  }
+  // Void chooser (Sign out clear / first launch) and non-1p residual → LoginRoute.
+  // Persisted "1p" with forceProduct also lands here (debug product shell as 1p).
+  if (persistedDeploymentMode !== "1p") {
+    const url = new URL(origin);
+    url.pathname = "/login";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  }
+  return resolveInitialMainViewUrl(
+    origin,
+    normalizeSidebarMode(sidebarMode),
+    hasRendererConfig,
+  );
+}
+
 export function resolveMainWindowLoadUrl(input: {
   deploymentMode: DesktopDeploymentMode;
   /**
@@ -134,7 +170,25 @@ export function resolveMainWindowLoadUrl(input: {
   }
 
   if (input.productMainViewUrl) {
-    return normalizeProductMainViewUrl(input.productMainViewUrl);
+    return productMainViewUrlWithResidualPath(
+      input.productMainViewUrl,
+      input.persistedDeploymentMode,
+      input.sidebarMode,
+      input.hasRendererConfig ?? false,
+    );
+  }
+
+  // Packaged app:// void chooser: stamp /login (same residual as product origin above).
+  if (
+    input.persistedDeploymentMode !== "1p"
+    && input.persistedDeploymentMode !== "3p"
+    && input.persistedDeploymentMode !== "dotClaude"
+  ) {
+    const url = new URL(input.baseUrl ?? "app://localhost");
+    url.pathname = "/login";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
   }
 
   return resolveInitialMainViewUrl(
