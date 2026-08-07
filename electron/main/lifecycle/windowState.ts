@@ -29,13 +29,33 @@ export type WindowStateKeeper = DesktopWindowState & {
   resetStateToDefault: () => void;
 };
 
+/**
+ * Cold-start / F1t reset defaults.
+ * Official Cbe({defaultWidth:1200,defaultHeight:800}) does not pin top-left;
+ * electron-window-state-style first launch centers on the primary work area.
+ * Prior product default used display origin (x/y = 0) → window opens at 屏幕左上角
+ * until LoginRoute jn center resize (and shell never re-centers if already signed in).
+ */
 export function defaultWindowState(defaultWidth = 1200, defaultHeight = 800, displayBounds?: Rectangle): DesktopWindowState {
+  let workArea: Rectangle | undefined;
+  try {
+    // Prefer live primary workArea (excludes taskbar); fall back to bounds if screen unavailable.
+    workArea = screen.getPrimaryDisplay()?.workArea;
+  } catch {
+    workArea = undefined;
+  }
+  const area = workArea
+    ?? (displayBounds
+      ? { x: displayBounds.x, y: displayBounds.y, width: displayBounds.width, height: displayBounds.height }
+      : { x: 0, y: 0, width: defaultWidth, height: defaultHeight });
+  const width = defaultWidth;
+  const height = defaultHeight;
   return {
-    width: defaultWidth,
-    height: defaultHeight,
-    x: displayBounds?.x ?? 0,
-    y: displayBounds?.y ?? 0,
-    displayBounds,
+    width,
+    height,
+    x: Math.round(area.x + Math.max(0, (area.width - width) / 2)),
+    y: Math.round(area.y + Math.max(0, (area.height - height) / 2)),
+    displayBounds: displayBounds ?? workArea,
   };
 }
 

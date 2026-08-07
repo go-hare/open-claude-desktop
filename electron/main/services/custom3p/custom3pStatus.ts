@@ -104,11 +104,28 @@ export type Custom3pBootstrapState = {
   detail?: string;
 };
 
-function sourceFromResolution(resolution: DeploymentModeResolution): Custom3pSource {
+/**
+ * Official Bw residual source for health/login status.
+ * Prefer snapshot.configSource (managed MDM / local library / none).
+ * Fall back: no 3p activation → none; else local.
+ */
+function sourceFromSnapshot(
+  snap: DesktopShellDeploymentSnapshot | null | undefined,
+  resolution: DeploymentModeResolution,
+): Custom3pSource {
+  const configSource = snap?.configSource;
+  if (configSource === "managed" || configSource === "local" || configSource === "none") {
+    return { type: configSource, remote: false };
+  }
   if (!resolution.thirdPartyActivated && resolution.mode === "1p") {
     return { type: "none", remote: false };
   }
   return { type: "local", remote: false };
+}
+
+/** @deprecated Prefer sourceFromSnapshot — kept for call sites that only have resolution. */
+function sourceFromResolution(resolution: DeploymentModeResolution): Custom3pSource {
+  return sourceFromSnapshot(null, resolution);
 }
 
 function providerOf(resolution: DeploymentModeResolution): string | null {
@@ -203,7 +220,7 @@ export function custom3pHealth(userDataPath?: string): Custom3pHealthState {
   if (resolution.degraded) {
     return {
       state: "invalid_config",
-      source: sourceFromResolution(resolution),
+      source: sourceFromSnapshot(snap, resolution),
       provider: providerOf(resolution),
       endpoint: endpointOf(resolution),
       checkedAt,
@@ -215,7 +232,7 @@ export function custom3pHealth(userDataPath?: string): Custom3pHealthState {
   return {
     // Sync path cannot claim healthy without probe — not_testable until recheck.
     state: "not_testable",
-    source: sourceFromResolution(resolution),
+    source: sourceFromSnapshot(snap, resolution),
     provider: providerOf(resolution),
     endpoint: endpointOf(resolution),
     checkedAt,
@@ -262,17 +279,18 @@ export function custom3pLoginDesktopStatus(userDataPath?: string): Custom3pLogin
   const dotClaudeMode = snap.persistedDeploymentMode === "dotClaude";
   const enabled = !chooserDisabled && (resolution.thirdPartyActivated || dotClaudeMode);
   // Official IHe / h1e / CHe residual — identity + interactive-auth needs from bag.
-  // Use userData inject so tests/desktop don't walk win32 registry for status.
+  // Prefer merged enterprise on snap (includes managed MDM when present).
+  const enterpriseRecord =
+    enterprise && typeof enterprise === "object" ? (enterprise as Record<string, unknown>) : {};
   const enterpriseDeps = {
-    getManagedConfig: () => ({}),
-    getLocalConfig: () =>
-      enterprise && typeof enterprise === "object"
-        ? (enterprise as Record<string, unknown>)
-        : {},
+    getManagedConfig: () =>
+      snap.configSource === "managed" ? enterpriseRecord : {},
+    getLocalConfig: () => enterpriseRecord,
   };
   return {
     enabled,
-    source: dotClaudeMode ? { type: "local", remote: false } : sourceFromResolution(resolution),
+    // Official Bw: managed MDM → type managed (even for dotClaude display host is separate).
+    source: sourceFromSnapshot(snap, resolution),
     provider,
     bootstrapHost,
     deploymentMode: dotClaudeMode ? "dotClaude" : resolution.mode,

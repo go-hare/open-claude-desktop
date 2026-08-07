@@ -382,6 +382,14 @@ export function resolveDeploymentMode(input: {
   };
 }
 
+/**
+ * Official Bw / qZt residual source.type:
+ *   managed MDM present → "managed"
+ *   else local configLibrary bag → "local"
+ *   else → "none"
+ */
+export type EnterpriseConfigSourceType = "managed" | "local" | "none";
+
 export type DesktopShellDeploymentSnapshot = {
   appliedId: string | null;
   appliedConfig: unknown | null;
@@ -390,6 +398,11 @@ export type DesktopShellDeploymentSnapshot = {
   /** Present when ~/.claude/settings.json has usable routing env (any mode). */
   dotClaudeConfig: DotClaudeCliConfig | null;
   resolution: DeploymentModeResolution;
+  /**
+   * Official Bw residual — config origin for SourcePill / getLoginDesktop3pStatus.source.
+   * Independent of N1e mode (1p/3p); mirrors whether MDM or local bag supplied enterprise.
+   */
+  configSource: EnterpriseConfigSourceType;
 };
 
 function readPersistedDeploymentModeFromShell(
@@ -437,8 +450,32 @@ function readLegacyShellAppliedCustom3p(userDataPath: string): {
 }
 
 /**
+ * Official PZt residual — platform managed MDM bag (never invent).
+ * Uses coworkEnterpriseConfig readers (win32 Policies / darwin plists).
+ * Caller may inject managedEnterprise to override (tests).
+ */
+function readPlatformManagedEnterpriseBag(): EnterpriseActivationBag | null {
+  try {
+    // Lazy require avoids circular import at module load (coworkEnterpriseConfig
+    // may import deployment helpers in tests).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const {
+      readManagedEnterpriseBag,
+    } = require("../coworkHostLoop/coworkEnterpriseConfig") as {
+      readManagedEnterpriseBag: (deps?: object) => Record<string, unknown>;
+    };
+    const raw = readManagedEnterpriseBag({});
+    if (!raw || Object.keys(raw).length === 0) return null;
+    return enterpriseActivationFromUnknown(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Read product applied bag + resolve N1e residual.
  * Official multi-config applied bag lives in userData/configLibrary.
+ * Official qZt: managed MDM wins for source.type; merge managed + local bags.
  */
 export function resolveDeploymentModeFromUserData(
   userDataPath: string,
@@ -451,10 +488,17 @@ export function resolveDeploymentModeFromUserData(
     enterprise: null,
     dotClaudeConfig: null,
     resolution: resolveDeploymentMode({ enterprise: null }),
+    configSource: "none",
   };
 
   const persistedDeploymentMode = readPersistedDeploymentModeFromShell(userDataPath);
   const dotClaudeConfig = detectDotClaudeCliConfig();
+
+  // Official PZt: managed platform bag when present (inject overrides for tests).
+  const managedFromPlatform =
+    managedEnterprise !== undefined ? managedEnterprise : readPlatformManagedEnterpriseBag();
+  const managedPresent =
+    Boolean(managedFromPlatform) && Object.keys(managedFromPlatform ?? {}).length > 0;
 
   let appliedId: string | null = null;
   let appliedConfig: unknown | null = null;
@@ -487,9 +531,18 @@ export function resolveDeploymentModeFromUserData(
     }
   }
 
+  // Official qZt source: managed if PZt non-empty, else local if bag keys, else none.
+  const fromApplied = enterpriseActivationFromUnknown(appliedConfig);
+  const localPresent = Boolean(fromApplied) && Object.keys(fromApplied ?? {}).length > 0;
+  const configSource: EnterpriseConfigSourceType = managedPresent
+    ? "managed"
+    : localPresent
+      ? "local"
+      : "none";
+
   try {
-    const fromApplied = enterpriseActivationFromUnknown(appliedConfig);
-    const enterprise = mergeEnterpriseActivationBags(managedEnterprise, fromApplied);
+    // Official merge: managed overlay + local applied (managed first, local fills).
+    const enterprise = mergeEnterpriseActivationBags(managedFromPlatform, fromApplied);
     const resolution = resolveDeploymentMode({
       enterprise,
       persistedDeploymentMode,
@@ -502,11 +555,12 @@ export function resolveDeploymentModeFromUserData(
       enterprise,
       dotClaudeConfig,
       resolution,
+      configSource,
     };
   } catch {
-    if (managedEnterprise) {
+    if (managedFromPlatform) {
       const resolution = resolveDeploymentMode({
-        enterprise: managedEnterprise,
+        enterprise: managedFromPlatform,
         persistedDeploymentMode,
         dotClaudeConfig,
       });
@@ -515,9 +569,10 @@ export function resolveDeploymentModeFromUserData(
         appliedId,
         appliedConfig,
         persistedDeploymentMode,
-        enterprise: managedEnterprise,
+        enterprise: managedFromPlatform,
         dotClaudeConfig,
         resolution,
+        configSource: managedPresent ? "managed" : "none",
       };
     }
     return {
@@ -526,6 +581,7 @@ export function resolveDeploymentModeFromUserData(
       appliedConfig,
       persistedDeploymentMode,
       dotClaudeConfig,
+      configSource,
     };
   }
 }

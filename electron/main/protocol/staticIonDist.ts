@@ -7,6 +7,7 @@ import { buildAppContentSecurityPolicy, extractInlineScriptHashes } from "./csp"
 import { resolveInsideRoot } from "./safePath";
 import { SettingsStore } from "../services/settings/settingsStore";
 import { resolveDialogLocale } from "../services/settings/desktopDialogI18n";
+import { isEnterpriseNonessentialServicesDisabled } from "../services/coworkHostLoop/coworkEnterpriseConfig";
 
 export type StaticIonDistOptions = {
   root: string;
@@ -102,16 +103,20 @@ function isResidualSpaPath(pathname: string): boolean {
 }
 
 function makeCspLoader(indexHtml: string, optionsCsp?: string): () => Promise<string> {
-  let cspPromise: Promise<string> | undefined;
+  // Cache only script hashes; re-read MDM nonessential gate each load (Ob zLA).
+  let hashesPromise: Promise<string[]> | undefined;
   return () => {
-    cspPromise ??= optionsCsp
-      ? Promise.resolve(optionsCsp)
-      : fs
-          .readFile(indexHtml, "utf8")
-          .then((html) => extractInlineScriptHashes(html))
-          .catch(() => [])
-          .then((scriptHashes) => buildAppContentSecurityPolicy({ scriptHashes }));
-    return cspPromise;
+    if (optionsCsp) return Promise.resolve(optionsCsp);
+    hashesPromise ??= fs
+      .readFile(indexHtml, "utf8")
+      .then((html) => extractInlineScriptHashes(html))
+      .catch(() => []);
+    return hashesPromise.then((scriptHashes) =>
+      buildAppContentSecurityPolicy({
+        scriptHashes,
+        disableNonessentialServices: isEnterpriseNonessentialServicesDisabled(),
+      }),
+    );
   };
 }
 
@@ -154,7 +159,10 @@ export function createStaticIonDistHandler(options: StaticIonDistOptions) {
       const scriptHashes = await extractInlineScriptHashes(html);
       const csp =
         options.csp ??
-        buildAppContentSecurityPolicy({ scriptHashes });
+        buildAppContentSecurityPolicy({
+          scriptHashes,
+          disableNonessentialServices: isEnterpriseNonessentialServicesDisabled(),
+        });
       return withContentSecurityPolicy(
         new Response(html, {
           status: 200,

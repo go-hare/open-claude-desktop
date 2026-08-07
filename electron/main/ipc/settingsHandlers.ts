@@ -1,4 +1,4 @@
-import { app, dialog, globalShortcut, net, shell } from "electron";
+import { app, dialog, globalShortcut, net, screen, shell } from "electron";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
@@ -20,6 +20,9 @@ import {
   deploymentModeToPersistAfterApply,
   normalizePersistedDeploymentMode,
 } from "../services/custom3p/deploymentMode";
+import { resolveMainWindowLoadUrl } from "../windows/routeMode";
+import { clearCoworkOauthTokenCache } from "../services/coworkAccount/coworkOauthTokenCache";
+import { revokeEnterpriseInteractiveAuth } from "../services/custom3p/enterpriseInteractiveAuth";
 import {
   DOT_CLAUDE_SETUP_CONFIG_ID,
   DOT_CLAUDE_SETUP_CONFIG_NAME,
@@ -1295,9 +1298,11 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
       // Official residual pot/got/jsA (app.asar):
       //   pot(e) → got(e==="clear"?void 0:e, enterprise)
       //   jsA writes preferences.deploymentMode (void on clear)
+      //   jsA mode change → F1t resetMainWindowBounds (n5.unmanage + unlink window-state)
       //   if mode !== "3p" → clear session residual + relaunchApp
+      //   if mode === "3p" → soft loadURL(CUSTOM_3P_ORIGIN) without process relaunch
       // Tjt validation: mode ∈ {"1p","3p","clear"}
-      // Product extension: "dotClaude" — run on existing ~/.claude CLI config.
+      // Product extension: "dotClaude" — same soft loadURL path as "3p" (product shell origin).
       setDeploymentMode: async (_event, mode) => {
         if (mode !== "1p" && mode !== "3p" && mode !== "clear" && mode !== "dotClaude") {
           throw new Error(
@@ -1311,31 +1316,10 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
           settings.deletePreference("deploymentMode");
         }
         publishCustom3pBootstrapState(context);
-        // Official got: mode !== "3p" process relaunch after write.
-        // Product soft SPA host (open-claude-web):
-        //   - "3p" / "dotClaude": write only (renderer soft-leaves to Cowork)
-        //   - "clear": write-only when already on product app:// (renderer soft-leaves
-        //     to /login after signed-out interstitial). Process kill made countdown
-        //     wait for full relaunch and flashed chooser mid-exit.
-        //     BUT if mainView is Anthropic mN host (after NQt("1p")), residual LoginRoute
-        //     jn can stick on d2t variant "chooser" with onDone=clear — write-only clear
-        //     never tears that host down. Reload product LoginDesktop (app://…/login).
-        //   - "1p": official got → jsA + clear session + relaunch only (no soft loadURL).
-        //     Cold start loads mN via resolveMainWindowLoadUrl(persisted 1p).
-        if (mode === "1p") {
-          // Official got(e,A) residual (app.asar):
-          //   await jsA(e)
-          //   if e !== "3p": clear session credentials + relaunchApp(); return
-          //   // only "3p" may soft loadURL(CUSTOM_3P_ORIGIN) without relaunch
-          // jsA when mode changes: F1t resetMainWindowBounds =
-          //   n5.unmanage() + unlink userData/window-state.json
-          // Must unmanage BEFORE exit: close/closed handlers otherwise re-save
-          // LoginRoute 600×600 into window-state and next cold start stays small.
-          // Also reset in-memory keeper to Cbe defaults so any late save cannot
-          // re-persist chooser bounds after unlink.
-          // Do NOT soft loadURL(mN) before exit — double-paints Anthropic Sign In.
-          // Cold start: Cbe({defaultWidth:1200,defaultHeight:800}) + mN via
-          // resolveMainWindowLoadUrl(persisted 1p); opacity 0 until shell did-finish-load.
+
+        // Official F1t (jsA when mode changes): drop window-state so LoginRoute 600×600
+        // is not re-persisted across leave / relaunch.
+        const resetMainWindowBoundsF1t = async () => {
           try {
             context.windowState?.unmanage();
             context.windowState?.resetStateToDefault();
@@ -1346,51 +1330,115 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
             const stateFile = path.join(app.getPath("userData"), "window-state.json");
             await fs.unlink(stateFile).catch(() => {});
           } catch {
-            /* relaunch still uses Cbe defaults when state missing / invalid */
+            /* ignore */
           }
-          setImmediate(() => {
-            app.relaunch();
-            app.exit(0);
-          });
-        } else if (mode === "clear") {
-          // Residual LoginRoute jn (c632): d2t chooser onDone → ce("clear")/NQt("clear").
-          // Official process relaunch lands on void chooser. Product: if still on
-          // Anthropic host (or non-app URL), load product SPA /login so Cancel/onDone
-          // always returns to sign-in options (M5t / AnthropicEntry).
+        };
+
+        // Official got: mode !== "3p" → clear session credentials (Lm / oauth cache) + relaunch.
+        // Product residual: clearCoworkOauthTokenCache is Lm (C5++ / qu={}/persist empty).
+        // Also revoke enterprise interactive secrets (Vertex ADC / Bedrock SSO / bootstrap OIDC)
+        // so 1p/clear does not leave needsAuth sticky after Sign out / switch to Anthropic.
+        // Do NOT invent full session.clearStorageData unless residual got body does so.
+        const clearSessionCredentialsResidual = async () => {
           try {
-            const wc = context.windows.mainView?.webContents;
-            if (wc && !wc.isDestroyed()) {
-              const current = (() => {
-                try {
-                  return wc.getURL();
-                } catch {
-                  return "";
-                }
-              })();
-              const onProductApp =
-                current.startsWith("app://")
-                || current.startsWith("http://localhost")
-                || current.startsWith("https://localhost")
-                || current.startsWith("http://127.0.0.1")
-                || current.startsWith("https://127.0.0.1");
-              if (!onProductApp) {
-                const productBase =
-                  process.env.CLAUDE_DESKTOP_MAIN_VIEW_URL?.trim() || "app://localhost";
-                let loginUrl = "app://localhost/login";
-                try {
-                  const base = new URL(productBase);
-                  base.pathname = "/login";
-                  base.search = "";
-                  base.hash = "";
-                  loginUrl = base.toString();
-                } catch {
-                  loginUrl = "app://localhost/login";
-                }
-                void wc.loadURL(loginUrl);
-              }
+            const had = clearCoworkOauthTokenCache();
+            if (had > 0) {
+              console.info("[custom3p] got clear session: oauth cache entries=%d", had);
             }
+          } catch (error) {
+            console.warn(
+              "[custom3p] got clear session oauth cache failed",
+              error instanceof Error ? error.message : error,
+            );
+          }
+          try {
+            let userDataPath: string | undefined;
+            try {
+              userDataPath = settingsUserDataPath(context);
+            } catch {
+              userDataPath = undefined;
+            }
+            await revokeEnterpriseInteractiveAuth(
+              userDataPath ? { getUserDataPath: () => userDataPath! } : {},
+            );
+          } catch (error) {
+            console.warn(
+              "[custom3p] got clear session revoke interactive auth failed",
+              error instanceof Error ? error.message : error,
+            );
+          }
+        };
+
+        if (mode === "1p" || mode === "clear") {
+          // Official got(e,A):
+          //   await jsA(e)  // clear → void
+          //   if e !== "3p": clear session credentials + relaunchApp(); return
+          //   // only "3p" may soft loadURL without relaunch
+          // 1p cold start: Cbe 1200×800 + mN via resolveMainWindowLoadUrl(persisted 1p);
+          // clear cold start: void chooser → product LoginDesktop (no persisted mode).
+          // Do NOT soft loadURL before exit — double-paints / flash under d2t.
+          // Single-flight performProcessRelaunchOnce avoids dual Dock icons.
+          await clearSessionCredentialsResidual();
+          await resetMainWindowBoundsF1t();
+          performProcessRelaunchOnce(mode === "clear" ? "got-clear" : "got-1p");
+        } else if (mode === "3p" || mode === "dotClaude") {
+          // Official got("3p"): jsA + F1t + soft loadURL(CUSTOM_3P_ORIGIN) — no process relaunch.
+          // M5t renderer only NQt("3p"); document tear-down fires LoginRoute pagehide →
+          // resize(1200,800). Product: same loadURL on product shell origin (/task/new).
+          // Opaque soft host: apply shell bounds before loadURL so new paint is not at 600
+          // (official cold path hides this under opacity:0; soft path cannot).
+          await resetMainWindowBoundsF1t();
+          // Align Cowork home residual (Pos / uAe → /task/new).
+          try {
+            settings.setPreference("sidebarMode", "task");
           } catch {
-            /* renderer soft-nav /login still handles product-app clear */
+            /* loadURL still forces /task/new */
+          }
+          const mainWindow = context.windows.mainWindow;
+          const wc = context.windows.mainView?.webContents;
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            try {
+              const current = mainWindow.getBounds();
+              const w = 1200;
+              const h = 800;
+              const display =
+                screen.getDisplayMatching(
+                  current.width > 0 ? current : { x: 0, y: 0, width: 0, height: 0 },
+                ) || screen.getPrimaryDisplay();
+              const { workArea } = display;
+              const next = {
+                width: w,
+                height: h,
+                x: Math.round(workArea.x + Math.max(0, (workArea.width - w) / 2)),
+                y: Math.round(workArea.y + Math.max(0, (workArea.height - h) / 2)),
+              };
+              // Opaque visible window: animate:false (same as WindowControl.resize soft path).
+              mainWindow.setBounds(next, false);
+              if (!mainWindow.isVisible()) mainWindow.show();
+            } catch {
+              /* loadURL still proceeds */
+            }
+          }
+          if (wc && !wc.isDestroyed()) {
+            const shellUrl = resolveMainWindowLoadUrl({
+              // product dotClaude maps to 3p shell residual for account + route.
+              deploymentMode: "3p",
+              persistedDeploymentMode: mode,
+              // Prefer baseUrl path so resolveInitialMainViewUrl stamps /task/new
+              // (productMainViewUrl short-circuits without path).
+              baseUrl: process.env.CLAUDE_DESKTOP_MAIN_VIEW_URL?.trim() || "app://localhost",
+              hasRendererConfig: true,
+              sidebarMode: "task",
+            });
+            try {
+              await wc.loadURL(shellUrl);
+            } catch (error) {
+              console.warn(
+                "[custom3p] setDeploymentMode soft loadURL failed",
+                mode,
+                error instanceof Error ? error.message : error,
+              );
+            }
           }
         }
         return true;

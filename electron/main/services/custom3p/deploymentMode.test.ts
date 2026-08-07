@@ -180,6 +180,8 @@ it("resolveDeploymentModeFromUserData: empty userData → 1p", () => {
   expect(snap.resolution.mode).toBe("1p");
   expect(snap.appliedId).toBeNull();
   expect(snap.enterprise).toBeNull();
+  // Official Bw residual: no MDM / no local bag → source none.
+  expect(snap.configSource).toBe("none");
 });
 
 it("resolveDeploymentModeFromUserData: applied gateway bag → 3p degraded", () => {
@@ -200,6 +202,53 @@ it("resolveDeploymentModeFromUserData: applied gateway bag → 3p degraded", () 
   expect(snap.appliedId).toBeTruthy();
   expect(snap.resolution.mode).toBe("3p");
   expect(snap.resolution.degraded).toBe(true);
+  // Official qZt: local configLibrary / shell bag → source local (no MDM).
+  expect(snap.configSource).toBe("local");
+});
+
+it("resolveDeploymentModeFromUserData: managed MDM inject → configSource managed", () => {
+  const dir = tempUserData();
+  const snap = resolveDeploymentModeFromUserData(dir, {
+    inferenceProvider: "gateway",
+    inferenceGatewayBaseUrl: "https://mdm.example/anthropic",
+    inferenceGatewayApiKey: "sk-mdm",
+  });
+  expect(snap.configSource).toBe("managed");
+  expect(snap.resolution.mode).toBe("3p");
+  expect(snap.resolution.degraded).toBe(false);
+  expect(snap.enterprise?.inferenceGatewayBaseUrl).toBe("https://mdm.example/anthropic");
+});
+
+it("resolveDeploymentModeFromUserData: managed wins source over local bag; merge fills", () => {
+  const dir = tempUserData();
+  const appliedId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+  const libraryDir = path.join(dir, "configLibrary");
+  fs.mkdirSync(libraryDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(libraryDir, "_meta.json"),
+    JSON.stringify({
+      appliedId,
+      entries: [{ id: appliedId, name: "Local" }],
+    }),
+    "utf8",
+  );
+  fs.writeFileSync(
+    path.join(libraryDir, `${appliedId}.json`),
+    JSON.stringify({
+      inferenceProvider: "gateway",
+      inferenceGatewayBaseUrl: "https://local.example/",
+      inferenceGatewayApiKey: "sk-local",
+    }),
+    "utf8",
+  );
+  // Managed first, local fills — managed present → source managed (Bw residual).
+  const snap = resolveDeploymentModeFromUserData(dir, {
+    disableDeploymentModeChooser: true,
+  });
+  expect(snap.configSource).toBe("managed");
+  expect(snap.enterprise?.disableDeploymentModeChooser).toBe(true);
+  expect(snap.enterprise?.inferenceProvider).toBe("gateway");
+  expect(snap.enterprise?.inferenceGatewayApiKey).toBe("sk-local");
 });
 
 it("resolveDeploymentModeFromUserData: preferences.deploymentMode 1p forces 1p", () => {
@@ -250,6 +299,7 @@ it("resolveDeploymentModeFromUserData: official configLibrary bag with key → 3
   expect(snap.resolution.mode).toBe("3p");
   expect(snap.resolution.degraded).toBe(false);
   expect(snap.enterprise?.inferenceModels?.[0]?.name).toBe("deepseek-v4-pro");
+  expect(snap.configSource).toBe("local");
 });
 
 function tempHomeWithClaudeSettings(env?: Record<string, unknown>): string {

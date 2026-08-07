@@ -87,10 +87,12 @@ export function registerWindowHandlers(context: IpcHandlerContext): void {
             screen.getDisplayMatching(current.width > 0 ? current : { x: 0, y: 0, width: 0, height: 0 })
             || screen.getPrimaryDisplay();
           if (display) {
-            // Official mnr uses workAreaSize (not workArea origin) — keep residual.
-            const { workAreaSize } = display;
-            next.x = Math.max(0, Math.floor((workAreaSize.width - w) / 2));
-            next.y = Math.max(0, Math.floor((workAreaSize.height - h) / 2));
+            // Official mnr residual uses workAreaSize only (assumes primary origin 0,0).
+            // Product: center within workArea (taskbar / multi-monitor safe) so LoginRoute
+            // jn resize(600,600,{center:true}) does not land at global (0,0) top-left.
+            const { workArea } = display;
+            next.x = Math.round(workArea.x + Math.max(0, (workArea.width - w) / 2));
+            next.y = Math.round(workArea.y + Math.max(0, (workArea.height - h) / 2));
           }
         }
         // Official mnr: setBounds(o, true) while createMainWindow still opacity:0 after
