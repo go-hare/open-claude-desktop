@@ -3,7 +3,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { APP_HOST } from "./constants";
-import { buildAppContentSecurityPolicy, extractInlineScriptHashes } from "./csp";
+import {
+  buildAppContentSecurityPolicy,
+  buildProductSandboxRuntimeContentSecurityPolicy,
+  extractInlineScriptHashes,
+  isProductSandboxRuntimePath,
+} from "./csp";
 import { resolveInsideRoot } from "./safePath";
 import { SettingsStore } from "../services/settings/settingsStore";
 import { resolveDialogLocale } from "../services/settings/desktopDialogI18n";
@@ -174,20 +179,33 @@ export function createStaticIonDistHandler(options: StaticIonDistOptions) {
       );
     }
 
+    // Product-local artifact sandbox frame/runtime: looser CSP than parent SPA
+    // (opaque iframe needs host script-src + Babel unsafe-eval). Never SPA-fallback.
+    const sandboxRuntime = isProductSandboxRuntimePath(pathname);
+    const sandboxCsp = sandboxRuntime
+      ? buildProductSandboxRuntimeContentSecurityPolicy()
+      : null;
+
     // Prefer primary file (product-web), then residual ion-dist assets.
     const primaryFile = resolveInsideRoot(root, url.pathname);
     if (primaryFile && (await isFile(primaryFile))) {
-      return withContentSecurityPolicy(await net.fetch(pathToFileURL(primaryFile).href), await getPrimaryCsp());
+      const csp = sandboxCsp ?? (await getPrimaryCsp());
+      return withContentSecurityPolicy(await net.fetch(pathToFileURL(primaryFile).href), csp);
     }
 
     if (residualRoot) {
       const residualFile = resolveInsideRoot(residualRoot, url.pathname);
       if (residualFile && (await isFile(residualFile))) {
+        const csp = sandboxCsp ?? (await getResidualCsp());
         return withContentSecurityPolicy(
           await net.fetch(pathToFileURL(residualFile).href),
-          await getResidualCsp(),
+          csp,
         );
       }
+    }
+
+    if (sandboxRuntime) {
+      return new Response(null, { status: 404 });
     }
 
     // Default SPA fallback stays on product shell (main window / task routes).

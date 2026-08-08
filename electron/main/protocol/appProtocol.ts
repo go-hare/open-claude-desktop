@@ -51,7 +51,18 @@ export function installAppProtocolHandler(options: AppProtocolOptions): void {
     if (url.hostname !== APP_HOST) return new Response(null, { status: 404 });
 
     const origin = request.headers.get("Origin");
-    if (origin && origin !== APP_ORIGIN) return new Response(null, { status: 403 });
+    // Opaque sandboxed iframe (no allow-same-origin) loads /sandbox-runtime/*
+    // with Origin: null. Allow that only for the product-local sandbox path.
+    const isSandboxRuntime =
+      url.pathname === "/sandbox-runtime" ||
+      url.pathname.startsWith("/sandbox-runtime/");
+    if (
+      origin &&
+      origin !== APP_ORIGIN &&
+      !(isSandboxRuntime && (origin === "null" || origin === "Null"))
+    ) {
+      return new Response(null, { status: 403 });
+    }
 
     return (await apiHandler(request)) ?? staticHandler(request);
   });

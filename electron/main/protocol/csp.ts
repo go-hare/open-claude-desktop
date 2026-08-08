@@ -63,6 +63,7 @@ export function buildAppContentSecurityPolicy(options: CspOptions = {}): string 
   const imgSrc = new Set<string>(["'self'", "data:", "blob:", ...(options.imgSrc ?? [])]);
 
   if (!options.disableNonessentialServices) {
+    // Keep residual host for any leftover remote path; product rich path is local.
     frameSrc.add(`https://${OFFICIAL_ARTIFACT_SANDBOX_HOST}`);
     for (const host of OFFICIAL_CONNECTOR_FAVICON_IMG_HOSTS) {
       imgSrc.add(`https://${host}`);
@@ -87,4 +88,61 @@ export function buildAppContentSecurityPolicy(options: CspOptions = {}): string 
     directive("img-src", [...imgSrc]),
     directive("script-src", ["'self'", "'wasm-unsafe-eval'", ...(options.scriptHashes ?? []).map((hash) => `'sha256-${hash}'`)]),
   ].join("; ");
+}
+
+/**
+ * CSP for product-local artifact sandbox frame (`/sandbox-runtime/*`).
+ *
+ * Official residual g6e/eit loads https://www.claudeusercontent.com (opaque remote).
+ * Product (user C): Html/Svg/Mermaid/React render in a local iframe:
+ *   sandbox="allow-scripts" WITHOUT allow-same-origin → unique opaque origin.
+ *
+ * Under that model `script-src 'self'` does NOT match host scripts at app://localhost
+ * (or Vite dev origin). Frame CSP must list host origins explicitly, plus:
+ *   - 'unsafe-eval' for Babel standalone (React artifacts)
+ *   - 'unsafe-inline' for HTML artifact scripts re-injected by frame-host
+ *
+ * Parent SPA CSP stays strict (no unsafe-inline / unsafe-eval beyond wasm).
+ * frame-ancestors allows packaged app:// + Vite dev parents only.
+ */
+export function buildProductSandboxRuntimeContentSecurityPolicy(): string {
+  // Opaque sandboxed iframe: 'self' is unique-origin, not app:// host.
+  const hostOrigins = [
+    "app://localhost",
+    "http://localhost:5176",
+    "http://127.0.0.1:5176",
+    "http://localhost:4176",
+    "http://127.0.0.1:4176",
+  ];
+  const scriptSrc = [
+    "'self'",
+    ...hostOrigins,
+    "'unsafe-eval'",
+    "'unsafe-inline'",
+    "'wasm-unsafe-eval'",
+  ];
+  const styleSrc = ["'self'", ...hostOrigins, "'unsafe-inline'", "data:"];
+  const fontSrc = ["'self'", ...hostOrigins, "data:"];
+  const frameAncestors = ["'self'", ...hostOrigins];
+  return [
+    directive("default-src", ["'none'"]),
+    directive("script-src", scriptSrc),
+    directive("style-src", styleSrc),
+    directive("img-src", ["'self'", "data:", "blob:", "https:", ...hostOrigins]),
+    directive("font-src", fontSrc),
+    directive("connect-src", ["'self'", ...hostOrigins]),
+    directive("media-src", ["'self'", "data:", "blob:", ...hostOrigins]),
+    directive("object-src", ["'none'"]),
+    directive("base-uri", ["'none'"]),
+    directive("form-action", ["'none'"]),
+    directive("frame-src", ["'none'"]),
+    directive("frame-ancestors", frameAncestors),
+    directive("worker-src", ["'self'", "blob:", ...hostOrigins]),
+  ].join("; ");
+}
+
+/** Path prefix for product-local sandbox frame + runtime assets. */
+export function isProductSandboxRuntimePath(pathname: string): boolean {
+  const p = pathname.startsWith("/") ? pathname : `/${pathname}`;
+  return p === "/sandbox-runtime" || p.startsWith("/sandbox-runtime/");
 }
