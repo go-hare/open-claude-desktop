@@ -1377,10 +1377,12 @@ export class ClaudeCliRunner {
 
     const patch: Partial<LocalSession> = {};
     if (subtype === "init") {
+      // densable may resolve bag id to an internal alias (grok-4.5 → grok-4.5-build).
+      // Host session.model is the user/bag selection for footer + next spawn — only
+      // gap-fill empty/default. Do not clobber a real host model with densable init.
+      // (permissionMode: same — never apply init onto host Mode pill.)
       const model = stringValue(event.model);
       if (model && model !== "<synthetic>") patch.model = model;
-      // Do not apply init.permissionMode onto host session — official Mode pill does not
-      // seed from Uke(init). Status is the live Fke signal for mode transitions.
     } else if (subtype === "status") {
       const permissionMode = normalizePermissionMode(stringValue(event.permissionMode));
       if (permissionMode) patch.permissionMode = permissionMode;
@@ -1390,7 +1392,14 @@ export class ClaudeCliRunner {
     const current = this.store.getSession(sessionId);
     if (!current) return;
     if (patch.permissionMode && patch.permissionMode === current.permissionMode) delete patch.permissionMode;
-    if (patch.model && patch.model === current.model) delete patch.model;
+    if (patch.model) {
+      if (patch.model === current.model) {
+        delete patch.model;
+      } else if (current.model && current.model !== "default" && current.model !== "<synthetic>") {
+        // Keep bag/user selection over densable resolved id during turn.
+        delete patch.model;
+      }
+    }
     if (Object.keys(patch).length === 0) return;
     this.store.update(sessionId, patch);
   }
