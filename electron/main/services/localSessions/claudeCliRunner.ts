@@ -632,7 +632,14 @@ function parseAppliedEffortBag(response: unknown): {
 } {
   const applied = asRecord(asRecord(response).applied);
   const effortRaw = stringValue(applied.effort);
-  const effort = normalizeEffort(effortRaw) ? effortRaw! : null;
+  // densable ladder may report catalog-top (high) while ultracode is a separate flag.
+  // Host wire is a single effort column: ultracode:true → effort "ultracode".
+  const ultracodeFlag = applied.ultracode === true;
+  const effortFromLevel = normalizeEffort(effortRaw) ? effortRaw! : null;
+  const effort =
+    ultracodeFlag || effortFromLevel === "ultracode"
+      ? "ultracode"
+      : effortFromLevel;
   const effortLevels = Array.isArray(applied.effortLevels)
     ? (applied.effortLevels as unknown[]).filter((v): v is string => typeof v === "string" && normalizeEffort(v) !== undefined)
     : null;

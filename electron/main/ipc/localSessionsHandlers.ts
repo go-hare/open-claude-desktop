@@ -1645,8 +1645,11 @@ function createSessionHandlers(
     getEffort: async (_event, id) => {
       const sessionId = asString(id);
       if (!sessionId) return { effort: "medium", effortLevels: null, ultracodeOfferable: null };
-      // Official get_settings → applied is the runtime truth. CLI always includes
-      // effortLevels when the control call succeeds; product must not invent levels.
+      // Official get_settings → applied is the runtime truth for densable ladder levels.
+      // Product Ultracode is host-store wire ("ultracode"): CLI densable often reports
+      // catalog-top (e.g. high) while the ultracode flag is separate. Never clobber
+      // store effort === "ultracode" with a ladder level — that made switch-back footer
+      // show High instead of Ultracode (session_updated wiped the wire).
       const current = store.getSession(sessionId);
       let effort: string | null = current?.effort ?? "medium";
       let effortLevels: string[] | null = null;
@@ -1655,13 +1658,26 @@ function createSessionHandlers(
         const applied = await sessionRunner.getAppliedEffort(sessionId);
         // Accept bag even when effort string is missing — levels still authoritative.
         if (applied && (applied.effort || applied.effortLevels)) {
-          if (applied.effort && current && current.effort !== applied.effort) {
-            const session = store.update(sessionId, { effort: applied.effort });
-            if (session) dispatchSessionEvent("session_updated", sessionId, session);
-          }
-          effort = applied.effort ?? current?.effort ?? "medium";
           effortLevels = applied.effortLevels;
           ultracodeOfferable = applied.ultracodeOfferable;
+          if (current?.effort === "ultracode") {
+            // Host product-strengthen wire wins over densable ladder report.
+            effort = "ultracode";
+          } else if (applied.effort === "ultracode") {
+            effort = "ultracode";
+            if (current && current.effort !== "ultracode") {
+              const session = store.update(sessionId, { effort: "ultracode" });
+              if (session) dispatchSessionEvent("session_updated", sessionId, session);
+            }
+          } else if (applied.effort) {
+            if (current && current.effort !== applied.effort) {
+              const session = store.update(sessionId, { effort: applied.effort });
+              if (session) dispatchSessionEvent("session_updated", sessionId, session);
+            }
+            effort = applied.effort;
+          } else {
+            effort = current?.effort ?? "medium";
+          }
         }
       } catch {
         // ignore — fall through
