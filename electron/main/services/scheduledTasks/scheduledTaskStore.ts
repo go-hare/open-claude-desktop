@@ -1,6 +1,10 @@
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  computeNextRunAt,
+  getJitterSecondsForTask,
+} from "./scheduledTaskJitter";
 
 /**
  * Residual surface:
@@ -24,6 +28,14 @@ export type ScheduledTask = {
   lastRunAt?: string;
   model?: string;
   nextRunAt?: string;
+  /**
+   * Official uYt disableJitter ("Run at exact time") — persisted; list enriches jitterSeconds=0.
+   */
+  disableJitter?: boolean;
+  /**
+   * Official list enrichment via getJitterSecondsForTask (not persisted; recomputed on read).
+   */
+  jitterSeconds?: number;
   permissionMode?: string;
   sourceBranch?: string;
   useWorktree?: boolean;
@@ -80,22 +92,18 @@ function cronHumanReadable(cronExpression?: string): string | undefined {
   return `Daily at ${formatTime(Number(hour), Number(minute))}`;
 }
 
-function nextRunAt(cronExpression?: string, after = new Date()): string | undefined {
-  if (!cronExpression) return undefined;
-  const [minuteRaw, hourRaw, , , dayRaw] = cronExpression.split(" ");
-  const minute = Number(minuteRaw);
-  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return undefined;
-  const cursor = new Date(after);
-  cursor.setSeconds(0, 0);
-  cursor.setMinutes(cursor.getMinutes() + 1);
-  for (let attempts = 0; attempts < 366 * 24 * 60; attempts += 1) {
-    const hourMatches = hourRaw === "*" || cursor.getHours() === Number(hourRaw);
-    const minuteMatches = cursor.getMinutes() === minute;
-    const dayMatches = !dayRaw || dayRaw === "*" || (dayRaw === "1-5" ? cursor.getDay() >= 1 && cursor.getDay() <= 5 : cursor.getDay() === Number(dayRaw));
-    if (hourMatches && minuteMatches && dayMatches) return cursor.toISOString();
-    cursor.setMinutes(cursor.getMinutes() + 1);
-  }
-  return undefined;
+/**
+ * Residual list enrichment: jitterSeconds + zDA nextRunAt (fireAt or cron+jitter).
+ * Persist path keeps raw task without computed jitterSeconds.
+ */
+function enrichScheduledTask(task: ScheduledTask): ScheduledTask {
+  const jitterSeconds = getJitterSecondsForTask(task);
+  const nextRunAt = computeNextRunAt(task, jitterSeconds * 1000);
+  return {
+    ...task,
+    jitterSeconds,
+    nextRunAt: nextRunAt ?? task.nextRunAt,
+  };
 }
 
 export class ScheduledTaskStore {
@@ -131,21 +139,25 @@ export class ScheduledTaskStore {
 
   getAllScheduledTasks(channel?: ScheduledTaskChannel): ScheduledTask[] {
     const all = Array.from(this.tasks.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    if (!channel) return all;
-    return all.filter((task) => scheduledTaskVisibleOnChannel(task, channel));
+    const scoped = channel
+      ? all.filter((task) => scheduledTaskVisibleOnChannel(task, channel))
+      : all;
+    return scoped.map(enrichScheduledTask);
   }
 
   getScheduledTask(id: string, channel?: ScheduledTaskChannel): ScheduledTask | null {
     const task = this.tasks.get(id) ?? null;
     if (!task) return null;
     if (channel && !scheduledTaskVisibleOnChannel(task, channel)) return null;
-    return task;
+    return enrichScheduledTask(task);
   }
 
   createScheduledTask(input: Partial<ScheduledTask> & { name?: string; title?: string }): ScheduledTask {
     const timestamp = nowIso();
     const title = input.title ?? input.name ?? "Scheduled task";
-    const cronExpression = input.cronExpression;
+    // Residual: create may omit cron (once=manual) or set fireAt (remote/edit seed); do not invent fireAt for once.
+    const cronExpression = input.cronExpression || undefined;
+    const fireAt = typeof input.fireAt === "string" && input.fireAt.length > 0 ? input.fireAt : undefined;
     const spaceId = input.spaceId && input.spaceId.length > 0 ? input.spaceId : undefined;
     const channel: ScheduledTaskChannel =
       input.channel === "cowork" || input.channel === "code"
@@ -159,12 +171,13 @@ export class ScheduledTaskStore {
       title,
       description: input.description,
       prompt: input.prompt,
-      schedule: input.schedule ?? cronHumanReadable(cronExpression) ?? cronExpression ?? "Manual",
+      schedule: input.schedule ?? cronHumanReadable(cronExpression) ?? (fireAt ? "Run once" : cronExpression ?? "Manual"),
       cronExpression,
       cronHumanReadable: cronHumanReadable(cronExpression),
       cwd: input.cwd,
+      fireAt,
       model: input.model,
-      nextRunAt: input.nextRunAt ?? nextRunAt(cronExpression),
+      disableJitter: input.disableJitter === true ? true : undefined,
       permissionMode: input.permissionMode,
       sourceBranch: input.sourceBranch,
       useWorktree: input.useWorktree,
@@ -179,15 +192,32 @@ export class ScheduledTaskStore {
       chromePermissionMode: input.chromePermissionMode,
       chromeAllowedDomains: input.chromeAllowedDomains,
     };
+    // Persist without computed jitterSeconds; enrich on return (official list shape).
     this.tasks.set(task.id, task);
+    // Residual pYt reads getScheduledTaskFileContent on fire — seed file body from create prompt.
+    if (typeof input.prompt === "string") {
+      this.files.set(task.id, input.prompt);
+    }
     this.save();
-    return task;
+    return enrichScheduledTask(task);
   }
 
   updateScheduledTask(id: string, input: Partial<ScheduledTask>): ScheduledTask | null {
     const task = this.tasks.get(id);
     if (!task) return null;
-    const cronExpression = input.cronExpression ?? task.cronExpression;
+    // Residual update may clear cron via null-ish; fireAt may be set/cleared.
+    const cronExpression =
+      input.cronExpression === null
+        ? undefined
+        : input.cronExpression !== undefined
+          ? input.cronExpression || undefined
+          : task.cronExpression;
+    const fireAt =
+      input.fireAt === null
+        ? undefined
+        : input.fireAt !== undefined
+          ? input.fireAt || undefined
+          : task.fireAt;
     // Residual Qa unlink passes spaceId: "" — store as undefined (no space).
     const spaceId =
       input.spaceId === undefined
@@ -199,35 +229,73 @@ export class ScheduledTaskStore {
       input.channel === "cowork" || input.channel === "code"
         ? input.channel
         : resolveScheduledTaskChannel({ channel: task.channel, spaceId });
+    const disableJitter =
+      input.disableJitter === undefined
+        ? task.disableJitter
+        : input.disableJitter === true
+          ? true
+          : undefined;
+    const { jitterSeconds: _dropJitter, nextRunAt: _dropNext, ...inputRest } = input as ScheduledTask & {
+      cronExpression?: string | null;
+      fireAt?: string | null;
+    };
     const updated: ScheduledTask = {
       ...task,
-      ...input,
+      ...inputRest,
       id,
       spaceId,
       channel,
-      schedule: input.schedule ?? cronHumanReadable(cronExpression) ?? cronExpression ?? task.schedule,
+      fireAt,
+      disableJitter,
+      schedule:
+        input.schedule
+        ?? cronHumanReadable(cronExpression)
+        ?? (fireAt ? "Run once" : cronExpression ?? task.schedule),
       cronExpression,
       cronHumanReadable: cronHumanReadable(cronExpression),
-      nextRunAt: input.nextRunAt ?? nextRunAt(cronExpression),
       updatedAt: nowIso(),
     };
+    // Strip computed fields from persist bag.
+    delete updated.jitterSeconds;
     this.tasks.set(id, updated);
+    // Keep files map in sync when prompt is edited (residual file body for Uwe/Lwe fire).
+    if (typeof input.prompt === "string") {
+      this.files.set(id, input.prompt);
+    }
     this.save();
-    return updated;
+    return enrichScheduledTask(updated);
   }
 
   recordRun(id: string, runAt = new Date()): ScheduledTask | null {
     const task = this.tasks.get(id);
     if (!task) return null;
     task.lastRunAt = runAt.toISOString();
-    task.nextRunAt = nextRunAt(task.cronExpression, runAt);
+    // Residual one-shot complete: fireAt + lastRunAt → disabled (UI "completed").
+    if (task.fireAt) {
+      task.enabled = false;
+    }
     task.updatedAt = nowIso();
+    // nextRunAt recomputed on enrich; drop stale stored value.
+    delete task.nextRunAt;
+    delete task.jitterSeconds;
     this.save();
-    return task;
+    return enrichScheduledTask(task);
   }
 
   getDueScheduledTasks(now = new Date()): ScheduledTask[] {
-    return this.getAllScheduledTasks().filter((task) => task.enabled && task.nextRunAt && Date.parse(task.nextRunAt) <= now.getTime());
+    // Residual due: enabled + (fireAt pending | nextRunAt with zDA jitter) ≤ now.
+    return this.getAllScheduledTasks().filter((task) => {
+      if (!task.enabled) return false;
+      if (task.fireAt && !task.lastRunAt) {
+        const fireMs = Date.parse(task.fireAt);
+        return Number.isFinite(fireMs) && fireMs <= now.getTime();
+      }
+      if (task.nextRunAt) {
+        const nextMs = Date.parse(task.nextRunAt);
+        return Number.isFinite(nextMs) && nextMs <= now.getTime();
+      }
+      return false;
+    });
   }
 
   updateScheduledTaskStatus(id: string, status: "enabled" | "disabled" | "deleted"): boolean {

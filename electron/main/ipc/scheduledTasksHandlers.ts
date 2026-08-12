@@ -4,6 +4,7 @@ import {
   type ScheduledTask,
   type ScheduledTaskChannel,
 } from "../services/scheduledTasks/scheduledTaskStore";
+import { resolveScheduledTaskRunMessage } from "../services/scheduledTasks/scheduledTaskPromptWrap";
 import type { IpcHandlerContext } from "./context";
 import { dispatchLocalSessionEvent, getLocalSessionRunner } from "./localSessionRunner";
 import type { InterfaceHandlers } from "./registerIpc";
@@ -63,14 +64,32 @@ export function runScheduledTaskNow(context: IpcHandlerContext, task: ScheduledT
   const channel = resolveScheduledTaskChannel(task);
   const folders = effectiveScheduledFolders(task);
   const cwd = task.cwd ?? folders[0];
+
+  // Residual pYt: file content → Uwe → Lwe/Fwe wrap (not raw task.prompt alone).
+  // Empty after Uwe aborts as no-op — do not recordRun / disable fireAt one-shot.
+  const fileContent = context.scheduledTasks.getScheduledTaskFileContent(task.id);
+  const wrapped = resolveScheduledTaskRunMessage({
+    taskId: task.id,
+    fileContent,
+    prompt: task.prompt,
+  });
+  if (!wrapped) {
+    dispatchScheduledTaskEvent(
+      context,
+      { id: task.id, status: "error", source, task, error: "empty_scheduled_task_prompt" },
+      channel,
+    );
+    return { channel, scheduledTaskId: task.id, error: "empty_scheduled_task_prompt" };
+  }
+
+  // Only stamp lastRunAt (and complete fireAt) once we have a real wrapped body to fire.
   const updatedTask = context.scheduledTasks.recordRun(task.id) ?? task;
 
   // Residual: Code scheduled → LocalSessions (CCD); Cowork scheduled → LocalAgentModeSessions (jT).
   if (channel === "cowork") {
-    const prompt = task.prompt?.trim() || task.title;
     void context.localAgentModeSessions
       .start({
-        message: prompt,
+        message: wrapped,
         model: task.model,
         permissionMode: task.permissionMode,
         scheduledTaskId: task.id,
@@ -98,7 +117,7 @@ export function runScheduledTaskNow(context: IpcHandlerContext, task: ScheduledT
   const session = context.localSessions.start({
     kind: "code",
     title: task.title,
-    prompt: task.prompt,
+    prompt: wrapped,
     cwd,
     folders,
     userSelectedFolders: folders,
@@ -108,15 +127,12 @@ export function runScheduledTaskNow(context: IpcHandlerContext, task: ScheduledT
     origin: "scheduled",
   });
   dispatchLocalSessionEvent(context, { type: "start", sessionId: session.id, session });
-  const prompt = task.prompt?.trim();
-  if (prompt) {
-    getLocalSessionRunner(context).runTurn(session.id, prompt, {
-      model: task.model,
-      permissionMode: task.permissionMode,
-      scheduledTaskId: task.id,
-      origin: "scheduled",
-    });
-  }
+  getLocalSessionRunner(context).runTurn(session.id, wrapped, {
+    model: task.model,
+    permissionMode: task.permissionMode,
+    scheduledTaskId: task.id,
+    origin: "scheduled",
+  });
   dispatchLocalSessionEvent(context, {
     type: "scheduled_task_run",
     sessionId: session.id,
