@@ -116,6 +116,53 @@ export function canDetachDrainedActiveTurn(input: {
 }
 
 /**
+ * Official LocalSessionManager.sendMessage residual (app.asar):
+ *   const c = r.isRunning;
+ *   ...
+ *   if (c) { (r.deferredSends ??= []).push(B); return; }
+ * Mid-stream second send must **queue**, never error `claude_session_already_running`.
+ * densable: refuse only when there is no active turn to attach the queue to.
+ */
+export function shouldDeferMidStreamSend(input: {
+  hasActiveTurn: boolean;
+  canContinueOnStdin: boolean;
+  canDetachDrained: boolean;
+}): boolean {
+  if (!input.hasActiveTurn) return false;
+  // Follow-up after parent result goes to continue / detach+spawn — not deferred.
+  if (input.canContinueOnStdin || input.canDetachDrained) return false;
+  return true;
+}
+
+/** Official deferredSends splice-by-uuid for cancelQueuedMessage. */
+export function removeDeferredSendByUuid<T extends { messageUuid?: string }>(
+  deferred: T[],
+  messageUuid: string,
+): { removed: boolean; next: T[] } {
+  const uuid = typeof messageUuid === "string" ? messageUuid.trim() : "";
+  if (!uuid || deferred.length === 0) return { removed: false, next: deferred };
+  const index = deferred.findIndex((item) => item.messageUuid === uuid);
+  if (index < 0) return { removed: false, next: deferred };
+  const next = deferred.slice(0, index).concat(deferred.slice(index + 1));
+  return { removed: true, next };
+}
+
+/**
+ * densable user-stop residual vs official LocalSessionManager.interrupt / stopSession:
+ * Official soft interrupt (or stopSession) settles with close code 0 and never surfaces
+ * FM "Something went wrong" for a user Esc. densable print CLI stop() SIGTERM-kills the
+ * process group → exit **143** (128+15). That non-zero code must **not** emitError /
+ * lastError when the close is from intentional user stop — only real crashes do.
+ */
+export function shouldEmitProcessExitError(input: {
+  exitCode: number | null | undefined;
+  userStopped: boolean;
+}): boolean {
+  if (input.userStopped) return false;
+  return input.exitCode != null && input.exitCode !== 0;
+}
+
+/**
  * densable Tasks Stop residual: track only system `task_id` bookends.
  * task_started opens; terminal task_notification closes. Ignores tool_use aliases
  * and residual Agent/Workflow tool_use ids so endInput cannot pin forever.

@@ -1462,9 +1462,13 @@ function createSessionHandlers(
     },
     interrupt: async (_event, id) => {
       const sessionId = asString(id);
-      if (sessionId) sessionRunner.stop(sessionId);
-      const ok = sessionId ? store.stop(sessionId) : false;
-      if (ok && sessionId) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
+      if (!sessionId) return false;
+      // Official Wr mutationFn: transport.stop prefers LocalSessions.interrupt
+      // (interruptSession), not stopSession. Success keeps the process + queue.
+      const result = await sessionRunner.interrupt(sessionId);
+      if (result.continued) return true;
+      const ok = store.stop(sessionId);
+      if (ok) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
       return ok;
     },
     // Official densable Host Tasks Stop: control_request stop_task only — never session stop.

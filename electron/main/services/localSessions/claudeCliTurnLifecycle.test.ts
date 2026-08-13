@@ -4,7 +4,10 @@ import {
   canContinueActiveTurnOnStdin,
   canDetachDrainedActiveTurn,
   isTerminalTaskStatus,
+  removeDeferredSendByUuid,
   resolveTurnPermissionMode,
+  shouldDeferMidStreamSend,
+  shouldEmitProcessExitError,
   shouldEndStdinAfterResult,
 } from "./claudeCliTurnLifecycle";
 
@@ -131,6 +134,84 @@ describe("canDetachDrainedActiveTurn", () => {
         stdinWritableEnded: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe("shouldDeferMidStreamSend", () => {
+  it("defers mid-stream when active and neither continue nor detach", () => {
+    expect(
+      shouldDeferMidStreamSend({
+        hasActiveTurn: true,
+        canContinueOnStdin: false,
+        canDetachDrained: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not defer when continue-on-stdin is available", () => {
+    expect(
+      shouldDeferMidStreamSend({
+        hasActiveTurn: true,
+        canContinueOnStdin: true,
+        canDetachDrained: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not defer when detach-drained is available", () => {
+    expect(
+      shouldDeferMidStreamSend({
+        hasActiveTurn: true,
+        canContinueOnStdin: false,
+        canDetachDrained: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not defer without an active turn", () => {
+    expect(
+      shouldDeferMidStreamSend({
+        hasActiveTurn: false,
+        canContinueOnStdin: false,
+        canDetachDrained: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("removeDeferredSendByUuid", () => {
+  it("splices matching uuid and leaves others", () => {
+    const { removed, next } = removeDeferredSendByUuid(
+      [
+        { messageUuid: "a", text: "1" },
+        { messageUuid: "b", text: "2" },
+      ],
+      "a",
+    );
+    expect(removed).toBe(true);
+    expect(next).toEqual([{ messageUuid: "b", text: "2" }]);
+  });
+
+  it("returns unchanged when uuid missing", () => {
+    const deferred = [{ messageUuid: "a" }];
+    const { removed, next } = removeDeferredSendByUuid(deferred, "z");
+    expect(removed).toBe(false);
+    expect(next).toBe(deferred);
+  });
+});
+
+describe("shouldEmitProcessExitError", () => {
+  it("suppresses non-zero exit after intentional user stop (Esc SIGTERM 143)", () => {
+    expect(shouldEmitProcessExitError({ exitCode: 143, userStopped: true })).toBe(false);
+    expect(shouldEmitProcessExitError({ exitCode: 1, userStopped: true })).toBe(false);
+    expect(shouldEmitProcessExitError({ exitCode: 0, userStopped: true })).toBe(false);
+  });
+
+  it("emits only for real non-zero crashes when not user-stopped", () => {
+    expect(shouldEmitProcessExitError({ exitCode: 143, userStopped: false })).toBe(true);
+    expect(shouldEmitProcessExitError({ exitCode: 1, userStopped: false })).toBe(true);
+    expect(shouldEmitProcessExitError({ exitCode: 0, userStopped: false })).toBe(false);
+    expect(shouldEmitProcessExitError({ exitCode: null, userStopped: false })).toBe(false);
   });
 });
 

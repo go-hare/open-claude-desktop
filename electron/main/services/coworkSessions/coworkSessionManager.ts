@@ -15,6 +15,7 @@ import {
 } from "../coworkHostLoop/coworkHostLoopMode";
 import { assertEnterpriseTokenCapAllowsTurn } from "../coworkHostLoop/coworkTokenCap";
 import { coworkHostLoopMountFlagSettings } from "../coworkHostLoop/coworkHostToolPolicy";
+import type { CoworkAccountContext } from "../coworkAccount/coworkAccountContext";
 import type { CoworkSessionManagerOptions, CoworkSessionUpdate, CoworkTranscriptOptions } from "./coworkSessionManagerTypes";
 import { extractUrlsForWebFetchProvenance } from "./sessionsBridgeWebFetch";
 import { CoworkSessionRepository } from "./coworkSessionRepository";
@@ -316,6 +317,12 @@ export class CoworkSessionManager {
   private readonly getScheduledTaskChromePermissions?: (
     scheduledTaskId: string,
   ) => { domains?: string[]; mode?: string } | null | undefined;
+  private readonly accountContext: CoworkAccountContext;
+  /**
+   * Official sawLogoutSinceInit — logout keeps the map; next login re-inits.
+   * setupAccountChangeListener residual (compiled index.js doInitialize).
+   */
+  private sawLogoutSinceInit = false;
   private readonly repository: CoworkSessionRepository;
   private readonly requireCoworkFullVmSandbox?: CoworkSessionManagerOptions["requireCoworkFullVmSandbox"];
   private readonly resolveHostLoopMode?: CoworkSessionManagerOptions["resolveHostLoopMode"];
@@ -449,15 +456,58 @@ export class CoworkSessionManager {
       },
       now: this.now,
     });
+    this.accountContext = options.accountContext;
     this.permissions = createCoworkManagerPermissionBroker(options, this.repository);
     this.runtime = this.createRuntimeController(options);
     // Official LocalAgentModeSessionManager: this.fileWatcher = new ANA; on("fsEvent", ...)
     this.fileWatcher = new CoworkFileSystemWatcher();
     this.fileWatcher.on("fsEvent", (event) => this.handleFsWatchEvent(event));
+    // Official setupAccountChangeListener residual: logout keeps map;
+    // next login / accountUuid change re-inits. No identity → keep existing.
+    this.accountContext.subscribe((details) => {
+      this.handleAccountDetailsChanged(details);
+    });
   }
 
-  initialize(): Promise<void> {
-    return this.repository.initialize();
+  /**
+   * Official initializeWithAccount / doInitialize:
+   * load attempt that had identity emits `{type:"initialized",sessionId:""}`.
+   * Missing identity keeps existing sessions and does not emit.
+   */
+  async initialize(options?: { forceReload?: boolean }): Promise<void> {
+    const result = await this.repository.initialize(options);
+    if (result === "loaded") {
+      this.sawLogoutSinceInit = false;
+      this.emit({ sessionId: "", type: "initialized" });
+    }
+  }
+
+  /**
+   * Official setupAccountChangeListener (id(qa) residual).
+   * Logout: mark sawLogoutSinceInit, keep sessions.
+   * Next login or accountUuid change: initialize().
+   * First identity while currentAccountId is null: initialize() unless already in-flight.
+   */
+  private handleAccountDetailsChanged(details: {
+    accountUuid?: string;
+    isLoggedOut: boolean;
+  }): void {
+    const current = this.repository.peekIdentity();
+    if (details.isLoggedOut) {
+      if (current && !this.sawLogoutSinceInit) this.sawLogoutSinceInit = true;
+      return;
+    }
+    const accountChanged =
+      details.accountUuid !== undefined &&
+      current !== null &&
+      details.accountUuid !== current.accountUuid;
+    if (current) {
+      if (this.sawLogoutSinceInit || accountChanged) {
+        void this.initialize({ forceReload: true });
+      }
+      return;
+    }
+    void this.initialize();
   }
 
   async start(info: CoworkStartSessionInput): Promise<string> {

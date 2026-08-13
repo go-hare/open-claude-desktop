@@ -26,7 +26,10 @@ import {
   applyStoppableTaskBookendEvent,
   canContinueActiveTurnOnStdin,
   canDetachDrainedActiveTurn,
+  removeDeferredSendByUuid,
   resolveTurnPermissionMode,
+  shouldDeferMidStreamSend,
+  shouldEmitProcessExitError,
   shouldEndStdinAfterResult,
 } from "./claudeCliTurnLifecycle";
 
@@ -48,10 +51,23 @@ type RunnerCallbacks = {
   isBypassPermissionsModeEnabled?: () => boolean;
 };
 
+/** Official LocalSessionManager.deferredSends residual — mid-turn user lines. */
+type DeferredSend = {
+  text: string;
+  request: Record<string, unknown>;
+  messageUuid?: string;
+};
+
 type ActiveTurn = {
   child: ChildProcessWithoutNullStreams;
   /** Outer user uuid already written to CLI stdin for this turn (cancel too-late). */
   activeUserUuid?: string;
+  /**
+   * Official deferredSends (app.asar LocalSessionManager): when isRunning, push
+   * mid-turn user message and return; drain on signalTurnComplete / parent result.
+   * Official drainDeferredSends enqueues **all** deferred then stays running.
+   */
+  deferredSends: DeferredSend[];
   pendingControlResponses: Map<string, PendingControlResponse>;
   pendingPermissions: Map<string, LocalToolPermissionRequest>;
   /**
@@ -830,6 +846,13 @@ async function contextUsageFromStoredSession(store: LocalSessionStore, session: 
 
 export class ClaudeCliRunner {
   private readonly active = new Map<string, ActiveTurn>();
+  /**
+   * densable stop residual: stop() SIGTERM-kills the process group before close.
+   * Track intentional user-stop children so close code 143 does not emitError
+   * (official interrupt settles clean; user Esc is not FM failure).
+   * WeakSet so GC can drop after child exits even if we forget to clear.
+   */
+  private readonly userStoppedChildren = new WeakSet<object>();
 
   constructor(private readonly store: LocalSessionStore, private readonly callbacks: RunnerCallbacks) {}
 
@@ -1019,32 +1042,48 @@ export class ClaudeCliRunner {
 
     // densable multi-turn residual: parent result may clear isRunning while CLI still
     // holds the same stdin for open bookends / waiting_for_agents. Next user line must
-    // continue on that stdin — not spawn a second child (claude_session_already_running).
+    // continue on that stdin — not spawn a second child.
+    // Official sendMessage: if isRunning → deferredSends.push (no already_running error).
     const existingTurn = this.active.get(sessionId);
     if (existingTurn) {
+      const canContinue = canContinueActiveTurnOnStdin({
+        sawResult: existingTurn.sawResult,
+        stdinDestroyed: existingTurn.child.stdin.destroyed,
+        stdinWritableEnded: existingTurn.child.stdin.writableEnded,
+      });
+      const canDetach = canDetachDrainedActiveTurn({
+        sawResult: existingTurn.sawResult,
+        openStoppableTaskCount: existingTurn.openStoppableTasks.size,
+        stdinDestroyed: existingTurn.child.stdin.destroyed,
+        stdinWritableEnded: existingTurn.child.stdin.writableEnded,
+      });
+      if (canContinue) {
+        return this.continueActiveTurn(sessionId, existingTurn, text, request, seededUuid);
+      }
+      // Official mid-stream queue residual (isRunning → deferredSends).
       if (
-        canContinueActiveTurnOnStdin({
-          sawResult: existingTurn.sawResult,
-          stdinDestroyed: existingTurn.child.stdin.destroyed,
-          stdinWritableEnded: existingTurn.child.stdin.writableEnded,
+        shouldDeferMidStreamSend({
+          hasActiveTurn: true,
+          canContinueOnStdin: canContinue,
+          canDetachDrained: canDetach,
         })
       ) {
-        return this.continueActiveTurn(sessionId, existingTurn, text, request, seededUuid);
+        existingTurn.deferredSends.push({
+          text,
+          request: { ...request },
+          messageUuid: seededUuid,
+        });
+        // Web already painted optimistic Hb isQueued; host only holds drain payload.
+        return true;
       }
       // Stdin already ended after result (no open bookends) but close not yet fired —
       // detach so a fresh spawn can start. close handler is idempotent.
-      if (
-        canDetachDrainedActiveTurn({
-          sawResult: existingTurn.sawResult,
-          openStoppableTaskCount: existingTurn.openStoppableTasks.size,
-          stdinDestroyed: existingTurn.child.stdin.destroyed,
-          stdinWritableEnded: existingTurn.child.stdin.writableEnded,
-        })
-      ) {
+      if (canDetach) {
         this.clearPendingControlResponses(existingTurn);
         this.clearPendingPermissions(sessionId, existingTurn);
         if (this.active.get(sessionId) === existingTurn) this.active.delete(sessionId);
       } else {
+        // No active path left (should be unreachable when hasActiveTurn) — keep refuse.
         this.emitError(sessionId, "claude_session_already_running");
         return false;
       }
@@ -1107,6 +1146,7 @@ export class ClaudeCliRunner {
     const turn: ActiveTurn = {
       activeUserUuid: seededUuid,
       child,
+      deferredSends: [],
       openStoppableTasks: new Set(),
       pendingControlResponses: new Map(),
       pendingPermissions: new Map(),
@@ -1130,67 +1170,92 @@ export class ClaudeCliRunner {
     });
     child.on("close", (code, signal) => {
       stdout.close();
-      const current = this.active.get(sessionId);
-      // After endInput detach / stop(), a newer turn may already own active.
-      // Only settle when this closing child is still the mapped turn.
-      const ownsActive = current?.child === child;
-      if (ownsActive && current) {
-        this.active.delete(sessionId);
-        this.clearPendingControlResponses(current);
-        this.clearPendingPermissions(sessionId, current);
-        // Process gone: any still-open task_started bookends will never get CLI
-        // task_notification. Emit host residual stopped so Tasks pane leaves Running.
-        // (stop() may already have emitted host-exit and cleared the set.)
-        if (current.openStoppableTasks.size > 0) {
-          this.emitHostStoppedBookends(sessionId, [...current.openStoppableTasks], "Process exited");
-          current.openStoppableTasks.clear();
-        }
-        const stderr = current.stderr.join("").trim();
-        if (code && code !== 0) this.emitError(sessionId, stderr || `claude exited with code ${code}`);
-        this.store.setRunning(sessionId, false, {
-          kind: spawnKind,
-          executable: spawnLabel,
-          lastExitCode: code,
-          lastError: code ? stderr : undefined,
-          finishedAt: nowIso(),
-        });
-        this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
-        this.callbacks.onSessionUpdated(sessionId);
-        return;
-      }
-      // Detached drain: process exited after we already released active / settled UI.
-      // Do not clobber a newer turn's isRunning or delete its active entry.
-      if (code && code !== 0) {
-        const stderr = current?.child === child ? current.stderr.join("").trim() : "";
-        // Only surface orphan exit errors when no newer turn is live.
-        if (!this.active.has(sessionId)) {
-          this.emitError(sessionId, stderr || `claude exited with code ${code}`);
-          this.store.setRunning(sessionId, false, {
-            kind: spawnKind,
-            executable: spawnLabel,
-            lastExitCode: code,
-            lastError: stderr || `claude exited with code ${code}`,
-            finishedAt: nowIso(),
-          });
-          this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
-          this.callbacks.onSessionUpdated(sessionId);
-        }
-      }
+      this.settleChildClose(sessionId, child, code, signal, spawnKind, spawnLabel);
     });
 
     return true;
   }
 
   /**
+   * Child process close settle (spawn close handler + unit-test entry).
+   * User stop marks child in userStoppedChildren before active.delete; non-zero
+   * SIGTERM 143 must not emitError (official interrupt residual).
+   */
+  private settleChildClose(
+    sessionId: string,
+    child: ChildProcessWithoutNullStreams,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+    spawnKind: string,
+    spawnLabel: string,
+  ): void {
+    const current = this.active.get(sessionId);
+    // After endInput detach / stop(), a newer turn may already own active.
+    // Only settle when this closing child is still the mapped turn.
+    const ownsActive = current?.child === child;
+    // stop() marks child before active.delete; orphan close must still honor it.
+    const userStopped = this.userStoppedChildren.has(child);
+    const emitExitError = shouldEmitProcessExitError({ exitCode: code, userStopped });
+    if (ownsActive && current) {
+      this.active.delete(sessionId);
+      this.clearPendingControlResponses(current);
+      this.clearPendingPermissions(sessionId, current);
+      // Process gone: any still-open task_started bookends will never get CLI
+      // task_notification. Emit host residual stopped so Tasks pane leaves Running.
+      // (stop() may already have emitted host-exit and cleared the set.)
+      if (current.openStoppableTasks.size > 0) {
+        this.emitHostStoppedBookends(sessionId, [...current.openStoppableTasks], "Process exited");
+        current.openStoppableTasks.clear();
+      }
+      const stderr = current.stderr.join("").trim();
+      // User Esc/stop → SIGTERM 143: settle without FM error (official interrupt residual).
+      if (emitExitError) this.emitError(sessionId, stderr || `claude exited with code ${code}`);
+      this.store.setRunning(sessionId, false, {
+        kind: spawnKind,
+        executable: spawnLabel,
+        lastExitCode: code,
+        lastError: emitExitError ? (stderr || `claude exited with code ${code}`) : undefined,
+        finishedAt: nowIso(),
+      });
+      this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
+      this.callbacks.onSessionUpdated(sessionId);
+      return;
+    }
+    // Detached drain / post-stop orphan: process exited after we released active.
+    // Do not clobber a newer turn's isRunning or delete its active entry.
+    // User-stop 143 must not emitError — that was the Esc dual-banner bug.
+    if (emitExitError) {
+      const stderr = current?.child === child ? current.stderr.join("").trim() : "";
+      // Only surface orphan exit errors when no newer turn is live.
+      if (!this.active.has(sessionId)) {
+        this.emitError(sessionId, stderr || `claude exited with code ${code}`);
+        this.store.setRunning(sessionId, false, {
+          kind: spawnKind,
+          executable: spawnLabel,
+          lastExitCode: code,
+          lastError: stderr || `claude exited with code ${code}`,
+          finishedAt: nowIso(),
+        });
+        this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
+        this.callbacks.onSessionUpdated(sessionId);
+      }
+    } else if (userStopped && !this.active.has(sessionId)) {
+      // Intentional stop already emitted type:"stopped"; optional completed for listeners.
+      this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
+      this.callbacks.onSessionUpdated(sessionId);
+    }
+  }
+
+  /**
    * Official LocalSessionManager.cancelQueuedMessage residual (app.asar):
    *   no active query → false
-   *   deferredSends / inputStream.remove(uuid) → true
+   *   deferredSends splice by uuid → true
+   *   inputStream.remove(uuid) → true
    *   else query.cancelAsyncMessage(uuid)
    *   on success: splice messageBuffer by uuid
    *
-   * Product Code CLI is one-turn-at-a-time (no deferredSends stream). Cancel only
-   * succeeds for live-tail optimistic user rows that were never the active stdin
-   * prompt (mid-turn queue UI residual). Active-turn uuid is too-late → false.
+   * densable print CLI: deferredSends first; then live-tail optimistic rows that
+   * were never the active stdin prompt. Active-turn uuid is too-late → false.
    */
   cancelQueuedMessage(sessionId: string, messageUuid: string): boolean {
     const uuid = typeof messageUuid === "string" ? messageUuid.trim() : "";
@@ -1200,9 +1265,53 @@ export class ClaudeCliRunner {
       // Already on stdin — official cancelAsyncMessage path not available on print CLI.
       return false;
     }
+    if (turn) {
+      const { removed, next } = removeDeferredSendByUuid(turn.deferredSends, uuid);
+      if (removed) {
+        turn.deferredSends = next;
+        const liveRemoved = this.store.removeLiveEventByUuid(sessionId, uuid);
+        if (liveRemoved) this.callbacks.onSessionUpdated(sessionId);
+        return true;
+      }
+    }
     const removed = this.store.removeLiveEventByUuid(sessionId, uuid);
     if (removed) this.callbacks.onSessionUpdated(sessionId);
     return removed;
+  }
+
+  /**
+   * Official LocalSessionManager.interruptSession residual (app.asar):
+   *   query.interrupt() → signalTurnComplete → drainDeferredSends (stay running).
+   *   no query / timeout / fail → stopSession teardown.
+   *
+   * densable print CLI has no SDK Query.interrupt: send
+   * `control_request { subtype: "interrupt" }` (print.ts aborts the current
+   * turn, does not close stdin / end_session). Keep deferredSends. Parent
+   * `result` drains all deferred via drainDeferredSends (official enqueue-all).
+   *
+   * Returns `{ continued: true }` when the process stays up (official success).
+   * Returns `{ continued: false }` after hard `stop()` fallback.
+   */
+  async interrupt(sessionId: string): Promise<{ continued: boolean }> {
+    const turn = this.active.get(sessionId);
+    if (!turn) {
+      this.stop(sessionId);
+      return { continued: false };
+    }
+    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
+      this.stop(sessionId);
+      return { continued: false };
+    }
+    const response = await this.sendControlRequest(turn, { subtype: "interrupt" });
+    if (response === null) {
+      // Official interrupt timeout / fail → stopSession.
+      this.stop(sessionId);
+      return { continued: false };
+    }
+    // Official signalTurnComplete: drain happens on the interrupt `result`
+    // (enqueue all deferred). Do not SIGTERM, delete active, setRunning false,
+    // or drop deferredSends.
+    return { continued: true };
   }
 
   stop(sessionId: string): boolean {
@@ -1212,6 +1321,11 @@ export class ClaudeCliRunner {
     this.clearPendingPermissions(sessionId, turn);
     this.clearPendingControlResponses(turn);
     if (turn) {
+      // Official stopSession teardown: drop deferred mid-turn lines.
+      // Esc uses interrupt() and keeps deferredSends for drain-after-result.
+      turn.deferredSends = [];
+      // Mark before kill/delete so async close (code 143) skips emitError.
+      this.userStoppedChildren.add(turn.child);
       // Process will never dual-emit task_notification after SIGTERM. Emit host-exit-*
       // **before** active.delete — otherwise close sees no turn and Tasks stay Running.
       if (turn.openStoppableTasks.size > 0) {
@@ -1519,6 +1633,12 @@ export class ClaudeCliRunner {
           /* soft cap — never block result path */
         }
       }
+      // Official signalTurnComplete → drainDeferredSends first when queue non-empty.
+      // Official enqueue-all; print.ts stdin user lines enqueue + run() (new abortController).
+      if (this.drainDeferredSends(sessionId, turn)) {
+        // Follow-up main turn already re-opened isRunning via continueActiveTurn.
+        return;
+      }
       // Parent result = main turn content done. Keep CLI process/stdin open while
       // openStoppableTasks (stop_task residual), but clear host isRunning so web
       // isResponding / main spinner settle (Tasks pane tracks bookends separately).
@@ -1803,6 +1923,38 @@ export class ClaudeCliRunner {
       lastExitCode: null,
     });
     this.callbacks.onSessionUpdated(sessionId);
+    return true;
+  }
+
+  /**
+   * Official LocalSessionManager.drainDeferredSends residual (app.asar):
+   *   if (!inputStream || !deferredSends?.length) return false
+   *   const t = deferredSends; deferredSends = void 0
+   *   for (const n of t) inputStream.enqueue(n)
+   *   isRunning = true; return true
+   *
+   * densable print.ts stdin: each user line enqueue + void run(); drainCommandQueue
+   * batches consecutive prompts. Write **all** deferred onto the same stdin.
+   */
+  private drainDeferredSends(sessionId: string, turn: ActiveTurn): boolean {
+    if (turn.deferredSends.length === 0) return false;
+    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
+      // Stdin closed — cannot continue; leave queue for cancel / drop on process exit.
+      return false;
+    }
+    const queued = turn.deferredSends;
+    turn.deferredSends = [];
+    for (const next of queued) {
+      if (!this.continueActiveTurn(
+        sessionId,
+        turn,
+        next.text,
+        next.request,
+        next.messageUuid,
+      )) {
+        return false;
+      }
+    }
     return true;
   }
 

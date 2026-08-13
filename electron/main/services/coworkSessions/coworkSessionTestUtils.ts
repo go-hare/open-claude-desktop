@@ -161,6 +161,23 @@ export function createTestAccountContext(
   return new TestCoworkAccountContext(details);
 }
 
+/**
+ * Mutable identity for official doInitialize / setupAccountChangeListener tests.
+ * getIdentity/waitForIdentity read `identity` so no-account and account-change
+ * paths can be driven without the always-on TestCoworkAccountContext stub.
+ */
+export class MutableCoworkAccountContext extends CoworkAccountContext {
+  identity: CoworkAccountIdentity | null = null;
+
+  override getIdentity(): CoworkAccountIdentity | null {
+    return this.identity;
+  }
+
+  override waitForIdentity(): Promise<CoworkAccountIdentity | null> {
+    return Promise.resolve(this.identity);
+  }
+}
+
 export type CoworkManagerHarness = {
   events: CoworkSessionEvent[];
   factoryInputs: CoworkQueryFactoryInput[];

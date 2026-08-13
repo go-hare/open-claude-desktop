@@ -80,6 +80,7 @@ describe("ClaudeCliRunner Tasks residual", () => {
     // Plant active turn as production would after task_started bookends.
     (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
       child,
+      deferredSends: [],
       openStoppableTasks,
       pendingControlResponses: new Map(),
       pendingPermissions: new Map(),
@@ -134,6 +135,7 @@ describe("ClaudeCliRunner Tasks residual", () => {
     const { child, writes } = fakeChild(true);
     (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
       child,
+      deferredSends: [],
       openStoppableTasks: new Set(["still-open"]),
       pendingControlResponses: new Map(),
       pendingPermissions: new Map(),
@@ -164,10 +166,10 @@ describe("ClaudeCliRunner Tasks residual", () => {
     ).toBe(false);
   });
 
-  it("runTurn mid-stream still refuses second spawn with already_running", async () => {
+  it("runTurn mid-stream queues deferredSends (official isRunning path, no already_running)", async () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "midstream" });
-    store.sendMessage(session.id, "interrupt?", "user");
+    store.sendMessage(session.id, "interrupt?", "user", { messageUuid: "uuid-queued" });
 
     const events: Array<Record<string, unknown>> = [];
     const runner = new ClaudeCliRunner(store, {
@@ -180,6 +182,7 @@ describe("ClaudeCliRunner Tasks residual", () => {
     const { child, writes } = fakeChild(true);
     (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
       child,
+      deferredSends: [],
       openStoppableTasks: new Set(),
       pendingControlResponses: new Map(),
       pendingPermissions: new Map(),
@@ -188,13 +191,344 @@ describe("ClaudeCliRunner Tasks residual", () => {
       sawAssistantText: false,
     });
 
-    const ok = await runner.runTurn(session.id, "interrupt?", {});
-    expect(ok).toBe(false);
+    const ok = await runner.runTurn(session.id, "interrupt?", { messageUuid: "uuid-queued" });
+    expect(ok).toBe(true);
+    // Official deferredSends: do not write stdin mid-stream.
     expect(writes).toHaveLength(0);
+    const active = (
+      runner as unknown as {
+        active: Map<string, { deferredSends: Array<{ text: string; messageUuid?: string }> }>;
+      }
+    ).active.get(session.id);
+    expect(active?.deferredSends).toHaveLength(1);
+    expect(active?.deferredSends[0]?.text).toBe("interrupt?");
+    expect(active?.deferredSends[0]?.messageUuid).toBe("uuid-queued");
     expect(
       events.some(
         (event) =>
           event.type === "error" && String(event.error ?? "").includes("claude_session_already_running"),
+      ),
+    ).toBe(false);
+  });
+
+  it("cancelQueuedMessage removes deferredSends by uuid", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "cancel deferred" });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const { child } = fakeChild(true);
+    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
+      child,
+      deferredSends: [
+        { text: "queued one", request: {}, messageUuid: "q1" },
+        { text: "queued two", request: {}, messageUuid: "q2" },
+      ],
+      openStoppableTasks: new Set(),
+      pendingControlResponses: new Map(),
+      pendingPermissions: new Map(),
+      sawResult: false,
+      stderr: [],
+      sawAssistantText: false,
+      activeUserUuid: "active-uuid",
+    });
+
+    expect(runner.cancelQueuedMessage(session.id, "q1")).toBe(true);
+    const active = (
+      runner as unknown as {
+        active: Map<string, { deferredSends: Array<{ messageUuid?: string }> }>;
+      }
+    ).active.get(session.id);
+    expect(active?.deferredSends.map((item) => item.messageUuid)).toEqual(["q2"]);
+    // Active stdin uuid still too-late.
+    expect(runner.cancelQueuedMessage(session.id, "active-uuid")).toBe(false);
+  });
+
+  it("parent result drains all deferredSends onto same stdin (signalTurnComplete residual)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "drain deferred" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const { child, writes } = fakeChild(true);
+    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
+      child,
+      deferredSends: [
+        { text: "queued follow-up", request: { messageUuid: "q-follow" }, messageUuid: "q-follow" },
+        { text: "queued later", request: {}, messageUuid: "q-later" },
+      ],
+      openStoppableTasks: new Set(),
+      pendingControlResponses: new Map(),
+      pendingPermissions: new Map(),
+      sawResult: false,
+      stderr: [],
+      sawAssistantText: true,
+      activeUserUuid: "uuid-first",
+    });
+
+    // Invoke private stream handler residual via bracket access.
+    (
+      runner as unknown as {
+        handleStdoutLine: (sessionId: string, line: string) => void;
+      }
+    ).handleStdoutLine(
+      session.id,
+      JSON.stringify({ type: "result", subtype: "success", usage: { input_tokens: 1, output_tokens: 1 } }),
+    );
+
+    expect(writes.some((line) => line.includes("queued follow-up"))).toBe(true);
+    expect(writes.some((line) => line.includes("q-follow"))).toBe(true);
+    expect(writes.some((line) => line.includes("queued later"))).toBe(true);
+    const active = (
+      runner as unknown as {
+        active: Map<
+          string,
+          {
+            sawResult: boolean;
+            activeUserUuid?: string;
+            deferredSends: Array<{ messageUuid?: string }>;
+          }
+        >;
+      }
+    ).active.get(session.id);
+    // Official drainDeferredSends: enqueue all deferred; stay running.
+    expect(active?.deferredSends).toEqual([]);
+    expect(active?.sawResult).toBe(false);
+    expect(active?.activeUserUuid).toBe("q-later");
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+  });
+
+  it("interrupt() keeps deferredSends and does not SIGTERM (official interruptSession)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt continue" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const { child, writes } = fakeChild(true);
+    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
+      child,
+      deferredSends: [
+        { text: "queued follow-up", request: {}, messageUuid: "q-follow" },
+      ],
+      openStoppableTasks: new Set(),
+      pendingControlResponses: new Map(),
+      pendingPermissions: new Map(),
+      sawResult: false,
+      stderr: [],
+      sawAssistantText: true,
+    });
+
+    const pending = runner.interrupt(session.id);
+    const requestLine = writes.find((line) => line.includes('"subtype":"interrupt"'));
+    expect(requestLine).toBeTruthy();
+    const requestId = (JSON.parse(requestLine!) as { request_id?: string }).request_id;
+    expect(requestId).toBeTruthy();
+    (
+      runner as unknown as {
+        handleStdoutLine: (sessionId: string, line: string) => void;
+      }
+    ).handleStdoutLine(
+      session.id,
+      JSON.stringify({
+        type: "control_response",
+        response: { request_id: requestId, subtype: "success", response: {} },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ continued: true });
+    const active = (
+      runner as unknown as {
+        active: Map<string, { deferredSends: Array<{ messageUuid?: string }>; child: { killed: boolean } }>;
+      }
+    ).active.get(session.id);
+    expect(active?.deferredSends.map((item) => item.messageUuid)).toEqual(["q-follow"]);
+    expect(active?.child.killed).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+  });
+
+  it("interrupt() without a live turn falls back to stop()", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt fallback" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: false });
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+  });
+
+  it("interrupt result then drains all deferredSends (signalTurnComplete residual)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt drain" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const { child, writes } = fakeChild(true);
+    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
+      child,
+      deferredSends: [
+        { text: "queued follow-up", request: { messageUuid: "q-follow" }, messageUuid: "q-follow" },
+        { text: "queued later", request: {}, messageUuid: "q-later" },
+      ],
+      openStoppableTasks: new Set(),
+      pendingControlResponses: new Map(),
+      pendingPermissions: new Map(),
+      sawResult: false,
+      stderr: [],
+      sawAssistantText: true,
+    });
+
+    const pending = runner.interrupt(session.id);
+    const requestLine = writes.find((line) => line.includes('"subtype":"interrupt"'));
+    const requestId = (JSON.parse(requestLine!) as { request_id?: string }).request_id;
+    (
+      runner as unknown as {
+        handleStdoutLine: (sessionId: string, line: string) => void;
+      }
+    ).handleStdoutLine(
+      session.id,
+      JSON.stringify({
+        type: "control_response",
+        response: { request_id: requestId, subtype: "success", response: {} },
+      }),
+    );
+    await expect(pending).resolves.toEqual({ continued: true });
+
+    (
+      runner as unknown as {
+        handleStdoutLine: (sessionId: string, line: string) => void;
+      }
+    ).handleStdoutLine(
+      session.id,
+      JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true }),
+    );
+
+    expect(writes.some((line) => line.includes("queued follow-up"))).toBe(true);
+    expect(writes.some((line) => line.includes("queued later"))).toBe(true);
+    const active = (
+      runner as unknown as {
+        active: Map<string, { deferredSends: Array<{ messageUuid?: string }>; sawResult: boolean }>;
+      }
+    ).active.get(session.id);
+    expect(active?.deferredSends).toEqual([]);
+    expect(active?.sawResult).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+  });
+
+  it("stop() then close code 143 does not emitError (user Esc residual)", () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "go", cwd: "/tmp/proj", title: "esc 143" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+
+    const events: Array<Record<string, unknown>> = [];
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => undefined,
+    });
+
+    const { child } = fakeChild(true);
+    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
+      child,
+      deferredSends: [
+        { text: "queued after multi-send", request: {}, messageUuid: "q-esc" },
+      ],
+      openStoppableTasks: new Set(),
+      pendingControlResponses: new Map(),
+      pendingPermissions: new Map(),
+      sawResult: false,
+      stderr: [],
+      sawAssistantText: true,
+    });
+
+    expect(runner.stop(session.id)).toBe(true);
+    expect((runner as unknown as { active: Map<string, unknown> }).active.has(session.id)).toBe(false);
+    expect(events.some((event) => event.type === "stopped")).toBe(true);
+
+    // Planted turns never registered spawn close; invoke settle like orphan close after SIGTERM.
+    (
+      runner as unknown as {
+        settleChildClose: (
+          sessionId: string,
+          child: object,
+          code: number | null,
+          signal: string | null,
+          spawnKind: string,
+          spawnLabel: string,
+        ) => void;
+      }
+    ).settleChildClose(session.id, child, 143, "SIGTERM", "claude-cli", "claude");
+
+    expect(
+      events.some(
+        (event) =>
+          event.type === "error"
+          && String(event.error ?? "").includes("exited with code 143"),
+      ),
+    ).toBe(false);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+    const lastError = (store.getSession(session.id) as { lastError?: string } | undefined)?.lastError;
+    expect(lastError == null || !String(lastError).includes("exited with code 143")).toBe(true);
+  });
+
+  it("orphan non-zero close still emitError when not user-stopped", () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "go", cwd: "/tmp/proj", title: "real crash" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+
+    const events: Array<Record<string, unknown>> = [];
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => undefined,
+    });
+
+    const { child } = fakeChild(true);
+    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
+      child,
+      deferredSends: [],
+      openStoppableTasks: new Set(),
+      pendingControlResponses: new Map(),
+      pendingPermissions: new Map(),
+      sawResult: false,
+      stderr: [],
+      sawAssistantText: true,
+    });
+
+    // Detach without stop (endInput drain residual) — real crash should still error.
+    (runner as unknown as { active: Map<string, unknown> }).active.delete(session.id);
+    (
+      runner as unknown as {
+        settleChildClose: (
+          sessionId: string,
+          child: object,
+          code: number | null,
+          signal: string | null,
+          spawnKind: string,
+          spawnLabel: string,
+        ) => void;
+      }
+    ).settleChildClose(session.id, child, 1, null, "claude-cli", "claude");
+
+    expect(
+      events.some(
+        (event) =>
+          event.type === "error"
+          && String(event.error ?? "").includes("exited with code 1"),
       ),
     ).toBe(true);
   });

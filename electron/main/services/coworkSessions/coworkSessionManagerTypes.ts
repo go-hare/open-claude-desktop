@@ -94,7 +94,12 @@ export type CoworkSessionEvent =
       sessionId: string;
       newState: string;
       type: "lifecycleChanged";
-    };
+    }
+  /**
+   * Official LAM doInitialize emit `event` `{type:"initialized",sessionId:""}`.
+   * Renderer t6 / n6 refill recents on this (index-BELzQL5P ~39068).
+   */
+  | { sessionId: string; type: "initialized" };
 
 export type CoworkQueryFactoryInput = {
   accountDetails: CoworkAccountDetails | null;

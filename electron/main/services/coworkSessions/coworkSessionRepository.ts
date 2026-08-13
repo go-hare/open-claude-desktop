@@ -37,7 +37,8 @@ export class CoworkSessionRepository {
   private readonly now: () => number;
   private readonly sessions = new Map<string, CoworkSessionRuntimeState>();
   private identity: CoworkAccountIdentity | null = null;
-  private initializeTask: Promise<void> | null = null;
+  private initializeTask: Promise<"kept" | "loaded"> | null = null;
+  private hasPendingInit = false;
   private persistence: CoworkSessionPersistencePort | null = null;
 
   constructor(options: CoworkSessionRepositoryOptions) {
@@ -48,12 +49,34 @@ export class CoworkSessionRepository {
     this.now = options.now;
   }
 
-  async initialize(): Promise<void> {
-    if (this.persistence) return;
-    this.initializeTask ??= this.initializeFromAccount().finally(() => {
+  /**
+   * Official doInitialize / initializeWithAccount residual:
+   * no identity → keep existing, no throw; account/org change → clear + load;
+   * in-flight calls coalesce and re-run once (hasPendingInit).
+   */
+  async initialize(
+    options?: { forceReload?: boolean },
+  ): Promise<"kept" | "loaded"> {
+    if (this.initializeTask) {
+      this.hasPendingInit = true;
+      return this.initializeTask;
+    }
+    this.initializeTask = this.initializeFromAccount(options);
+    let result: "kept" | "loaded";
+    try {
+      result = await this.initializeTask;
+    } finally {
       this.initializeTask = null;
-    });
-    await this.initializeTask;
+    }
+    if (this.hasPendingInit) {
+      this.hasPendingInit = false;
+      return this.initialize(options);
+    }
+    return result;
+  }
+
+  peekIdentity(): CoworkAccountIdentity | null {
+    return this.identity;
   }
 
   get(sessionId: string): CoworkSessionRuntimeState | undefined {
@@ -124,20 +147,56 @@ export class CoworkSessionRepository {
     await this.requirePersistence().deleteSession(session);
   }
 
-  private async initializeFromAccount(): Promise<void> {
+  private async initializeFromAccount(
+    options?: { forceReload?: boolean },
+  ): Promise<"kept" | "loaded"> {
     const identity =
       this.accountContext.getIdentity() ??
       (await this.accountContext.waitForIdentity(5_000));
     if (!identity) {
-      throw new Error(
-        "Unable to initialize Cowork sessions: account unavailable",
+      // Official doInitialize: `Cannot initialize sessions… Keeping existing sessions.`
+      // return, no throw, no emit.
+      return "kept";
+    }
+    const previous = this.identity;
+    const sameIdentity =
+      previous !== null &&
+      previous.accountUuid === identity.accountUuid &&
+      previous.organizationUuid === identity.organizationUuid;
+    // Product IPC getAll awaits initialize(); official getAll is sync and does
+    // not re-enter doInitialize. Skip same-identity reload so t6 cannot loop.
+    // Official logout→login still re-enters doInitialize else-branch loadSessions.
+    if (sameIdentity && this.persistence && !options?.forceReload) {
+      return "kept";
+    }
+    if (!sameIdentity && this.persistence) {
+      // Official account/org change: flushPendingSaves, onAccountOrgChanged, clear.
+      await Promise.all(
+        [...this.sessions.keys()].map((sessionId) =>
+          this.persistence!.flushSession(sessionId),
+        ),
       );
+      this.sessions.clear();
     }
     this.identity = identity;
-    this.persistence = this.createPersistence(identity);
-    const restored = await this.persistence.loadSessions();
-    for (const session of restored)
-      this.sessions.set(session.sessionId, session);
+    if (!sameIdentity || !this.persistence) {
+      this.persistence = this.createPersistence(identity);
+    }
+    try {
+      const restored = await this.persistence.loadSessions();
+      this.sessions.clear();
+      for (const session of restored) {
+        this.sessions.set(session.sessionId, session);
+      }
+    } catch {
+      if (!sameIdentity) {
+        // Official transition load fail: null account/org, emit, return.
+        this.identity = null;
+        this.persistence = null;
+      }
+      return "loaded";
+    }
+    return "loaded";
   }
 
   private requirePersistence(): CoworkSessionPersistencePort {
