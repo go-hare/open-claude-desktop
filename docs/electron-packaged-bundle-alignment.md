@@ -1,6 +1,6 @@
 # Electron packaged bundle 对齐审计
 
-生成时间：2026-08-06T14:48:56.451Z
+生成时间：2026-08-13T05:14:28.059Z
 
 ## 结论（own forge Electron shell）
 
@@ -19,7 +19,7 @@
 - Electron Framework 存在：是
 - Electron Framework 是否存在绝对 symlink：否
 - app.asar integrity：是
-- app.asar 产品 main 指纹：是（ok index=448 chunks=true）
+- app.asar 产品 main 指纹：是（ok index=499 chunks=true）
 - app.asar runtime node_modules 缺失数：0
 - app.asar.unpacked runtime 缺失数：0
 - product-web 存在：是（build-id=react-shell）

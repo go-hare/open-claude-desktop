@@ -1,19 +1,19 @@
 {
-  "source": "@go-hare/claude-code@2.7.30",
+  "source": "@go-hare/claude-code@2.7.39",
   "package": "@go-hare/claude-code",
-  "version": "2.7.30",
+  "version": "2.7.39",
   "binary": "claude",
   "platform": "darwin",
   "arch": "arm64",
-  "size": 95894560,
-  "sha256": "e2aed157ce38906cb3c08fe2c0f3cd58c39bb13a78ae03ce3d9d9c6415b43715",
-  "versionLabel": "2.7.30 (Claude Code)",
+  "size": 95728416,
+  "sha256": "9b5574c8adf75ab64af431256820e62f415c0d65b92fda638017c2f885d2e7b0",
+  "versionLabel": "2.7.39 (Claude Code)",
   "topLevel": {
     "claude": {
       "from": "platforms/darwin-arm64/claude",
-      "size": 95894560,
-      "sha256": "e2aed157ce38906cb3c08fe2c0f3cd58c39bb13a78ae03ce3d9d9c6415b43715",
-      "version": "2.7.30 (Claude Code)"
+      "size": 95728416,
+      "sha256": "9b5574c8adf75ab64af431256820e62f415c0d65b92fda638017c2f885d2e7b0",
+      "version": "2.7.39 (Claude Code)"
     }
   },
   "vendor": {
@@ -28,9 +28,9 @@
     "darwin-arm64": {
       "binary": "claude",
       "path": "platforms/darwin-arm64/claude",
-      "size": 96437090,
-      "sha256": "da74cd8389c156322bb730cfe0563c268b94ae20bd11d67dc14ba03d3dab1451",
-      "version": "2.7.30 (Claude Code)"
+      "size": 96289312,
+      "sha256": "338a0a2b2e1573789891f84ea9599adf03c906687fbd3dc14c3a5761c86a0f63",
+      "version": "2.7.39 (Claude Code)"
     }
   },
   "mode": "host-only",

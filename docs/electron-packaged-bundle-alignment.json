@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-06T14:48:56.451Z",
+  "generated_at": "2026-08-13T05:14:28.059Z",
   "project_root": "/Users/apple/work-py/hare-code/open-claude-desktop",
   "shell_model": "own-forge-electron",
   "packaged_app": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app",
@@ -7,7 +7,7 @@
     "path": "Contents/MacOS/Claudex",
     "packaged_exists": true,
     "residual_claude_overlay_present": false,
-    "packaged_sha256": "32231e78008a25aae26d6c4629e4a7d9691bb8d84d07ed8f435f4102523595bc"
+    "packaged_sha256": "84d54ca90172439e690db062a75ec1603ebae0611d62d2aaf19694cbe53b1421"
   },
   "info": {
     "CFBundleExecutable": {
@@ -86,9 +86,9 @@
     "has_absolute_framework_symlink": false
   },
   "asar": {
-    "packaged_sha256": "9e32f6c8716e957efe5bbb8997deb9626507014dd8b40cf8f5c9a37f0d979a50",
-    "packaged_header_sha256": "8d702df343ede3c782a1e945a15a01d90537b781a986d172fd673e3966173f1f",
-    "plist_integrity_hash": "8d702df343ede3c782a1e945a15a01d90537b781a986d172fd673e3966173f1f",
+    "packaged_sha256": "2dcdd16d66ebdf0982ffc192d321b954ffcfae19426db088844d19190dbf61ab",
+    "packaged_header_sha256": "013b643318fd3a9c49d2f6ca5a2ff81323a5056526ec98db93002c659192a1db",
+    "plist_integrity_hash": "013b643318fd3a9c49d2f6ca5a2ff81323a5056526ec98db93002c659192a1db",
     "plist_integrity_matches_packaged_asar": true,
     "contains_smoke_user_data": false,
     "missing_runtime_node_modules_entries": [],
@@ -99,7 +99,7 @@
       "hasViteIndex": true,
       "hasVitePre": true,
       "hasChunks": true,
-      "indexSize": 448,
+      "indexSize": 499,
       "rootIndexSize": 0,
       "hasStrayRootIndex": false,
       "hasNodeModules": true,
