@@ -447,6 +447,33 @@ describe("custom3pCliEnv residual", () => {
     expect(spawnEnv.CLAUDE_CODE_ENTRYPOINT).toBe("sdk-ts");
   });
 
+  it("strips inherited CLAUDE_CODE_CHILD_SESSION and forces session persistence", () => {
+    // Repro: Claudex launched from Claude Code shell inherits nested_marker env →
+    // SessionFileManager.shouldSkipPersistence → no ~/.claude jsonl → refresh loses turn.
+    const spawnEnv = buildClaudeCliSpawnEnv({
+      processEnv: {
+        PATH: "/usr/bin",
+        CLAUDE_CODE_CHILD_SESSION: "1",
+        CLAUDE_CODE_SESSION_ID: "parent-session-id",
+        CLAUDE_CODE_MESSAGING_SOCKET: "\\\\.\\pipe\\claude-code-parent",
+        CLAUDE_CODE_MESSAGING_TOKEN: "parent-token",
+        CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
+      },
+      appliedEnterpriseConfig: {
+        inferenceProvider: "gateway",
+        inferenceGatewayBaseUrl: "https://gw.example",
+        inferenceGatewayApiKey: "sk-x",
+      },
+    });
+    expect(spawnEnv.CLAUDE_CODE_CHILD_SESSION).toBeUndefined();
+    expect(spawnEnv.CLAUDE_CODE_SESSION_ID).toBeUndefined();
+    expect(spawnEnv.CLAUDE_CODE_MESSAGING_SOCKET).toBeUndefined();
+    expect(spawnEnv.CLAUDE_CODE_MESSAGING_TOKEN).toBeUndefined();
+    expect(spawnEnv.CLAUDE_CODE_SKIP_PROMPT_HISTORY).toBeUndefined();
+    expect(spawnEnv.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE).toBe("1");
+    expect(spawnEnv.CLAUDE_CODE_ENTRYPOINT).toBe("claude-desktop-3p");
+  });
+
   it("lets injected appliedEnterpriseConfig override disk", () => {
     const spawnEnv = buildClaudeCliSpawnEnv({
       processEnv: { PATH: "/bin" },

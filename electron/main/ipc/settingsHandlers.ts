@@ -17,7 +17,6 @@ import {
   writeCustom3pConfigLibrary,
 } from "../services/custom3p/custom3pConfigLibrary";
 import {
-  deploymentModeIs3p,
   deploymentModeToPersistAfterApply,
   normalizePersistedDeploymentMode,
   resolveDeploymentModeFromUserData,
@@ -1323,11 +1322,15 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         }
 
         // Official got: t = SM(A) *before* jsA so soft vs relaunch sees activation flip.
+        // Product extension: official SM is bag-only (Hzt). resolveDeploymentMode maps
+        // persisted "dotClaude" → resolution.mode "3p" even with no configLibrary bag.
+        // Using deploymentModeIs3p here made NQt("dotClaude") write prefs then hit
+        // `if (!r) return` with no loadURL/relaunch — login card looked unclickable.
         const userDataPath = settingsUserDataPath(context);
         let smBefore = false;
         try {
           const before = resolveDeploymentModeFromUserData(userDataPath);
-          smBefore = deploymentModeIs3p(before.enterprise, before.persistedDeploymentMode);
+          smBefore = before.resolution.mode === "3p";
         } catch {
           smBefore = false;
         }
@@ -1420,10 +1423,11 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         //   else relaunchApp()
         // No setOpacity(0), no setBounds(1200), no chrome wait.
         // LoginRoute jn pagehide → mnr resize(1200,800) during loadURL tear-down.
+        // Product: same SM gate as smBefore — resolution.mode (includes dotClaude shell).
         let smAfter = false;
         try {
           const after = resolveDeploymentModeFromUserData(userDataPath);
-          smAfter = deploymentModeIs3p(after.enterprise, after.persistedDeploymentMode);
+          smAfter = after.resolution.mode === "3p";
         } catch {
           smAfter = false;
         }
@@ -1453,22 +1457,45 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         }
 
         const mw = context.windows.mainWindow;
-        let loginSized = false;
+        const wc = context.windows.mainView?.webContents;
+        // Product dual-root: LoginRoute may paint while bounds were blown to shell
+        // size (Strict/gate path), or URL still /login after jn 600. Either means
+        // soft loadURL + pagehide animate grow paints chooser→1200 top-left on Win.
+        // Prefer process relaunch (opacity:0 cold shell) whenever we leave login.
+        let fromLoginSurface = false;
         try {
           if (mw && !mw.isDestroyed()) {
             const b = mw.getBounds();
             // LoginRoute jn residual size (exact 600×600). Shell is Cbe 1200×800.
-            loginSized =
+            const exactLogin =
               b.width === 600
               && b.height === 600
               && !mw.isMaximized()
               && !mw.isFullScreen();
+            // Win DPI / animate mid-frame can be 1–2px off exact 600.
+            const nearLogin =
+              !mw.isMaximized()
+              && !mw.isFullScreen()
+              && b.width >= 580
+              && b.width <= 640
+              && b.height >= 580
+              && b.height <= 640;
+            fromLoginSurface = exactLogin || nearLogin;
           }
         } catch {
-          loginSized = false;
+          fromLoginSurface = false;
+        }
+        try {
+          if (!fromLoginSurface && wc && !wc.isDestroyed()) {
+            const url = wc.getURL();
+            // SPA may be http://localhost:5176/login or app://localhost/login.
+            fromLoginSurface = /\/login(?:\/|\?|#|$)/.test(url);
+          }
+        } catch {
+          /* keep bounds heuristic */
         }
 
-        if (loginSized) {
+        if (fromLoginSurface) {
           try {
             if (mw && !mw.isDestroyed()) mw.setOpacity(0);
           } catch {
@@ -1480,7 +1507,6 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
           return true;
         }
 
-        const wc = context.windows.mainView?.webContents;
         if (wc && !wc.isDestroyed()) {
           // Official: const {CUSTOM_3P_ORIGIN:n}=…; await o.webContents.loadURL(n)
           // Product shell origin may be Vite CLAUDE_DESKTOP_MAIN_VIEW_URL; strip path.

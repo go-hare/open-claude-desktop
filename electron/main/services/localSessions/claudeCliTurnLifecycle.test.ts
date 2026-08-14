@@ -9,7 +9,47 @@ import {
   shouldDeferMidStreamSend,
   shouldEmitProcessExitError,
   shouldEndStdinAfterResult,
+  shouldSignalTurnCompleteFromCliMessage,
 } from "./claudeCliTurnLifecycle";
+
+describe("shouldSignalTurnCompleteFromCliMessage", () => {
+  it("settles on stream-json result", () => {
+    expect(shouldSignalTurnCompleteFromCliMessage({ type: "result", subtype: "success" })).toBe(true);
+  });
+
+  it("settles on stop_hook_summary (durable end when result missing)", () => {
+    expect(
+      shouldSignalTurnCompleteFromCliMessage({ type: "system", subtype: "stop_hook_summary" }),
+    ).toBe(true);
+  });
+
+  it("settles on final assistant end_turn only", () => {
+    expect(
+      shouldSignalTurnCompleteFromCliMessage({
+        type: "assistant",
+        message: { role: "assistant", stop_reason: "end_turn", content: [] },
+      }),
+    ).toBe(true);
+    expect(
+      shouldSignalTurnCompleteFromCliMessage({
+        type: "assistant",
+        message: { role: "assistant", stop_reason: "tool_use", content: [] },
+      }),
+    ).toBe(false);
+    expect(
+      shouldSignalTurnCompleteFromCliMessage({
+        type: "assistant",
+        message: { role: "assistant", stop_reason: null, content: [] },
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores stream_event / user / unrelated system", () => {
+    expect(shouldSignalTurnCompleteFromCliMessage({ type: "stream_event" })).toBe(false);
+    expect(shouldSignalTurnCompleteFromCliMessage({ type: "user" })).toBe(false);
+    expect(shouldSignalTurnCompleteFromCliMessage({ type: "system", subtype: "init" })).toBe(false);
+  });
+});
 
 describe("resolveTurnPermissionMode", () => {
   it("prefers non-empty request mode", () => {
@@ -29,12 +69,20 @@ describe("resolveTurnPermissionMode", () => {
 });
 
 describe("shouldEndStdinAfterResult", () => {
-  it("ends when no pending can_use_tool and no stoppable bookends", () => {
+  it("keeps warm after result by default (official multi-turn, no cold --resume)", () => {
+    // Official signalTurnComplete → markNotRunning only; query+stdin stay open.
     expect(
       shouldEndStdinAfterResult({
         pendingPermissionCount: 0,
       }),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      shouldEndStdinAfterResult({
+        pendingPermissionCount: 0,
+        openStoppableTaskCount: 0,
+        keepWarmAfterResult: true,
+      }),
+    ).toBe(false);
   });
 
   it("keeps open for pending can_use_tool (hasBidirectionalNeeds)", () => {
@@ -54,12 +102,12 @@ describe("shouldEndStdinAfterResult", () => {
     ).toBe(false);
   });
 
-  it("Agent tool_use leftovers must NOT block endInput (no invent openBackground gate)", () => {
-    // Official Query / dual-emit contract: only bookend task_ids gate stdin.
+  it("legacy opt-out ends when no gates (keepWarmAfterResult:false)", () => {
     expect(
       shouldEndStdinAfterResult({
         pendingPermissionCount: 0,
         openStoppableTaskCount: 0,
+        keepWarmAfterResult: false,
       }),
     ).toBe(true);
   });
@@ -213,6 +261,14 @@ describe("shouldEmitProcessExitError", () => {
     expect(shouldEmitProcessExitError({ exitCode: 0, userStopped: false })).toBe(false);
     expect(shouldEmitProcessExitError({ exitCode: null, userStopped: false })).toBe(false);
   });
+
+  it("suppresses non-zero exit after parent result (official clean-complete residual)", () => {
+    // Official query iterator completed after result → teardownQuery only, no FM.
+    // densable print Windows often exits 1 after endInput drain.
+    expect(shouldEmitProcessExitError({ exitCode: 1, userStopped: false, sawResult: true })).toBe(false);
+    expect(shouldEmitProcessExitError({ exitCode: 143, userStopped: false, sawResult: true })).toBe(false);
+    expect(shouldEmitProcessExitError({ exitCode: 0, userStopped: false, sawResult: true })).toBe(false);
+  });
 });
 
 describe("applyStoppableTaskBookendEvent", () => {
@@ -247,7 +303,7 @@ describe("applyStoppableTaskBookendEvent", () => {
     expect(stoppable.size).toBe(0);
   });
 
-  it("keeps endInput closed while bookend open, opens after terminal notification", () => {
+  it("keeps stdin closed while bookend open; warm multi-turn still keeps after terminal", () => {
     const stoppable = new Set<string>();
     applyStoppableTaskBookendEvent(stoppable, {
       type: "system",
@@ -266,10 +322,19 @@ describe("applyStoppableTaskBookendEvent", () => {
       task_id: "t-open",
       status: "completed",
     });
+    // Official warm multi-turn: after bookends clear, still do NOT end stdin.
     expect(
       shouldEndStdinAfterResult({
         pendingPermissionCount: 0,
         openStoppableTaskCount: stoppable.size,
+      }),
+    ).toBe(false);
+    // Legacy opt-out would end when bookends empty.
+    expect(
+      shouldEndStdinAfterResult({
+        pendingPermissionCount: 0,
+        openStoppableTaskCount: stoppable.size,
+        keepWarmAfterResult: false,
       }),
     ).toBe(true);
   });
@@ -290,10 +355,18 @@ describe("applyStoppableTaskBookendEvent", () => {
       },
     });
     expect(stoppable.size).toBe(0);
+    // Warm default: no endInput. Legacy opt-out ends when no bookends.
     expect(
       shouldEndStdinAfterResult({
         pendingPermissionCount: 0,
         openStoppableTaskCount: stoppable.size,
+      }),
+    ).toBe(false);
+    expect(
+      shouldEndStdinAfterResult({
+        pendingPermissionCount: 0,
+        openStoppableTaskCount: stoppable.size,
+        keepWarmAfterResult: false,
       }),
     ).toBe(true);
   });

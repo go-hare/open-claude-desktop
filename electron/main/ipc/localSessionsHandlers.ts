@@ -1815,7 +1815,16 @@ function createSessionHandlers(
     },
     setModel: async (_event, id, model) => {
       const sessionId = asString(id);
-      const session = sessionId ? store.update(sessionId, { model: String(model ?? "") }) : null;
+      const nextModel = String(model ?? "");
+      const session = sessionId ? store.update(sessionId, { model: nextModel }) : null;
+      // Official Query.setModel residual — mid-session without respawn when warm.
+      if (sessionId && nextModel) {
+        try {
+          await sessionRunner.setSdkModel(sessionId, nextModel);
+        } catch {
+          /* host store remains authoritative for next spawn */
+        }
+      }
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
       return bridgeSession(session);
     },
@@ -1825,12 +1834,22 @@ function createSessionHandlers(
       // and clear isUnread (ready glyph) for the focused session.
       const sessionId = asString(id);
       const wasUnread = sessionId ? store.getSession(sessionId)?.isUnread === true : false;
+      // Official setSessionVisibility: previous focus becomes hidden (idle arm), new → warm.
+      const previousFocused = store.getFocusedSessionId();
       setFocusedCodeSession(context, sessionId);
       const focused = store.setFocusedSession(sessionId);
       // Only emit session_updated when unread actually cleared — avoid Recents
       // reorder spam on every open of a completed+read session.
       if (sessionId && focused && wasUnread) {
         dispatchSessionEvent("session_updated", sessionId, focused);
+      }
+      if (previousFocused && previousFocused !== sessionId) {
+        sessionRunner.setSessionTabVisible(previousFocused, false);
+      }
+      if (sessionId) {
+        sessionRunner.setSessionTabVisible(sessionId, true);
+      } else if (previousFocused) {
+        sessionRunner.setSessionTabVisible(previousFocused, false);
       }
       return true;
     },

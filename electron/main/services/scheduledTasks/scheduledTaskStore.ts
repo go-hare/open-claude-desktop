@@ -322,6 +322,85 @@ export class ScheduledTaskStore {
     return true;
   }
 
+  /**
+   * Official che residual: suggestions → [{toolName}] from addRules/replaceRules only.
+   */
+  static extractApprovedToolNamesFromSuggestions(
+    suggestions: unknown,
+  ): Array<{ toolName: string }> {
+    if (!Array.isArray(suggestions)) return [];
+    const out: Array<{ toolName: string }> = [];
+    for (const raw of suggestions) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as Record<string, unknown>;
+      if (item.type !== "addRules" && item.type !== "replaceRules") continue;
+      if (!Array.isArray(item.rules)) continue;
+      for (const rule of item.rules) {
+        if (!rule || typeof rule !== "object") continue;
+        const toolName = (rule as { toolName?: unknown }).toolName;
+        if (typeof toolName === "string" && toolName.length > 0) {
+          out.push({ toolName });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Official ql residual — directory mount tool not auto-approved on scheduled runs
+   * (uses userSelectedFolders instead). Cowork: mcp__cowork__request_cowork_directory.
+   * Code CCD also uses mcp__ccd_directory__request_directory — treat both as non-auto.
+   */
+  static readonly DIRECTORY_MOUNT_TOOLS = new Set([
+    "mcp__cowork__request_cowork_directory",
+    "mcp__ccd_directory__request_directory",
+  ]);
+
+  /**
+   * Official shouldAutoApprovePermission residual:
+   * - no suggestions / no addRules → false
+   * - directory mount tools → false
+   * - plugin-shim:* rules → false
+   * - every rule toolName must already be in task.approvedPermissions
+   */
+  shouldAutoApprovePermission(
+    taskId: string,
+    toolName: string,
+    suggestions: unknown,
+  ): boolean {
+    const rules = ScheduledTaskStore.extractApprovedToolNamesFromSuggestions(suggestions);
+    if (rules.length === 0) return false;
+    if (ScheduledTaskStore.DIRECTORY_MOUNT_TOOLS.has(toolName)) return false;
+    if (rules.some((r) => r.toolName.startsWith("plugin-shim:"))) return false;
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+    const approved = new Set((task.approvedPermissions ?? []).map((p) => p.toolName));
+    return rules.every((r) => approved.has(r.toolName));
+  }
+
+  /**
+   * Official addApprovedPermissions residual — merge new addRules toolNames into task.
+   */
+  addApprovedPermissions(taskId: string, suggestions: unknown): boolean {
+    const rules = ScheduledTaskStore.extractApprovedToolNamesFromSuggestions(suggestions);
+    if (rules.length === 0) return false;
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+    const existing = task.approvedPermissions ?? [];
+    const seen = new Set(existing.map((p) => p.toolName));
+    const added: Array<{ toolName: string }> = [];
+    for (const rule of rules) {
+      if (seen.has(rule.toolName)) continue;
+      seen.add(rule.toolName);
+      added.push({ toolName: rule.toolName });
+    }
+    if (added.length === 0) return false;
+    task.approvedPermissions = [...existing, ...added];
+    task.updatedAt = nowIso();
+    this.save();
+    return true;
+  }
+
   removeApprovedPermission(id: string, toolName: string): boolean {
     const task = this.tasks.get(id);
     if (!task) return false;

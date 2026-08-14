@@ -60,12 +60,52 @@ export function resolveTurnPermissionMode(
 }
 
 /**
- * After first parent `result`, end stdin unless:
- * - a can_use_tool control_request is still outstanding, or
- * - densable Tasks Stop residual: a system task_started bookend is still open
- *   (`openStoppableTaskCount`).
+ * When host `signalTurnComplete` / markNotRunning must fire for a CLI stream message.
  *
+ * Official primary: stream-json `type:"result"` (and createBaseHooks Stop).
+ * Product residual (observed 3p/gateway turns): CLI may emit final assistant with
+ * `message.stop_reason === "end_turn"` and write `system/stop_hook_summary` to jsonl
+ * **without** a stream-json `result` row — host then sticks isRunning=true (Stop/Esc
+ * pill never clears). Mirror those durable turn-end signals so LocalSessionManager
+ * settles the same way as result/Stop.
+ *
+ * Do **not** settle on assistant without end_turn (partial / tool_use mid-turn).
+ * Do **not** invent userData message storage — only host running flags.
+ */
+export function shouldSignalTurnCompleteFromCliMessage(msg: unknown): boolean {
+  if (!msg || typeof msg !== "object") return false;
+  const record = msg as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : "";
+  if (type === "result") return true;
+  if (type === "system" && record.subtype === "stop_hook_summary") return true;
+  if (type === "assistant") {
+    const message =
+      record.message && typeof record.message === "object"
+        ? (record.message as Record<string, unknown>)
+        : null;
+    const stopReason =
+      message && typeof message.stop_reason === "string" ? message.stop_reason : null;
+    // Final assistant of the turn (not tool_use / max_tokens mid-stream).
+    if (stopReason === "end_turn") return true;
+  }
+  return false;
+}
+
+/**
+ * Official LocalSessionManager multi-turn residual (app.asar):
+ * After parent `result`, CCD **does not** endInput / kill the Query process.
+ * `signalTurnComplete` → `markNotRunning` only; query + inputStream stay warm so
+ * the next `sendMessage` is `inputStream.enqueue` (not cold `--resume`).
+ *
+ * densable print maps that to: keep stdin open after result (permission-prompt-tool
+ * stdio + stream-json is bidirectional — same as Query.hasBidirectionalNeeds).
+ * Only stopSession / interrupt-fallback / idle pause ends the process.
+ *
+ * Pending can_use_tool / open task bookends also keep stdin open (stop_task path).
  * Bookend task_id set only — never Agent tool_use call-id leftovers.
+ *
+ * Returns true only when stdin is already closed (nothing left to end) or host
+ * explicitly wants teardown — normal post-result path returns **false** (warm).
  */
 export function shouldEndStdinAfterResult(input: {
   pendingPermissionCount: number;
@@ -73,20 +113,28 @@ export function shouldEndStdinAfterResult(input: {
   openStoppableTaskCount?: number;
   stdinDestroyed?: boolean;
   stdinWritableEnded?: boolean;
+  /**
+   * Official warm multi-turn: never end stdin after a settled result.
+   * When true (default for CCD align), always keep process for next enqueue.
+   */
+  keepWarmAfterResult?: boolean;
 }): boolean {
   if (input.stdinDestroyed || input.stdinWritableEnded) return false;
+  // Official: keep query warm after result (sendMessage → enqueue, not re-spawn).
+  if (input.keepWarmAfterResult !== false) return false;
   if (input.pendingPermissionCount > 0) return false;
   if ((input.openStoppableTaskCount ?? 0) > 0) return false;
   return true;
 }
 
 /**
- * densable multi-turn residual: after parent `result`, CLI may keep the same
- * print process + stdin open (`waiting_for_agents` / open bookends). The next
- * user line must write to **that** stdin — not spawn a second child.
+ * Official sendMessage warm path: query + inputStream exist and not mid-turn
+ * (`!isRunning` / densable `sawResult`) → write next user line on the same stdin.
  *
- * Only when parent result was already seen and stdin is still writable.
- * Mid-stream (`!sawResult`) must refuse (still the same turn).
+ * densable: after parent `result` (or warmSession ready), stdin still open →
+ * continueActiveTurn, not cold `--resume` spawn.
+ *
+ * Mid-stream (`!sawResult`) must refuse (still the same turn → deferredSends).
  */
 export function canContinueActiveTurnOnStdin(input: {
   sawResult: boolean;
@@ -99,10 +147,9 @@ export function canContinueActiveTurnOnStdin(input: {
 }
 
 /**
- * After parent `result` + endInput (no open bookends), stdin is closed but the
- * child may still be draining until process exit. Host must not pin `active`
- * forever or the next send fails with `claude_session_already_running`.
- * Detach so a new spawn can start; close handler is idempotent when active gone.
+ * Only when stdin was already ended (stop / crash / legacy endInput) and the
+ * child is draining: detach so a fresh spawn can start. Warm multi-turn never
+ * ends stdin after result, so this stays false while the process is alive.
  */
 export function canDetachDrainedActiveTurn(input: {
   sawResult: boolean;
@@ -121,7 +168,7 @@ export function canDetachDrainedActiveTurn(input: {
  *   ...
  *   if (c) { (r.deferredSends ??= []).push(B); return; }
  * Mid-stream second send must **queue**, never error `claude_session_already_running`.
- * densable: refuse only when there is no active turn to attach the queue to.
+ * After result (warm): canContinueOnStdin → enqueue path, not deferred.
  */
 export function shouldDeferMidStreamSend(input: {
   hasActiveTurn: boolean;
@@ -129,7 +176,7 @@ export function shouldDeferMidStreamSend(input: {
   canDetachDrained: boolean;
 }): boolean {
   if (!input.hasActiveTurn) return false;
-  // Follow-up after parent result goes to continue / detach+spawn — not deferred.
+  // Follow-up after parent result → continue on warm stdin (or detach+spawn if dead).
   if (input.canContinueOnStdin || input.canDetachDrained) return false;
   return true;
 }
@@ -148,17 +195,27 @@ export function removeDeferredSendByUuid<T extends { messageUuid?: string }>(
 }
 
 /**
- * densable user-stop residual vs official LocalSessionManager.interrupt / stopSession:
- * Official soft interrupt (or stopSession) settles with close code 0 and never surfaces
- * FM "Something went wrong" for a user Esc. densable print CLI stop() SIGTERM-kills the
- * process group → exit **143** (128+15). That non-zero code must **not** emitError /
- * lastError when the close is from intentional user stop — only real crashes do.
+ * Official residual (app.asar LocalSessionManager + Query + ProcessTransport):
+ * - interruptSession no query → emit close code 0 + stopSession (not FM).
+ * - interruptSession success → signalTurnComplete → markNotRunning / drain only.
+ * - query iterator **clean complete** after result → teardownQuery only (no type:"error").
+ * - type:"error" + close code 1 only on handleQueryError / idle timeout / auth teardown.
+ * - ProcessTransport getProcessExitError: non-zero → Error; Query.readMessages: after
+ *   successful result (`lastErrorResultText=void 0`) process exit is cleanup, not
+ *   "Claude Code returned an error result".
+ * - User stop: isStopping → "query interrupted (intentional stop)" — no FM.
+ *
+ * densable print maps user stop → SIGTERM 143 / Windows taskkill; post-result drain
+ * often exits code 1. Those must not emitError when userStopped or sawResult.
  */
 export function shouldEmitProcessExitError(input: {
   exitCode: number | null | undefined;
   userStopped: boolean;
+  /** Parent stream-json `result` already delivered for this child. */
+  sawResult?: boolean;
 }): boolean {
   if (input.userStopped) return false;
+  if (input.sawResult) return false;
   return input.exitCode != null && input.exitCode !== 0;
 }
 

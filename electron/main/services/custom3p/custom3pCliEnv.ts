@@ -322,6 +322,38 @@ export function buildHostManagedCliFlags(
   };
 }
 
+
+/**
+ * Parent Claude Code / nested-agent env that must NOT leak into desktop-hosted CLI.
+ *
+ * densable: `CLAUDE_CODE_CHILD_SESSION` → `isNestedMarkerSuppressingPersistence`
+ * skips all jsonl materialize (`SessionFileManager.shouldSkipPersistence`). When
+ * Claudex is launched from a Claude Code shell (or inherits that env via electron
+ * parent), every sdk-query session registers (`sessions/<pid>.json`) and streams
+ * assistant to the UI but **never writes** `~/.claude/projects/.../<id>.jsonl` —
+ * refresh loses the turn (host liveBuffers alone are memory-only).
+ *
+ * Also strip parent session identity / messaging so the child is a top-level
+ * desktop session, not a teammate attach target of the outer CLI.
+ *
+ * Official recovery hint for nested_marker: `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`.
+ * Desktop host always sets FORCE after strip (belt-and-suspenders).
+ */
+export const DESKTOP_HOST_CLI_NESTED_ENV_KEYS = [
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_SKIP_PROMPT_HISTORY",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_PARENT_SESSION_ID",
+] as const;
+
+export function stripDesktopHostCliNestedEnv(env: NodeJS.ProcessEnv): void {
+  for (const key of DESKTOP_HOST_CLI_NESTED_ENV_KEYS) {
+    delete env[key];
+  }
+}
+
 /**
  * Official provider sessionEnvVars residual (gateway / vertex / bedrock / foundry)
  * plus product multi-vendor openai / gemini / grok (claude-code modelType clients).
@@ -749,6 +781,10 @@ export function buildClaudeCliSpawnEnv(options: {
     ...localSessionEnv,
   };
 
+  // Desktop host is never a nested child of the outer Claude Code that launched
+  // Claudex — strip inherited markers before any provider inject (see helper).
+  stripDesktopHostCliNestedEnv(env);
+
   // Official HFi always clears cloud-provider flags before G4.
   for (const key of PROVIDER_FLAG_KEYS) {
     delete env[key];
@@ -774,6 +810,7 @@ export function buildClaudeCliSpawnEnv(options: {
     for (const key of ["DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING"] as const) {
       if (env[key] === "") delete env[key];
     }
+    env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1";
     return env;
   }
 
@@ -862,6 +899,11 @@ export function buildClaudeCliSpawnEnv(options: {
       /* safeStorage / missing ADC — leave spawn without GOOGLE_APPLICATION_CREDENTIALS */
     }
   }
+
+  // densable nested_marker recovery: force transcript writes for desktop-hosted CLI
+  // (Code sdk-query / Cowork host-loop). Safe when CHILD_SESSION was already stripped;
+  // required if any residual path re-introduces the marker mid-process.
+  env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1";
 
   return env;
 }

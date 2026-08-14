@@ -1,14 +1,23 @@
 /**
- * Host Tasks residual unit tests (stop host-exit + multi-turn stdin continue).
- * Uses a planted ActiveTurn (no real CLI spawn).
+ * Official LocalSessionManager residual unit tests (SDK Query path only).
+ * Plants sdkSessions (no densable print ActiveTurn).
  */
-import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeCliRunner } from "./claudeCliRunner";
+import type { CodeSdkActiveSession, CodeSdkSessionCallbacks } from "./codeSdkQuerySession";
 import { LocalSessionStore } from "./localSessionStore";
+
+const createCodeSdkActiveSession = vi.hoisted(() => vi.fn());
+vi.mock("./codeSdkQuerySession", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./codeSdkQuerySession")>();
+  return {
+    ...actual,
+    createCodeSdkActiveSession: (...args: unknown[]) => createCodeSdkActiveSession(...args),
+  };
+});
 
 const tempDirs: string[] = [];
 
@@ -19,341 +28,135 @@ afterEach(() => {
 });
 
 function makeStore(): LocalSessionStore {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-runner-tasks-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-runner-sdk-"));
   tempDirs.push(dir);
   return new LocalSessionStore("code", path.join(dir, "code-sessions.json"));
 }
 
-function fakeChild(stdinOpen = true) {
-  const stdin = new EventEmitter() as EventEmitter & {
-    destroyed: boolean;
-    writableEnded: boolean;
-    write: (chunk: string) => boolean;
-    end: () => void;
-  };
-  const writes: string[] = [];
-  stdin.destroyed = false;
-  stdin.writableEnded = !stdinOpen;
-  stdin.write = (chunk: string) => {
-    writes.push(chunk);
-    return true;
-  };
-  stdin.end = () => {
-    stdin.writableEnded = true;
-  };
-  const child = new EventEmitter() as EventEmitter & {
-    stdin: typeof stdin;
-    stdout: EventEmitter;
-    stderr: EventEmitter;
-    killed: boolean;
-    pid: number;
-    kill: (signal?: string) => boolean;
-  };
-  child.stdin = stdin;
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  child.killed = false;
-  child.pid = 4242;
-  child.kill = () => {
-    child.killed = true;
-    return true;
-  };
-  return { child, writes };
+function plantSdk(
+  runner: ClaudeCliRunner,
+  sessionId: string,
+  overrides: Partial<CodeSdkActiveSession> = {},
+): CodeSdkActiveSession {
+  const interrupt = vi.fn(async () => undefined);
+  const stopTask = vi.fn(async () => undefined);
+  const close = vi.fn();
+  const sdk = {
+    deferredSends: [],
+    input: { enqueue: vi.fn() },
+    isRunning: true,
+    isStopping: false,
+    loop: Promise.resolve(),
+    pendingPermissions: new Map(),
+    query: {
+      interrupt,
+      stopTask,
+      close,
+      setPermissionMode: vi.fn(async () => undefined),
+      setModel: vi.fn(async () => undefined),
+      applyFlagSettings: vi.fn(async () => true),
+      getContextUsage: vi.fn(async () => null),
+    },
+    sawInit: true,
+    sawResult: false,
+    sessionId,
+    ...overrides,
+  } as unknown as CodeSdkActiveSession;
+  (
+    runner as unknown as { sdkSessions: Map<string, CodeSdkActiveSession> }
+  ).sdkSessions.set(sessionId, sdk);
+  return sdk;
 }
 
-describe("ClaudeCliRunner Tasks residual", () => {
-  it("stop() emits host-exit bookends for open task_started before active.delete", () => {
+describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
+  it("SDK message path mirrors durable CLI types into liveBuffers (assistant survives settle)", async () => {
+    // Product residual: print path appendTranscriptEvent every CLI event; SDK path must
+    // mirror user/assistant/system/result so getTranscript keeps the turn if jsonl is late.
     const store = makeStore();
-    const session = store.start({ prompt: "go", cwd: "/tmp/proj", title: "stop residual" });
-    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
-
-    const events: Array<Record<string, unknown>> = [];
-    const runner = new ClaudeCliRunner(store, {
-      onEvent: (event) => {
-        events.push(event);
-      },
-      onSessionUpdated: () => undefined,
+    const session = store.start({ prompt: "2222", cwd: "D:\tmp\proj", title: "2222" });
+    // warmSession requires cliSessionId (official resume warm).
+    store.setCliSessionId(session.id, "cli-warm-seed");
+    let capturedOnEvent: ((event: Record<string, unknown>) => void) | null = null;
+    createCodeSdkActiveSession.mockImplementation(async (opts: {
+      callbacks: CodeSdkSessionCallbacks;
+      sessionId: string;
+    }) => {
+      capturedOnEvent = opts.callbacks.onEvent;
+      const interrupt = vi.fn(async () => undefined);
+      const stopTask = vi.fn(async () => undefined);
+      const close = vi.fn();
+      return {
+        deferredSends: [],
+        input: { enqueue: vi.fn() },
+        isRunning: false,
+        isStopping: false,
+        loop: Promise.resolve(),
+        pendingPermissions: new Map(),
+        query: {
+          interrupt,
+          stopTask,
+          close,
+          setPermissionMode: vi.fn(async () => undefined),
+          setModel: vi.fn(async () => undefined),
+          applyFlagSettings: vi.fn(async () => true),
+          getContextUsage: vi.fn(async () => null),
+        },
+        sawInit: false,
+        sawResult: false,
+        sessionId: opts.sessionId,
+      } as unknown as CodeSdkActiveSession;
     });
-
-    const { child } = fakeChild(true);
-    const openStoppableTasks = new Set(["task-open-1", "task-open-2"]);
-    // Plant active turn as production would after task_started bookends.
-    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
-      child,
-      deferredSends: [],
-      openStoppableTasks,
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: true,
-      stderr: [],
-      sawAssistantText: true,
-    });
-
-    expect(runner.stop(session.id)).toBe(true);
-    expect((runner as unknown as { active: Map<string, unknown> }).active.has(session.id)).toBe(false);
-
-    const hostExit = events.filter(
-      (event) =>
-        event.type === "message"
-        && typeof event.message === "object"
-        && event.message !== null
-        && (event.message as { subtype?: string }).subtype === "task_notification"
-        && String((event.message as { uuid?: string }).uuid ?? "").startsWith("host-exit-"),
-    );
-    expect(hostExit).toHaveLength(2);
-    const statuses = hostExit.map((event) => (event.message as { status?: string; task_id?: string }));
-    expect(statuses.map((item) => item.task_id).sort()).toEqual(["task-open-1", "task-open-2"]);
-    expect(statuses.every((item) => item.status === "stopped")).toBe(true);
-    // No host-stop invent
-    expect(
-      events.some(
-        (event) =>
-          typeof event.message === "object"
-          && event.message !== null
-          && String((event.message as { uuid?: string }).uuid ?? "").startsWith("host-stop-"),
-      ),
-    ).toBe(false);
-    expect(store.getSession(session.id)?.isRunning).toBe(false);
-    // set was cleared so close path would not double-emit
-    expect(openStoppableTasks.size).toBe(0);
-  });
-
-  it("runTurn continues on same stdin after parent result (no already_running)", async () => {
-    const store = makeStore();
-    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "continue residual" });
-    // Seed second user live-tail as sendMessage would
-    store.sendMessage(session.id, "second turn please", "user", { messageUuid: "uuid-second" });
-
-    const events: Array<Record<string, unknown>> = [];
-    const runner = new ClaudeCliRunner(store, {
-      onEvent: (event) => {
-        events.push(event);
-      },
-      onSessionUpdated: () => undefined,
-    });
-
-    const { child, writes } = fakeChild(true);
-    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
-      child,
-      deferredSends: [],
-      openStoppableTasks: new Set(["still-open"]),
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: true,
-      stderr: [],
-      sawAssistantText: true,
-      activeUserUuid: "uuid-first",
-    });
-
-    const ok = await runner.runTurn(session.id, "second turn please", {
-      messageUuid: "uuid-second",
-    });
-    expect(ok).toBe(true);
-    expect(writes.some((line) => line.includes("second turn please"))).toBe(true);
-    expect(writes.some((line) => line.includes("uuid-second"))).toBe(true);
-    expect(store.getSession(session.id)?.isRunning).toBe(true);
-    // Still same active child
-    const active = (runner as unknown as { active: Map<string, { sawResult: boolean; child: unknown }> }).active.get(
-      session.id,
-    );
-    expect(active?.child).toBe(child);
-    expect(active?.sawResult).toBe(false);
-    expect(
-      events.some(
-        (event) =>
-          event.type === "error" && String(event.error ?? "").includes("claude_session_already_running"),
-      ),
-    ).toBe(false);
-  });
-
-  it("runTurn mid-stream queues deferredSends (official isRunning path, no already_running)", async () => {
-    const store = makeStore();
-    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "midstream" });
-    store.sendMessage(session.id, "interrupt?", "user", { messageUuid: "uuid-queued" });
-
-    const events: Array<Record<string, unknown>> = [];
-    const runner = new ClaudeCliRunner(store, {
-      onEvent: (event) => {
-        events.push(event);
-      },
-      onSessionUpdated: () => undefined,
-    });
-
-    const { child, writes } = fakeChild(true);
-    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
-      child,
-      deferredSends: [],
-      openStoppableTasks: new Set(),
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: false,
-      stderr: [],
-      sawAssistantText: false,
-    });
-
-    const ok = await runner.runTurn(session.id, "interrupt?", { messageUuid: "uuid-queued" });
-    expect(ok).toBe(true);
-    // Official deferredSends: do not write stdin mid-stream.
-    expect(writes).toHaveLength(0);
-    const active = (
-      runner as unknown as {
-        active: Map<string, { deferredSends: Array<{ text: string; messageUuid?: string }> }>;
-      }
-    ).active.get(session.id);
-    expect(active?.deferredSends).toHaveLength(1);
-    expect(active?.deferredSends[0]?.text).toBe("interrupt?");
-    expect(active?.deferredSends[0]?.messageUuid).toBe("uuid-queued");
-    expect(
-      events.some(
-        (event) =>
-          event.type === "error" && String(event.error ?? "").includes("claude_session_already_running"),
-      ),
-    ).toBe(false);
-  });
-
-  it("cancelQueuedMessage removes deferredSends by uuid", async () => {
-    const store = makeStore();
-    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "cancel deferred" });
-    const runner = new ClaudeCliRunner(store, {
-      onEvent: () => undefined,
-      onSessionUpdated: () => undefined,
-    });
-    const { child } = fakeChild(true);
-    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
-      child,
-      deferredSends: [
-        { text: "queued one", request: {}, messageUuid: "q1" },
-        { text: "queued two", request: {}, messageUuid: "q2" },
-      ],
-      openStoppableTasks: new Set(),
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: false,
-      stderr: [],
-      sawAssistantText: false,
-      activeUserUuid: "active-uuid",
-    });
-
-    expect(runner.cancelQueuedMessage(session.id, "q1")).toBe(true);
-    const active = (
-      runner as unknown as {
-        active: Map<string, { deferredSends: Array<{ messageUuid?: string }> }>;
-      }
-    ).active.get(session.id);
-    expect(active?.deferredSends.map((item) => item.messageUuid)).toEqual(["q2"]);
-    // Active stdin uuid still too-late.
-    expect(runner.cancelQueuedMessage(session.id, "active-uuid")).toBe(false);
-  });
-
-  it("parent result drains all deferredSends onto same stdin (signalTurnComplete residual)", async () => {
-    const store = makeStore();
-    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "drain deferred" });
-    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
 
     const runner = new ClaudeCliRunner(store, {
       onEvent: () => undefined,
       onSessionUpdated: () => undefined,
     });
-    const { child, writes } = fakeChild(true);
-    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
-      child,
-      deferredSends: [
-        { text: "queued follow-up", request: { messageUuid: "q-follow" }, messageUuid: "q-follow" },
-        { text: "queued later", request: {}, messageUuid: "q-later" },
-      ],
-      openStoppableTasks: new Set(),
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: false,
-      stderr: [],
-      sawAssistantText: true,
-      activeUserUuid: "uuid-first",
+    // warmSession → ensureSdkSession → createCodeSdkActiveSession (mocked)
+    await expect(runner.warmSession(session.id)).resolves.toBe(true);
+    expect(capturedOnEvent).toBeTypeOf("function");
+
+    capturedOnEvent!({
+      type: "message",
+      sessionId: session.id,
+      message: {
+        type: "system",
+        subtype: "init",
+        session_id: "cli-live-1",
+        slash_commands: ["compact"],
+        model: "grok-4.5",
+      },
+    });
+    capturedOnEvent!({
+      type: "message",
+      sessionId: session.id,
+      message: {
+        type: "assistant",
+        uuid: "asst-live-1",
+        message: { role: "assistant", content: [{ type: "text", text: "pong" }] },
+      },
+    });
+    // stream_event must NOT pollute liveBuffers (partial, not jsonl-durable)
+    capturedOnEvent!({
+      type: "message",
+      sessionId: session.id,
+      message: {
+        type: "stream_event",
+        event: { type: "content_block_delta", delta: { type: "text_delta", text: "x" } },
+      },
     });
 
-    // Invoke private stream handler residual via bracket access.
-    (
-      runner as unknown as {
-        handleStdoutLine: (sessionId: string, line: string) => void;
-      }
-    ).handleStdoutLine(
-      session.id,
-      JSON.stringify({ type: "result", subtype: "success", usage: { input_tokens: 1, output_tokens: 1 } }),
-    );
+    const live = store.getLiveEvents(session.id);
+    expect(live.some((e) => (e as { type?: string }).type === "assistant")).toBe(true);
+    expect(live.some((e) => (e as { type?: string }).type === "stream_event")).toBe(false);
+    expect(store.getSession(session.id)?.cliSessionId).toBe("cli-live-1");
 
-    expect(writes.some((line) => line.includes("queued follow-up"))).toBe(true);
-    expect(writes.some((line) => line.includes("q-follow"))).toBe(true);
-    expect(writes.some((line) => line.includes("queued later"))).toBe(true);
-    const active = (
-      runner as unknown as {
-        active: Map<
-          string,
-          {
-            sawResult: boolean;
-            activeUserUuid?: string;
-            deferredSends: Array<{ messageUuid?: string }>;
-          }
-        >;
-      }
-    ).active.get(session.id);
-    // Official drainDeferredSends: enqueue all deferred; stay running.
-    expect(active?.deferredSends).toEqual([]);
-    expect(active?.sawResult).toBe(false);
-    expect(active?.activeUserUuid).toBe("q-later");
-    expect(store.getSession(session.id)?.isRunning).toBe(true);
+    store.setRunning(session.id, false, { kind: "claude-cli" }, { preserveLiveBuffer: true });
+    expect(store.getLiveEvents(session.id).some((e) => (e as { type?: string }).type === "assistant")).toBe(
+      true,
+    );
   });
 
-  it("interrupt() keeps deferredSends and does not SIGTERM (official interruptSession)", async () => {
-    const store = makeStore();
-    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt continue" });
-    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
-
-    const runner = new ClaudeCliRunner(store, {
-      onEvent: () => undefined,
-      onSessionUpdated: () => undefined,
-    });
-    const { child, writes } = fakeChild(true);
-    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
-      child,
-      deferredSends: [
-        { text: "queued follow-up", request: {}, messageUuid: "q-follow" },
-      ],
-      openStoppableTasks: new Set(),
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: false,
-      stderr: [],
-      sawAssistantText: true,
-    });
-
-    const pending = runner.interrupt(session.id);
-    const requestLine = writes.find((line) => line.includes('"subtype":"interrupt"'));
-    expect(requestLine).toBeTruthy();
-    const requestId = (JSON.parse(requestLine!) as { request_id?: string }).request_id;
-    expect(requestId).toBeTruthy();
-    (
-      runner as unknown as {
-        handleStdoutLine: (sessionId: string, line: string) => void;
-      }
-    ).handleStdoutLine(
-      session.id,
-      JSON.stringify({
-        type: "control_response",
-        response: { request_id: requestId, subtype: "success", response: {} },
-      }),
-    );
-
-    await expect(pending).resolves.toEqual({ continued: true });
-    const active = (
-      runner as unknown as {
-        active: Map<string, { deferredSends: Array<{ messageUuid?: string }>; child: { killed: boolean } }>;
-      }
-    ).active.get(session.id);
-    expect(active?.deferredSends.map((item) => item.messageUuid)).toEqual(["q-follow"]);
-    expect(active?.child.killed).toBe(false);
-    expect(store.getSession(session.id)?.isRunning).toBe(true);
-  });
-
-  it("interrupt() without a live turn falls back to stop()", async () => {
+  it("interrupt() without warm query falls back to stop()", async () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt fallback" });
     store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
@@ -365,72 +168,352 @@ describe("ClaudeCliRunner Tasks residual", () => {
     expect(store.getSession(session.id)?.isRunning).toBe(false);
   });
 
-  it("interrupt result then drains all deferredSends (signalTurnComplete residual)", async () => {
+  it("interrupt() before system/init is official no-query → stopSession", async () => {
     const store = makeStore();
-    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt drain" });
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt before init" });
     store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
-
     const runner = new ClaudeCliRunner(store, {
       onEvent: () => undefined,
       onSessionUpdated: () => undefined,
     });
-    const { child, writes } = fakeChild(true);
-    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
-      child,
+    const sdk = plantSdk(runner, session.id, { sawInit: false, isRunning: true });
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: false });
+    expect(sdk.query.interrupt).not.toHaveBeenCalled();
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+  });
+
+  it("interrupt() success markNotRunning keeps warm query (signalTurnComplete, no deferred)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt markNotRunning" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    // Official: clearPendingPermissions is teardownQuery only — interrupt success must NOT clear.
+    store.setPendingToolPermission(session.id, {
+      requestId: "perm-1",
+      toolName: "Bash",
+      input: { command: "ls" },
+      suggestions: [],
+    } as never);
+    const events: Array<Record<string, unknown>> = [];
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => undefined,
+    });
+    const sdk = plantSdk(runner, session.id, {
+      sawInit: true,
+      isRunning: true,
+      deferredSends: [],
+    });
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: true });
+    expect(sdk.query.interrupt).toHaveBeenCalledTimes(1);
+    expect(sdk.isRunning).toBe(false);
+    expect(sdk.sawResult).toBe(true);
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(true);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+    expect(store.getSession(session.id)?.pendingToolPermissions ?? []).toHaveLength(1);
+    expect(events.some((event) => event.type === "stopped")).toBe(false);
+    expect(events.some((event) => event.type === "completed")).toBe(true);
+  });
+
+  it("stop() teardown clears host pendingToolPermissions (clearPendingPermissions residual)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "stop clears pending" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    store.setPendingToolPermission(session.id, {
+      requestId: "perm-stop",
+      toolName: "Bash",
+      input: { command: "ls" },
+      suggestions: [],
+    } as never);
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    plantSdk(runner, session.id, { sawInit: true, isRunning: true, deferredSends: [] });
+    expect(runner.stop(session.id)).toBe(true);
+    expect(store.getSession(session.id)?.pendingToolPermissions ?? []).toEqual([]);
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(false);
+  });
+
+  it("interrupt() success drains deferredSends (signalTurnComplete residual)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt drain" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const enqueue = vi.fn();
+    const sdk = plantSdk(runner, session.id, {
+      sawInit: true,
+      isRunning: true,
       deferredSends: [
-        { text: "queued follow-up", request: { messageUuid: "q-follow" }, messageUuid: "q-follow" },
+        { text: "queued follow-up", request: {}, messageUuid: "q-follow" },
         { text: "queued later", request: {}, messageUuid: "q-later" },
       ],
-      openStoppableTasks: new Set(),
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: false,
-      stderr: [],
-      sawAssistantText: true,
+      input: { enqueue } as never,
     });
+    // runTurnViaSdkQuery will try ensure/run — plant already has sdk; intercept via spy on enqueue path
+    // After drain, first follow-up is enqueued through runTurnViaSdkQuery → input.enqueue.
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: true });
+    expect(sdk.query.interrupt).toHaveBeenCalledTimes(1);
+    expect(sdk.deferredSends).toEqual([]);
+    // Follow-ups re-entered runTurnViaSdkQuery which sets isRunning true + enqueue.
+    expect(enqueue).toHaveBeenCalled();
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(true);
+  });
 
-    const pending = runner.interrupt(session.id);
-    const requestLine = writes.find((line) => line.includes('"subtype":"interrupt"'));
-    const requestId = (JSON.parse(requestLine!) as { request_id?: string }).request_id;
+  it("interrupt() timeout (kkA residual) falls back to stopSession", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt timeout" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    plantSdk(runner, session.id, {
+      sawInit: true,
+      isRunning: true,
+      query: {
+        interrupt: vi.fn(() => new Promise(() => undefined)), // never resolves
+        stopTask: vi.fn(async () => undefined),
+        close: vi.fn(),
+      } as never,
+    });
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: false });
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+  }, 10_000);
+
+  it("runTurn mid-stream queues deferredSends on SDK session", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "midstream" });
+    const events: Array<Record<string, unknown>> = [];
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => undefined,
+    });
+    const enqueue = vi.fn();
+    const sdk = plantSdk(runner, session.id, {
+      isRunning: true,
+      sawResult: false,
+      deferredSends: [],
+      input: { enqueue } as never,
+    });
+    const ok = await runner.runTurn(session.id, "interrupt?", { messageUuid: "uuid-queued" });
+    expect(ok).toBe(true);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(sdk.deferredSends).toHaveLength(1);
+    expect(sdk.deferredSends[0]?.text).toBe("interrupt?");
+    expect(sdk.deferredSends[0]?.messageUuid).toBe("uuid-queued");
+    expect(
+      events.some(
+        (event) =>
+          event.type === "error" && String(event.error ?? "").includes("claude_session_already_running"),
+      ),
+    ).toBe(false);
+  });
+
+  it("cancelQueuedMessage removes SDK deferredSends by uuid", () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "cancel deferred" });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const sdk = plantSdk(runner, session.id, {
+      deferredSends: [
+        { text: "queued one", request: {}, messageUuid: "q1" },
+        { text: "queued two", request: {}, messageUuid: "q2" },
+      ],
+    });
+    expect(runner.cancelQueuedMessage(session.id, "q1")).toBe(true);
+    expect(sdk.deferredSends.map((item) => item.messageUuid)).toEqual(["q2"]);
+  });
+
+  it("signalTurnCompleteSdk on result drains deferred then keeps query", () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "result drain" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const enqueue = vi.fn();
+    const sdk = plantSdk(runner, session.id, {
+      isRunning: true,
+      sawResult: false,
+      deferredSends: [
+        { text: "queued follow-up", request: {}, messageUuid: "q-follow" },
+      ],
+      input: { enqueue } as never,
+    });
     (
       runner as unknown as {
-        handleStdoutLine: (sessionId: string, line: string) => void;
+        signalTurnCompleteSdk: (
+          sessionId: string,
+          sdk: CodeSdkActiveSession,
+          session: unknown,
+        ) => void;
       }
-    ).handleStdoutLine(
-      session.id,
-      JSON.stringify({
-        type: "control_response",
-        response: { request_id: requestId, subtype: "success", response: {} },
-      }),
-    );
-    await expect(pending).resolves.toEqual({ continued: true });
+    ).signalTurnCompleteSdk(session.id, sdk, session);
+    expect(sdk.deferredSends).toEqual([]);
+    expect(enqueue).toHaveBeenCalled();
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(true);
+  });
 
+  it("signalTurnCompleteSdk settles host when handleSdkMessage already cleared sdk.isRunning", () => {
+    // handleSdkMessage sets active.isRunning=false on result before onEvent → signal.
+    // Host store must still markNotRunning or Stop/Esc sticks.
+    const store = makeStore();
+    const session = store.start({ prompt: "444", cwd: "/tmp/proj", title: "host settle" });
+    store.setRunning(session.id, true, {
+      kind: "claude-cli",
+      executable: "sdk-query",
+      startedAt: new Date().toISOString(),
+    });
+    const events: Array<Record<string, unknown>> = [];
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => undefined,
+    });
+    const sdk = plantSdk(runner, session.id, {
+      isRunning: false,
+      sawResult: true,
+      deferredSends: [],
+    });
     (
       runner as unknown as {
-        handleStdoutLine: (sessionId: string, line: string) => void;
+        signalTurnCompleteSdk: (
+          sessionId: string,
+          sdk: CodeSdkActiveSession,
+          session: unknown,
+        ) => void;
       }
-    ).handleStdoutLine(
-      session.id,
-      JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true }),
-    );
+    ).signalTurnCompleteSdk(session.id, sdk, session);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+    expect(events.some((event) => event.type === "completed")).toBe(true);
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(true);
+  });
 
-    expect(writes.some((line) => line.includes("queued follow-up"))).toBe(true);
-    expect(writes.some((line) => line.includes("queued later"))).toBe(true);
-    const active = (
-      runner as unknown as {
-        active: Map<string, { deferredSends: Array<{ messageUuid?: string }>; sawResult: boolean }>;
-      }
-    ).active.get(session.id);
-    expect(active?.deferredSends).toEqual([]);
-    expect(active?.sawResult).toBe(false);
+  it("drainDeferredSends skipNext absorbs Stop re-entry past next tick", () => {
+    vi.useFakeTimers();
+    try {
+      const store = makeStore();
+      const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "skip drain window" });
+      store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+      const events: Array<Record<string, unknown>> = [];
+      const runner = new ClaudeCliRunner(store, {
+        onEvent: (event) => {
+          events.push(event);
+        },
+        onSessionUpdated: () => undefined,
+      });
+      const enqueue = vi.fn();
+      const sdk = plantSdk(runner, session.id, {
+        isRunning: true,
+        sawResult: false,
+        deferredSends: [
+          { text: "queued follow-up", request: {}, messageUuid: "q-follow" },
+        ],
+        input: { enqueue } as never,
+      });
+      const signal = (
+        runner as unknown as {
+          signalTurnCompleteSdk: (
+            sessionId: string,
+            sdk: CodeSdkActiveSession,
+            session: unknown,
+          ) => void;
+        }
+      ).signalTurnCompleteSdk.bind(runner);
+
+      signal(session.id, sdk, session);
+      expect(enqueue).toHaveBeenCalled();
+      expect(sdk.isRunning).toBe(true);
+      expect(store.getSession(session.id)?.isRunning).toBe(true);
+
+      // Same-turn Stop/result re-entry must not markNotRunning over follow-up.
+      vi.advanceTimersByTime(10);
+      signal(session.id, sdk, session);
+      expect(sdk.isRunning).toBe(true);
+      expect(store.getSession(session.id)?.isRunning).toBe(true);
+      expect(events.some((event) => event.type === "completed")).toBe(false);
+
+      // After drain window, real follow-up end may settle.
+      vi.advanceTimersByTime(300);
+      signal(session.id, sdk, session);
+      expect(sdk.isRunning).toBe(false);
+      expect(store.getSession(session.id)?.isRunning).toBe(false);
+      expect(events.some((event) => event.type === "completed")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stop() tears down warm SDK query", () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "go", cwd: "/tmp/proj", title: "stop residual" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const events: Array<Record<string, unknown>> = [];
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => undefined,
+    });
+    const sdk = plantSdk(runner, session.id, { isRunning: true, sawInit: true });
+    expect(runner.stop(session.id)).toBe(true);
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+    expect(events.some((event) => event.type === "stopped")).toBe(true);
+    // closeCodeSdkSession should have been invoked via query.close path when present
+    expect(sdk).toBeTruthy();
+  });
+
+  it("stopTask uses Query.stopTask and does not stop session", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "go", cwd: "/tmp/proj", title: "stop task" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const sdk = plantSdk(runner, session.id);
+    await expect(runner.stopTask(session.id, "task-1")).resolves.toEqual({ status: "informed" });
+    expect(sdk.query.stopTask).toHaveBeenCalledWith("task-1");
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(true);
     expect(store.getSession(session.id)?.isRunning).toBe(true);
   });
 
-  it("stop() then close code 143 does not emitError (user Esc residual)", () => {
+  it("pauseSession tears down warm query without FM error", () => {
     const store = makeStore();
-    const session = store.start({ prompt: "go", cwd: "/tmp/proj", title: "esc 143" });
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "idle pause" });
     store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
-
     const events: Array<Record<string, unknown>> = [];
     const runner = new ClaudeCliRunner(store, {
       onEvent: (event) => {
@@ -438,98 +521,39 @@ describe("ClaudeCliRunner Tasks residual", () => {
       },
       onSessionUpdated: () => undefined,
     });
-
-    const { child } = fakeChild(true);
-    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
-      child,
-      deferredSends: [
-        { text: "queued after multi-send", request: {}, messageUuid: "q-esc" },
-      ],
-      openStoppableTasks: new Set(),
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: false,
-      stderr: [],
-      sawAssistantText: true,
-    });
-
-    expect(runner.stop(session.id)).toBe(true);
-    expect((runner as unknown as { active: Map<string, unknown> }).active.has(session.id)).toBe(false);
-    expect(events.some((event) => event.type === "stopped")).toBe(true);
-
-    // Planted turns never registered spawn close; invoke settle like orphan close after SIGTERM.
-    (
-      runner as unknown as {
-        settleChildClose: (
-          sessionId: string,
-          child: object,
-          code: number | null,
-          signal: string | null,
-          spawnKind: string,
-          spawnLabel: string,
-        ) => void;
-      }
-    ).settleChildClose(session.id, child, 143, "SIGTERM", "claude-cli", "claude");
-
+    plantSdk(runner, session.id, { sawResult: true, isRunning: false });
+    expect(runner.pauseSession(session.id)).toBe(true);
     expect(
-      events.some(
-        (event) =>
-          event.type === "error"
-          && String(event.error ?? "").includes("exited with code 143"),
-      ),
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
     ).toBe(false);
+    expect(events.some((event) => event.type === "paused")).toBe(true);
     expect(events.some((event) => event.type === "error")).toBe(false);
     expect(store.getSession(session.id)?.isRunning).toBe(false);
-    const lastError = (store.getSession(session.id) as { lastError?: string } | undefined)?.lastError;
-    expect(lastError == null || !String(lastError).includes("exited with code 143")).toBe(true);
   });
 
-  it("orphan non-zero close still emitError when not user-stopped", () => {
+  it("setPermissionMode with warm query is informed", async () => {
     const store = makeStore();
-    const session = store.start({ prompt: "go", cwd: "/tmp/proj", title: "real crash" });
-    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
-
-    const events: Array<Record<string, unknown>> = [];
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "perm mode" });
     const runner = new ClaudeCliRunner(store, {
-      onEvent: (event) => {
-        events.push(event);
-      },
+      onEvent: () => undefined,
       onSessionUpdated: () => undefined,
     });
-
-    const { child } = fakeChild(true);
-    (runner as unknown as { active: Map<string, unknown> }).active.set(session.id, {
-      child,
-      deferredSends: [],
-      openStoppableTasks: new Set(),
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: false,
-      stderr: [],
-      sawAssistantText: true,
+    const sdk = plantSdk(runner, session.id);
+    await expect(runner.setPermissionMode(session.id, "acceptEdits")).resolves.toEqual({
+      status: "informed",
     });
+    expect(sdk.query.setPermissionMode).toHaveBeenCalled();
+  });
 
-    // Detach without stop (endInput drain residual) — real crash should still error.
-    (runner as unknown as { active: Map<string, unknown> }).active.delete(session.id);
-    (
-      runner as unknown as {
-        settleChildClose: (
-          sessionId: string,
-          child: object,
-          code: number | null,
-          signal: string | null,
-          spawnKind: string,
-          spawnLabel: string,
-        ) => void;
-      }
-    ).settleChildClose(session.id, child, 1, null, "claude-cli", "claude");
-
-    expect(
-      events.some(
-        (event) =>
-          event.type === "error"
-          && String(event.error ?? "").includes("exited with code 1"),
-      ),
-    ).toBe(true);
+  it("setPermissionMode without query is no_turn", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "perm no query" });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.setPermissionMode(session.id, "acceptEdits")).resolves.toEqual({
+      status: "no_turn",
+    });
   });
 });

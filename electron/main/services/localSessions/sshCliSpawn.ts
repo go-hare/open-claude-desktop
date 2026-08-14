@@ -2,11 +2,28 @@
  * Official LocalSessionManager SSH spawn residual (product host-pipe subset):
  *
  * Full official path (`configureSSHSpawn` + remote harness `createSpawnFunction` /
- * `ftA` RPC) runs Claude CLI *on the remote host* via a long-lived SSH controller.
+ * `htA` / RemoteServerController RPC) runs Claude CLI *on the remote host* via a
+ * long-lived SSH controller with:
+ *   - ensureReady + initialization_status steps
+ *   - auto-reconnect (RECONNECT_BACKOFF_IDLE / CAP)
+ *   - liveProcesses abandon on intentionalDisconnect
+ *   - createSpawnFunction over RPC (not local `ssh` binary argv)
  *
- * Product host-loop subset (no remote harness RPC required):
+ * Product host-pipe subset (no remote harness RPC — DO NOT invent controller):
  *   spawn("ssh", [...buildSshArgv, remoteShell]) where remoteShell is
  *   `cd <remoteCwd> && env … claude <args…>`
+ * Wired as Options.spawnClaudeCodeProcess so SDK Query stays warm multi-turn.
+ *
+ * Already residual-aligned on product:
+ *   - spawnClaudeCodeProcess host-pipe (this file)
+ *   - W7i.adjustSdkOptions pt("1496676413") plugins/mcp strip
+ *   - network_error → ssh_disconnected + query teardown
+ *   - initialization_status ssh_spawn / complete / error (host-pipe steps only)
+ *
+ * Explicitly NOT productized (needs remote harness):
+ *   - RemoteServerController auto-reconnect / ensureReady warm_up loops
+ *   - RPC createSpawnFunction / liveProcesses abandon
+ *   - full setupSshPluginsAndMcp coordinator
  *
  * Stdin/stdout remain NDJSON stream-json (same as local spawnClaude).
  * Transcript still lands on the remote host under ~/.claude/projects; getTranscript
@@ -19,6 +36,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import {
   buildSshArgv,
   shellQuote,
@@ -143,4 +161,35 @@ export function resolveSshRemoteCwd(session: {
   if (session.cwd && session.cwd.trim()) return session.cwd.trim();
   if (session.originCwd && session.originCwd.trim()) return session.originCwd.trim();
   return "~";
+}
+
+/**
+ * Official configureSSHSpawn → spawnClaudeCodeProcess residual (product host-pipe):
+ * ProcessTransport calls this instead of local spawn; remote CLI still speaks stream-json.
+ * Full official path uses long-lived SSH controller RPC (htA); product host-pipe is the
+ * residual subset that keeps Query warm multi-turn without inventing remote harness.
+ */
+export function createSshSpawnClaudeCodeProcess(input: {
+  sshConfig: SessionSshConfig;
+  remoteCwd: string;
+  /** Optional stderr capture (official createSpawnFunction wires stderr.on data). */
+  onStderr?: (chunk: string) => void;
+}): (options: SpawnOptions) => SpawnedProcess {
+  return (options) => {
+    const child = spawnClaudeOverSsh({
+      sshConfig: input.sshConfig,
+      remoteCwd: input.remoteCwd || options.cwd || "~",
+      args: options.args,
+      remoteExecutable: options.command || process.env.CLAUDE_SSH_REMOTE_EXECUTABLE || "claude",
+      hostEnv: options.env,
+      localCwd: process.cwd(),
+    });
+    if (input.onStderr) {
+      child.stderr.on("data", (chunk: Buffer | string) => {
+        input.onStderr?.(chunk.toString());
+      });
+    }
+    // ChildProcess satisfies SpawnedProcess (stdin/stdout + exit/error/kill).
+    return child as unknown as SpawnedProcess;
+  };
 }

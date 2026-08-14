@@ -108,6 +108,11 @@ export type LocalSession = {
   stopped?: boolean;
   sessionKind?: string;
   scheduledTaskId?: string;
+  /**
+   * Official dispatchParentOrigin residual ("local" | "remote").
+   * remote → handleToolPermission auto-denies tools that need UI approval.
+   */
+  dispatchParentOrigin?: "local" | "remote";
   lastActivityAt?: string;
   isRunning?: boolean;
   /**
@@ -126,6 +131,29 @@ export type LocalSession = {
   runtime?: LocalSessionRuntime;
   metadata?: Record<string, unknown>;
   pendingToolPermissions?: LocalToolPermissionRequest[];
+  /**
+   * Official LocalSessionManager.sessionPermissionUpdates residual:
+   * session-scoped allow rules / directories from "always" permission responses,
+   * replayed onto next Query options via replaySessionPermissions.
+   */
+  sessionPermissionUpdates?: Array<
+    | {
+        type: "addRules" | "replaceRules";
+        behavior: "allow" | "deny";
+        rules: Array<{ toolName: string; ruleContent?: string }>;
+        destination?: string;
+      }
+    | {
+        type: "addDirectories";
+        directories: string[];
+        destination?: string;
+      }
+  >;
+  /**
+   * Official alwaysAllowedReasons residual (Set on session, persisted as string[]).
+   * Keys: `${toolName}:${decisionReason}` after "always" permission responses.
+   */
+  alwaysAllowedReasons?: string[];
   /**
    * Official AutoArchiveEngine residual: session.prs[] with terminal states.
    * Product persists lightweight PR heads so sweep can archive without re-query
@@ -442,7 +470,22 @@ export class LocalSessionStore {
     } catch {
       this.sessions = new Map();
     }
+    // Process restart: no warm Query survives. Stale isRunning=true from a
+    // pre-crash mid-turn (or missed signalTurnComplete) would stick Stop/Esc
+    // forever. Clear host running flags on load — CLI jsonl remains SoT for text.
+    let clearedRunning = 0;
+    for (const session of this.sessions.values()) {
+      if (session.isRunning) {
+        session.isRunning = false;
+        session.runtime = {
+          ...(session.runtime ?? { kind: "local" }),
+          finishedAt: session.runtime?.finishedAt ?? nowIso(),
+        } as LocalSessionRuntime;
+        clearedRunning += 1;
+      }
+    }
     this.migrateStripContent();
+    if (clearedRunning > 0) this.saveNow();
   }
 
   /**
@@ -1186,6 +1229,104 @@ export class LocalSessionStore {
     const session = this.sessions.get(id);
     if (!session) return null;
     session.cliSessionId = cliSessionId;
+    session.updatedAt = nowIso();
+    this.save();
+    return session;
+  }
+
+  /**
+   * Official LocalSessionManager.clearStaleResumeHandle residual (app.asar):
+   *   A.cliSessionId=void 0, A.isFirstTurn=!1, … saveSession
+   * When CLI reports "No conversation found with session ID" (cli_resume_not_found),
+   * drop the unresumable handle so the next send starts a fresh conversation.
+   */
+  clearStaleResumeHandle(id: string): LocalSession | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if (!session.cliSessionId) return session;
+    session.cliSessionId = undefined;
+    session.updatedAt = nowIso();
+    this.save();
+    return session;
+  }
+
+  /**
+   * Official sessionPermissionUpdates push residual (destination:"session" allow rules).
+   * Dedupes by toolName\0ruleContent like app.asar handleToolPermission response path.
+   */
+  appendSessionPermissionAllowRule(
+    id: string,
+    toolName: string,
+    ruleContent?: string,
+  ): LocalSession | null {
+    const session = this.sessions.get(id);
+    if (!session || !toolName) return null;
+    const updates = session.sessionPermissionUpdates ?? [];
+    const key = `${toolName}\0${ruleContent ?? ""}`;
+    const seen = new Set(
+      updates
+        .filter((u) => u.type === "addRules" || u.type === "replaceRules")
+        .flatMap((u) =>
+          "rules" in u
+            ? u.rules.map((r) => `${r.toolName}\0${r.ruleContent ?? ""}`)
+            : [],
+        ),
+    );
+    if (seen.has(key)) return session;
+    updates.push({
+      type: "addRules",
+      behavior: "allow",
+      destination: "session",
+      rules: [{ toolName, ...(ruleContent ? { ruleContent } : {}) }],
+    });
+    session.sessionPermissionUpdates = updates;
+    session.updatedAt = nowIso();
+    this.save();
+    return session;
+  }
+
+  /**
+   * Official alwaysAllowedReasons.add(`${tool}:${decisionReason}`) residual.
+   */
+  addAlwaysAllowedReason(
+    id: string,
+    toolName: string,
+    decisionReason: string,
+  ): LocalSession | null {
+    const session = this.sessions.get(id);
+    if (!session || !toolName || !decisionReason) return null;
+    const key = `${toolName}:${decisionReason}`;
+    const list = session.alwaysAllowedReasons ?? [];
+    if (list.includes(key)) return session;
+    session.alwaysAllowedReasons = [...list, key];
+    session.updatedAt = nowIso();
+    this.save();
+    return session;
+  }
+
+  /**
+   * Official sessionPermissionUpdates addDirectories residual (destination session).
+   */
+  appendSessionPermissionDirectories(
+    id: string,
+    directories: string[],
+  ): LocalSession | null {
+    const session = this.sessions.get(id);
+    if (!session || directories.length === 0) return null;
+    const updates = session.sessionPermissionUpdates ?? [];
+    const existing = new Set(
+      updates
+        .filter((u) => u.type === "addDirectories")
+        .flatMap((u) => (u.type === "addDirectories" ? u.directories : [])),
+    );
+    const fresh = directories.filter((d) => d && !existing.has(d));
+    if (fresh.length === 0) return session;
+    updates.push({
+      type: "addDirectories",
+      destination: "session",
+      directories: fresh,
+    });
+    session.sessionPermissionUpdates = updates;
     session.updatedAt = nowIso();
     this.save();
     return session;

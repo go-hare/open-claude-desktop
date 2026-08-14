@@ -188,6 +188,12 @@ export function getLocalSessionRunner(context: IpcHandlerContext): ClaudeCliRunn
     // Official gi("bypassPermissionsModeEnabled") residual for spawn clamp.
     isBypassPermissionsModeEnabled: () =>
       context.settings.getPreferences().bypassPermissionsModeEnabled === true,
+    // Official vu.shouldAutoApprovePermission / addApprovedPermissions residual.
+    shouldAutoApproveScheduledPermission: (taskId, toolName, suggestions) =>
+      context.scheduledTasks.shouldAutoApprovePermission(taskId, toolName, suggestions),
+    addScheduledTaskApprovedPermissions: (taskId, suggestions) => {
+      context.scheduledTasks.addApprovedPermissions(taskId, suggestions);
+    },
   });
   runners.set(context, runner);
   return runner;

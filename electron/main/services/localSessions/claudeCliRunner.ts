@@ -23,15 +23,17 @@ import { resolveSshRemoteCwd, spawnClaudeOverSsh } from "./sshCliSpawn";
 import { getClaudePreviewCliMcpConfigCache, setClaudePreviewSessionCwd } from "../launch/claudePreviewHostRegistry";
 import { asMcpServerMap, toCliMcpConfigWire } from "./mcpConfigWire";
 import {
-  applyStoppableTaskBookendEvent,
-  canContinueActiveTurnOnStdin,
-  canDetachDrainedActiveTurn,
-  removeDeferredSendByUuid,
   resolveTurnPermissionMode,
-  shouldDeferMidStreamSend,
-  shouldEmitProcessExitError,
-  shouldEndStdinAfterResult,
+  shouldSignalTurnCompleteFromCliMessage,
 } from "./claudeCliTurnLifecycle";
+import {
+  buildCodeSdkUserMessage,
+  closeCodeSdkSession,
+  createCodeSdkActiveSession,
+  officialSessionDestinationSuggestions,
+  resolveCodeSdkPermission,
+  type CodeSdkActiveSession,
+} from "./codeSdkQuerySession";
 
 type RunnerCallbacks = {
   onEvent: (event: Record<string, unknown>) => void;
@@ -49,47 +51,30 @@ type RunnerCallbacks = {
    * Missing reader → treat as false (do not invent bypass enabled).
    */
   isBypassPermissionsModeEnabled?: () => boolean;
-};
-
-/** Official LocalSessionManager.deferredSends residual — mid-turn user lines. */
-type DeferredSend = {
-  text: string;
-  request: Record<string, unknown>;
-  messageUuid?: string;
-};
-
-type ActiveTurn = {
-  child: ChildProcessWithoutNullStreams;
-  /** Outer user uuid already written to CLI stdin for this turn (cancel too-late). */
-  activeUserUuid?: string;
   /**
-   * Official deferredSends (app.asar LocalSessionManager): when isRunning, push
-   * mid-turn user message and return; drain on signalTurnComplete / parent result.
-   * Official drainDeferredSends enqueues **all** deferred then stays running.
+   * Official vu.shouldAutoApprovePermission residual (ScheduledTaskStore).
    */
-  deferredSends: DeferredSend[];
-  pendingControlResponses: Map<string, PendingControlResponse>;
-  pendingPermissions: Map<string, LocalToolPermissionRequest>;
+  shouldAutoApproveScheduledPermission?: (
+    scheduledTaskId: string,
+    toolName: string,
+    suggestions: unknown,
+  ) => boolean;
   /**
-   * densable Tasks Stop residual: system task_started bookend task_ids only.
-   * Keeps child stdin open after parent `result` so stop_task control_request works
-   * while CLI is still in waiting_for_agents (bash/monitor/agent).
-   * dual-emit CLI closes these via system task_notification — do not track Agent tool_use ids.
+   * Official addApprovedPermissions residual after always on scheduled runs.
    */
-  openStoppableTasks: Set<string>;
-  /** Parent stream-json `result` already seen — may still hold stdin for workers. */
-  sawResult: boolean;
-  stderr: string[];
-  sawAssistantText: boolean;
-};
-
-type PendingControlResponse = {
-  resolve: (value: unknown | null) => void;
-  timer: ReturnType<typeof setTimeout>;
+  addScheduledTaskApprovedPermissions?: (
+    scheduledTaskId: string,
+    suggestions: unknown,
+  ) => void;
 };
 
 type ToolPermissionDecision = "always" | "deny" | "once";
 const CONTROL_REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * Official LocalSessionManager `kkA=1500` residual — interruptSession races
+ * query.interrupt() against this timeout; general control_request stays 15s.
+ */
+const OFFICIAL_INTERRUPT_TIMEOUT_MS = 1_500;
 /** CLI residual `MODEL_CONTEXT_WINDOW_DEFAULT` (claude-code-bin context.ts). */
 const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000;
 /** Official / CLI model tags like `claude-sonnet-4-5[1m]` or `[200k]`. */
@@ -844,41 +829,66 @@ async function contextUsageFromStoredSession(store: LocalSessionStore, session: 
   }, [init?.model, session.model]);
 }
 
+/** Official jer residual: Session IdleManager default idleTimeoutMs = 900*1000 (15 min). */
+const OFFICIAL_SESSION_IDLE_TIMEOUT_MS = 900_000;
+
+type SessionIdleState = {
+  idleTimeoutId?: ReturnType<typeof setTimeout>;
+  isTabVisible: boolean;
+  hasPendingResult: boolean;
+  lastResultTime: number | null;
+  warmInFlight?: Promise<boolean>;
+};
+
 export class ClaudeCliRunner {
-  private readonly active = new Map<string, ActiveTurn>();
   /**
-   * densable stop residual: stop() SIGTERM-kills the process group before close.
-   * Track intentional user-stop children so close code 143 does not emitError
-   * (official interrupt settles clean; user Esc is not FM failure).
-   * WeakSet so GC can drop after child exits even if we forget to clear.
+   * Official LocalSessionManager query residual (app.asar bD + fJ):
+   * SDK Query + AsyncIterable input — product path only (no densable print path).
    */
-  private readonly userStoppedChildren = new WeakSet<object>();
+  private readonly sdkSessions = new Map<string, CodeSdkActiveSession>();
+  /**
+   * Official Session IdleManager residual (VDe / jer=900s):
+   * after turn complete, if tab not visible → start idle timeout → pauseSession
+   * (teardown query, keep host session). Focus/message clears timeout; focus warms.
+   */
+  private readonly idleBySession = new Map<string, SessionIdleState>();
+  /**
+   * Official cli_resume_not_found recovery: after clearStaleResumeHandle, retry the
+   * same user send once on a fresh Query (no resume). Cleared on sawInit / success.
+   */
+  private readonly pendingResumeRetry = new Map<
+    string,
+    { messageUuid?: string; request: Record<string, unknown>; text: string }
+  >();
 
   constructor(private readonly store: LocalSessionStore, private readonly callbacks: RunnerCallbacks) {}
 
   async getContextUsage(sessionId: string): Promise<unknown | null> {
-    const activeTurn = this.active.get(sessionId);
     const session = this.store.getSession(sessionId);
     const transcript = session ? await this.store.getTranscript(session.id) : [];
     const modelHints = [latestInitEvent(transcript)?.model, session?.model];
     const storedUsage = session ? await contextUsageFromStoredSession(this.store, session) : null;
-    if (activeTurn) {
-      // Prefer live CLI collectContextData (full categories + Free space residual).
-      const liveUsage = await this.sendControlRequest(activeTurn, { subtype: "get_context_usage" });
-      return enrichContextUsage(liveUsage, modelHints) ?? storedUsage;
+    // Official: Query.getContextUsage / warm control — not a throwaway --resume probe.
+    if (!this.sdkSessions.has(sessionId) && session?.cliSessionId) {
+      await this.warmSession(sessionId);
     }
-
-    if (!session?.cliSessionId) return storedUsage;
-    // Do not short-circuit on coarse stored usage — previously storedUsage without Free
-    // space / rawMax blocked the probe, so the Ku bar filled 100% used-only.
-    const liveUsage = await this.runControlRequestProbe(session, { subtype: "get_context_usage" });
-    return enrichContextUsage(liveUsage, modelHints) ?? storedUsage;
+    // Official SDK Query residual (app.asar / agent-sdk Query.getContextUsage).
+    const sdk = this.sdkSessions.get(sessionId);
+    if (sdk) {
+      try {
+        const liveUsage = await sdk.query.getContextUsage();
+        return enrichContextUsage(liveUsage as unknown, modelHints) ?? storedUsage;
+      } catch {
+        return storedUsage;
+      }
+    }
+    return storedUsage;
   }
 
   /**
    * Official get_settings → applied effort — the runtime truth for the Effort
-   * slider / Ultracode footer chip. Active turn via sendControlRequest; cold
-   * sessions resume via runControlRequestProbe (same pattern as getContextUsage).
+   * slider / Ultracode footer chip. Warm Query via getSettings; cold sessions
+   * fall back to host store + catalog probe.
    * Returns the full applied bag (effort / effortLevels / ultracodeOfferable) or
    * null when the CLI cannot report — host store is the fallback at the handler.
    */
@@ -887,16 +897,46 @@ export class ClaudeCliRunner {
     effortLevels: string[] | null;
     ultracodeOfferable: boolean | null;
   } | null> {
-    const activeTurn = this.active.get(sessionId);
     const session = this.store.getSession(sessionId);
-    let response: unknown | null = null;
-    if (activeTurn) {
-      response = await this.sendControlRequest(activeTurn, { subtype: "get_settings" });
-    } else if (session?.cliSessionId) {
-      response = await this.runControlRequestProbe(session, { subtype: "get_settings" });
+    // Prefer warm query (official). Cold --resume probe races follow-up send.
+    if (!this.sdkSessions.has(sessionId) && session?.cliSessionId) {
+      await this.warmSession(sessionId);
     }
-    if (response == null) return null;
-    return parseAppliedEffortBag(response);
+    // Official Query.getSettings residual (app.asar / agent-sdk Query.getSettings →
+    // control subtype get_settings). Types may omit it; runtime SDK has the method.
+    const sdk = this.sdkSessions.get(sessionId);
+    if (sdk) {
+      try {
+        const queryWithSettings = sdk.query as CodeSdkActiveSession["query"] & {
+          getSettings?: () => Promise<unknown>;
+        };
+        if (typeof queryWithSettings.getSettings === "function") {
+          const response = await queryWithSettings.getSettings();
+          const parsed = parseAppliedEffortBag(response);
+          // Fill ladder from catalog probe only when get_settings omits effortLevels.
+          if (!parsed.effortLevels || parsed.ultracodeOfferable == null) {
+            const catalog = await this.probeCatalogEffortDefaults(session?.model).catch(() => null);
+            return {
+              effort: parsed.effort
+                ?? (normalizeEffort(session?.effort) ? session!.effort! : catalog?.effort ?? null),
+              effortLevels: parsed.effortLevels ?? catalog?.effortLevels ?? null,
+              ultracodeOfferable: parsed.ultracodeOfferable ?? catalog?.ultracodeOfferable ?? null,
+            };
+          }
+          return parsed;
+        }
+      } catch {
+        /* fall through to store + catalog */
+      }
+      const catalog = await this.probeCatalogEffortDefaults(session?.model).catch(() => null);
+      const effort = normalizeEffort(session?.effort) ? session!.effort! : catalog?.effort ?? null;
+      return {
+        effort,
+        effortLevels: catalog?.effortLevels ?? null,
+        ultracodeOfferable: catalog?.ultracodeOfferable ?? null,
+      };
+    }
+    return null;
   }
 
   /**
@@ -1022,8 +1062,6 @@ export class ClaudeCliRunner {
       return false;
     }
 
-    // Prefer explicit request.messageUuid (web createMessageUuid / start seed). Fall back to
-    // the live-tail user seed uuid so CLI echo shares identity when home start omitted it.
     const requestUuid = stringValue(request.messageUuid) ?? stringValue(request.uuid);
     const seededUuid = (() => {
       if (requestUuid) return requestUuid;
@@ -1040,211 +1078,13 @@ export class ClaudeCliRunner {
       return undefined;
     })();
 
-    // densable multi-turn residual: parent result may clear isRunning while CLI still
-    // holds the same stdin for open bookends / waiting_for_agents. Next user line must
-    // continue on that stdin — not spawn a second child.
-    // Official sendMessage: if isRunning → deferredSends.push (no already_running error).
-    const existingTurn = this.active.get(sessionId);
-    if (existingTurn) {
-      const canContinue = canContinueActiveTurnOnStdin({
-        sawResult: existingTurn.sawResult,
-        stdinDestroyed: existingTurn.child.stdin.destroyed,
-        stdinWritableEnded: existingTurn.child.stdin.writableEnded,
-      });
-      const canDetach = canDetachDrainedActiveTurn({
-        sawResult: existingTurn.sawResult,
-        openStoppableTaskCount: existingTurn.openStoppableTasks.size,
-        stdinDestroyed: existingTurn.child.stdin.destroyed,
-        stdinWritableEnded: existingTurn.child.stdin.writableEnded,
-      });
-      if (canContinue) {
-        return this.continueActiveTurn(sessionId, existingTurn, text, request, seededUuid);
-      }
-      // Official mid-stream queue residual (isRunning → deferredSends).
-      if (
-        shouldDeferMidStreamSend({
-          hasActiveTurn: true,
-          canContinueOnStdin: canContinue,
-          canDetachDrained: canDetach,
-        })
-      ) {
-        existingTurn.deferredSends.push({
-          text,
-          request: { ...request },
-          messageUuid: seededUuid,
-        });
-        // Web already painted optimistic Hb isQueued; host only holds drain payload.
-        return true;
-      }
-      // Stdin already ended after result (no open bookends) but close not yet fired —
-      // detach so a fresh spawn can start. close handler is idempotent.
-      if (canDetach) {
-        this.clearPendingControlResponses(existingTurn);
-        this.clearPendingPermissions(sessionId, existingTurn);
-        if (this.active.get(sessionId) === existingTurn) this.active.delete(sessionId);
-      } else {
-        // No active path left (should be unreachable when hasActiveTurn) — keep refuse.
-        this.emitError(sessionId, "claude_session_already_running");
-        return false;
-      }
-    }
+    // Official idleManager.onMessageSent: clear pause timer; warm multi-turn stays up.
+    this.onIdleMessageSent(sessionId);
 
-    const executable = defaultClaudeExecutable();
-    const forkSourceCliSessionId = stringValue(asRecord(session.metadata).forkedFromCliSessionId);
-    const hadCliSession = Boolean(session.cliSessionId);
-    const shouldForkFromSource = !hadCliSession && Boolean(forkSourceCliSessionId);
-    const cliSessionId = session.cliSessionId ?? forkSourceCliSessionId ?? randomUUID();
-    if (!session.cliSessionId && !shouldForkFromSource) this.store.setCliSessionId(sessionId, cliSessionId);
-    // Official KOi sessionCwd residual for Claude Preview MCP tools.
-    setClaudePreviewSessionCwd(resolveCwd(session));
-    const args = buildClaudeArgs(
-      { ...session, cliSessionId },
-      request,
-      cliSessionId,
-      hadCliSession || shouldForkFromSource,
-      shouldForkFromSource,
-      {
-        bypassPermissionsModeEnabled:
-          this.callbacks.isBypassPermissionsModeEnabled?.() === true,
-      },
-    );
-
-    const spawnKind = session.sshConfig ? "claude-cli-ssh" : "claude-cli";
-    const spawnLabel = session.sshConfig
-      ? `ssh://${session.sshConfig.host}:${resolveSshRemoteCwd(session)}`
-      : executable;
-
-    this.store.setRunning(sessionId, true, {
-      kind: spawnKind,
-      executable: spawnLabel,
-      startedAt: nowIso(),
-      lastError: undefined,
-      lastExitCode: null,
-    });
-    this.callbacks.onSessionUpdated(sessionId);
-
-    let child: ChildProcessWithoutNullStreams;
-    try {
-      child = await spawnClaudeForSession(
-        session,
-        executable,
-        args,
-        resolveCwd(session),
-      );
-      child.stdin.write(
-        userInputLine(
-          promptWithSelectedFiles(text, request.userSelectedFiles),
-          seededUuid,
-          request.images,
-        ),
-      );
-    } catch (error) {
-      this.finishWithError(sessionId, spawnLabel, error);
-      return false;
-    }
-
-    const turn: ActiveTurn = {
-      activeUserUuid: seededUuid,
-      child,
-      deferredSends: [],
-      openStoppableTasks: new Set(),
-      pendingControlResponses: new Map(),
-      pendingPermissions: new Map(),
-      sawResult: false,
-      stderr: [],
-      sawAssistantText: false,
-    };
-    this.active.set(sessionId, turn);
-
-    const stdout = readline.createInterface({ input: child.stdout });
-    stdout.on("line", (line) => this.handleStdoutLine(sessionId, line));
-    child.stderr.on("data", (data: Buffer) => {
-      turn.stderr.push(data.toString("utf8"));
-      if (turn.stderr.join("").length > 16_000) turn.stderr = [turn.stderr.join("").slice(-16_000)];
-    });
-    child.on("error", (error) => {
-      // Only if this child is still the active turn (may have been detached after endInput).
-      if (this.active.get(sessionId)?.child === child) {
-        this.finishWithError(sessionId, spawnLabel, error);
-      }
-    });
-    child.on("close", (code, signal) => {
-      stdout.close();
-      this.settleChildClose(sessionId, child, code, signal, spawnKind, spawnLabel);
-    });
-
-    return true;
+    // Official CCD sendMessage: SDK Query only (bD + fJ). No densable print path.
+    return this.runTurnViaSdkQuery(sessionId, session, text, request, seededUuid);
   }
 
-  /**
-   * Child process close settle (spawn close handler + unit-test entry).
-   * User stop marks child in userStoppedChildren before active.delete; non-zero
-   * SIGTERM 143 must not emitError (official interrupt residual).
-   */
-  private settleChildClose(
-    sessionId: string,
-    child: ChildProcessWithoutNullStreams,
-    code: number | null,
-    signal: NodeJS.Signals | null,
-    spawnKind: string,
-    spawnLabel: string,
-  ): void {
-    const current = this.active.get(sessionId);
-    // After endInput detach / stop(), a newer turn may already own active.
-    // Only settle when this closing child is still the mapped turn.
-    const ownsActive = current?.child === child;
-    // stop() marks child before active.delete; orphan close must still honor it.
-    const userStopped = this.userStoppedChildren.has(child);
-    const emitExitError = shouldEmitProcessExitError({ exitCode: code, userStopped });
-    if (ownsActive && current) {
-      this.active.delete(sessionId);
-      this.clearPendingControlResponses(current);
-      this.clearPendingPermissions(sessionId, current);
-      // Process gone: any still-open task_started bookends will never get CLI
-      // task_notification. Emit host residual stopped so Tasks pane leaves Running.
-      // (stop() may already have emitted host-exit and cleared the set.)
-      if (current.openStoppableTasks.size > 0) {
-        this.emitHostStoppedBookends(sessionId, [...current.openStoppableTasks], "Process exited");
-        current.openStoppableTasks.clear();
-      }
-      const stderr = current.stderr.join("").trim();
-      // User Esc/stop → SIGTERM 143: settle without FM error (official interrupt residual).
-      if (emitExitError) this.emitError(sessionId, stderr || `claude exited with code ${code}`);
-      this.store.setRunning(sessionId, false, {
-        kind: spawnKind,
-        executable: spawnLabel,
-        lastExitCode: code,
-        lastError: emitExitError ? (stderr || `claude exited with code ${code}`) : undefined,
-        finishedAt: nowIso(),
-      });
-      this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
-      this.callbacks.onSessionUpdated(sessionId);
-      return;
-    }
-    // Detached drain / post-stop orphan: process exited after we released active.
-    // Do not clobber a newer turn's isRunning or delete its active entry.
-    // User-stop 143 must not emitError — that was the Esc dual-banner bug.
-    if (emitExitError) {
-      const stderr = current?.child === child ? current.stderr.join("").trim() : "";
-      // Only surface orphan exit errors when no newer turn is live.
-      if (!this.active.has(sessionId)) {
-        this.emitError(sessionId, stderr || `claude exited with code ${code}`);
-        this.store.setRunning(sessionId, false, {
-          kind: spawnKind,
-          executable: spawnLabel,
-          lastExitCode: code,
-          lastError: stderr || `claude exited with code ${code}`,
-          finishedAt: nowIso(),
-        });
-        this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
-        this.callbacks.onSessionUpdated(sessionId);
-      }
-    } else if (userStopped && !this.active.has(sessionId)) {
-      // Intentional stop already emitted type:"stopped"; optional completed for listeners.
-      this.callbacks.onEvent({ type: "completed", sessionId, code, signal });
-      this.callbacks.onSessionUpdated(sessionId);
-    }
-  }
 
   /**
    * Official LocalSessionManager.cancelQueuedMessage residual (app.asar):
@@ -1254,21 +1094,17 @@ export class ClaudeCliRunner {
    *   else query.cancelAsyncMessage(uuid)
    *   on success: splice messageBuffer by uuid
    *
-   * densable print CLI: deferredSends first; then live-tail optimistic rows that
-   * were never the active stdin prompt. Active-turn uuid is too-late → false.
+   * SDK deferredSends first; then live-tail optimistic rows.
    */
   cancelQueuedMessage(sessionId: string, messageUuid: string): boolean {
     const uuid = typeof messageUuid === "string" ? messageUuid.trim() : "";
     if (!sessionId || !uuid) return false;
-    const turn = this.active.get(sessionId);
-    if (turn?.activeUserUuid === uuid) {
-      // Already on stdin — official cancelAsyncMessage path not available on print CLI.
-      return false;
-    }
-    if (turn) {
-      const { removed, next } = removeDeferredSendByUuid(turn.deferredSends, uuid);
-      if (removed) {
-        turn.deferredSends = next;
+    const sdk = this.sdkSessions.get(sessionId);
+    if (sdk) {
+      // Official: deferredSends splice by uuid first.
+      const idx = sdk.deferredSends.findIndex((item) => item.messageUuid === uuid);
+      if (idx >= 0) {
+        sdk.deferredSends.splice(idx, 1);
         const liveRemoved = this.store.removeLiveEventByUuid(sessionId, uuid);
         if (liveRemoved) this.callbacks.onSessionUpdated(sessionId);
         return true;
@@ -1281,79 +1117,184 @@ export class ClaudeCliRunner {
 
   /**
    * Official LocalSessionManager.interruptSession residual (app.asar):
-   *   query.interrupt() → signalTurnComplete → drainDeferredSends (stay running).
-   *   no query / timeout / fail → stopSession teardown.
-   *
-   * densable print CLI has no SDK Query.interrupt: send
-   * `control_request { subtype: "interrupt" }` (print.ts aborts the current
-   * turn, does not close stdin / end_session). Keep deferredSends. Parent
-   * `result` drains all deferred via drainDeferredSends (official enqueue-all).
-   *
-   * Returns `{ continued: true }` when the process stays up (official success).
-   * Returns `{ continued: false }` after hard `stop()` fallback.
+   *   no query → stopSession
+   *   race(query.interrupt, kkA=1500) → timeout/fail → stopSession
+   *   success → signalTurnComplete (drainDeferredSends if any else markNotRunning+idle)
    */
   async interrupt(sessionId: string): Promise<{ continued: boolean }> {
-    const turn = this.active.get(sessionId);
-    if (!turn) {
+    const sdk = this.sdkSessions.get(sessionId);
+    if (!sdk) {
       this.stop(sessionId);
       return { continued: false };
     }
-    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
+    // Official: pre system/init → no ready query → stopSession.
+    if (!sdk.sawInit) {
       this.stop(sessionId);
       return { continued: false };
     }
-    const response = await this.sendControlRequest(turn, { subtype: "interrupt" });
-    if (response === null) {
-      // Official interrupt timeout / fail → stopSession.
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Official: Promise.race([query.interrupt().then(()=>!1), setTimeout(kkA→true)])
+      const timedOut = await Promise.race([
+        sdk.query.interrupt().then(() => false as const),
+        new Promise<true>((resolve) => {
+          timeoutId = setTimeout(() => resolve(true), OFFICIAL_INTERRUPT_TIMEOUT_MS);
+          timeoutId.unref?.();
+        }),
+      ]);
+      if (timedOut) {
+        this.stop(sessionId);
+        return { continued: false };
+      }
+      // Official interruptSession success: signalTurnComplete only.
+      // clearPendingPermissions is teardownQuery residual (stopSession), not interrupt.
+      // KwA in asar is health="healthy", not permission teardown.
+      this.signalTurnCompleteSdk(
+        sessionId,
+        sdk,
+        this.store.getSession(sessionId),
+      );
+      return { continued: true };
+    } catch {
       this.stop(sessionId);
       return { continued: false };
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
-    // Official signalTurnComplete: drain happens on the interrupt `result`
-    // (enqueue all deferred). Do not SIGTERM, delete active, setRunning false,
-    // or drop deferredSends.
-    return { continued: true };
+  }
+
+  /**
+   * Official LocalSessionManager.signalTurnComplete residual (app.asar):
+   *   if (drainDeferredSends) { session_updated; return }
+   *   markNotRunning + idleManager.onTurnComplete + session_updated
+   * Keep warm Query; never teardown on this path.
+   *
+   * Call sites (official): interruptSession success + Stop hook.
+   * Product also routes parent `result` here — same host state; must be idempotent
+   * across interrupt + Stop + result for one completed turn.
+   */
+  private signalTurnCompleteSdk(
+    sessionId: string,
+    sdk: CodeSdkActiveSession,
+    session: LocalSession | undefined,
+  ): void {
+    // After drain, interrupt+Stop/result may re-enter while follow-up isRunning.
+    if (sdk.skipNextSignalTurnComplete) {
+      sdk.skipNextSignalTurnComplete = false;
+      return;
+    }
+    // Official drainDeferredSends:
+    //   const t = deferredSends; deferredSends = void 0
+    //   for (const n of t) inputStream.enqueue(n)
+    //   isRunning = true
+    // Enqueue ALL at once — do not re-enter runTurnViaSdkQuery (would re-defer #2+).
+    if (sdk.deferredSends.length > 0) {
+      const queued = sdk.deferredSends.splice(0);
+      const live = this.store.getSession(sessionId) ?? session;
+      if (!live) {
+        sdk.isRunning = false;
+        sdk.sawResult = true;
+        this.store.setRunning(
+          sessionId,
+          false,
+          { kind: "claude-cli" },
+          { preserveLiveBuffer: true },
+        );
+        this.callbacks.onSessionUpdated(sessionId);
+        return;
+      }
+      sdk.isRunning = true;
+      sdk.sawResult = false;
+      this.store.setRunning(sessionId, true, {
+        kind: "claude-cli",
+        executable: "sdk-query",
+        startedAt: nowIso(),
+        lastError: undefined,
+        lastExitCode: null,
+      });
+      for (const next of queued) {
+        const userMessage = buildCodeSdkUserMessage(
+          promptWithSelectedFiles(next.text, next.request.userSelectedFiles),
+          next.messageUuid,
+          next.request.images,
+        );
+        this.store.appendTranscriptEvent(sessionId, {
+          type: "user",
+          uuid: userMessage.uuid,
+          message: userMessage.message,
+          sessionId,
+          timestamp: nowIso(),
+        });
+        this.callbacks.onEvent({
+          type: "message",
+          sessionId,
+          message: {
+            type: "user",
+            uuid: userMessage.uuid,
+            message: userMessage.message,
+            sessionId,
+          },
+        });
+        sdk.input.enqueue(userMessage);
+      }
+      // Absorb same-turn re-entry (Stop/result after interrupt drain). Official may
+      // fire interruptSession + createBaseHooks Stop + residual end_turn settle for
+      // the *interrupted* turn after deferred enqueue. setTimeout(0) was too narrow:
+      // async Stop re-entry after the next tick markNotRunning'd over the follow-up
+      // (queued users already painted, assistant never completed). Keep a short
+      // drain window; real follow-up end_turn arrives seconds later.
+      sdk.skipNextSignalTurnComplete = true;
+      const clearSkip = setTimeout(() => {
+        const active = this.sdkSessions.get(sessionId);
+        if (active === sdk && active.skipNextSignalTurnComplete) {
+          active.skipNextSignalTurnComplete = false;
+        }
+      }, 250);
+      clearSkip.unref?.();
+      this.callbacks.onSessionUpdated(sessionId);
+      return;
+    }
+    // Official markNotRunning — keep query; clear host isRunning only.
+    // Emit type:"completed" so localSessionRunner queryCompleted residual
+    // (idle OS notification) fires for warm Esc interrupt / result settle.
+    // Deferred-drain branch above must NOT emit completed (still running).
+    //
+    // Critical residual: handleSdkMessage sets active.isRunning=false on
+    // type:result *before* onEvent → this method. Early-returning solely on
+    // !sdk.isRunning left store.isRunning stuck true (Stop/Esc pill). Always
+    // sync host store when still running; skip only completed emit when already settled.
+    const hostStillRunning = this.store.getSession(sessionId)?.isRunning === true;
+    if (!sdk.isRunning && !hostStillRunning) {
+      this.callbacks.onSessionUpdated(sessionId);
+      return;
+    }
+    sdk.sawResult = true;
+    sdk.isRunning = false;
+    if (hostStillRunning) {
+      this.store.setRunning(
+        sessionId,
+        false,
+        { kind: "claude-cli" },
+        { preserveLiveBuffer: true },
+      );
+      this.onIdleTurnComplete(sessionId);
+      this.callbacks.onEvent({ type: "completed", sessionId });
+    }
+    this.callbacks.onSessionUpdated(sessionId);
   }
 
   stop(sessionId: string): boolean {
-    const turn = this.active.get(sessionId);
-    // Always clear store running/pending even if the child already exited —
-    // otherwise the composer stays in isResponding forever (stuck stop button).
-    this.clearPendingPermissions(sessionId, turn);
-    this.clearPendingControlResponses(turn);
-    if (turn) {
-      // Official stopSession teardown: drop deferred mid-turn lines.
-      // Esc uses interrupt() and keeps deferredSends for drain-after-result.
-      turn.deferredSends = [];
-      // Mark before kill/delete so async close (code 143) skips emitError.
-      this.userStoppedChildren.add(turn.child);
-      // Process will never dual-emit task_notification after SIGTERM. Emit host-exit-*
-      // **before** active.delete — otherwise close sees no turn and Tasks stay Running.
-      if (turn.openStoppableTasks.size > 0) {
-        this.emitHostStoppedBookends(sessionId, [...turn.openStoppableTasks], "Process exited");
-        turn.openStoppableTasks.clear();
-      }
-      try {
-        if (!turn.child.killed) {
-          // Prefer tree-kill style: SIGTERM the process group when possible.
-          if (typeof turn.child.pid === "number" && turn.child.pid > 0) {
-            try {
-              process.kill(-turn.child.pid, "SIGTERM");
-            } catch {
-              turn.child.kill("SIGTERM");
-            }
-          } else {
-            turn.child.kill("SIGTERM");
-          }
-        }
-      } catch {
-        try { turn.child.kill("SIGKILL"); } catch { /* ignore */ }
-      }
-      // If close is slow/missed, still drop active so a new turn can start.
-      // close handler is idempotent via this.active.get checks.
-      if (this.active.get(sessionId) === turn) {
-        this.active.delete(sessionId);
-      }
+    // Official stopSession → teardownQuery:
+    //   clearPendingPermissions(sessionId); query.close()
+    // closeCodeSdkSession clears SDK waiters; host store cards clear here.
+    const sdk = this.sdkSessions.get(sessionId);
+    if (sdk) {
+      closeCodeSdkSession(sdk);
+      this.sdkSessions.delete(sessionId);
+      this.clearIdleTimeout(sessionId);
     }
+    this.store.clearPendingToolPermissions(sessionId);
+    // Always clear host running so composer stopOnce settles.
     this.store.setRunning(sessionId, false, { kind: "claude-cli", finishedAt: nowIso() });
     this.callbacks.onEvent({ type: "stopped", sessionId });
     this.callbacks.onSessionUpdated(sessionId);
@@ -1361,18 +1302,8 @@ export class ClaudeCliRunner {
   }
 
   /**
-   * Official densable Host Tasks Stop (ion Xr + Query.stopTask):
-   *   control_request { subtype: "stop_task", task_id } only.
-   * → CLI kills that background task and dual-emits system/task_notification(stopped).
+   * Official Host Tasks Stop (ion Xr + Query.stopTask residual).
    * Must NOT call session stop().
-   *
-   * Do **not** invent host-stop transcript bookends here (product residual removed):
-   * - Web Xr residual: echoPending(system/task_notification stopped) on informed success.
-   * - Durable bookend + openStoppableTasks close: CLI dual-emit on stdout → stream
-   *   handler applyStoppableTaskBookendEvent → tryEndStdinAfterGates.
-   * Process-exit-only residual remains emitHostStoppedBookends (host-exit-*).
-   *
-   * Active print turn ≈ session.query; without a live stdin we cannot inform CLI.
    */
   async stopTask(
     sessionId: string,
@@ -1382,97 +1313,113 @@ export class ClaudeCliRunner {
     if (!sessionId || !id) {
       return { status: "failed", error: "sessionId and taskId are required" };
     }
-    const turn = this.active.get(sessionId);
-    if (!turn) return { status: "no_turn" };
-    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
-      return { status: "failed", error: "CLI stdin closed" };
+    const sdk = this.sdkSessions.get(sessionId);
+    if (!sdk) return { status: "no_turn" };
+    try {
+      await sdk.query.stopTask(id);
+      return { status: "informed" };
+    } catch (error) {
+      return {
+        status: "failed",
+        error: error instanceof Error ? error.message : "stopTask failed",
+      };
     }
-    const response = await this.sendControlRequest(turn, {
-      subtype: "stop_task",
-      task_id: id,
-    });
-    // handleControlResponse resolves success payload (often {}) or null on error/timeout.
-    if (response === null) {
-      return { status: "failed", error: "stop_task control_request failed or timed out" };
-    }
-    // densable: informed only. Leave openStoppableTasks until CLI task_notification
-    // (or process-exit host-exit residual) so endInput stays gated correctly.
-    return { status: "informed" };
   }
 
   findSessionIdForPermission(requestId: string): string | null {
-    for (const [sessionId, turn] of this.active) {
-      if (turn.pendingPermissions.has(requestId)) return sessionId;
+    for (const [sessionId, sdk] of this.sdkSessions) {
+      if (sdk.pendingPermissions.has(requestId)) return sessionId;
     }
     for (const session of this.store.getAll(true)) {
-      if (session.pendingToolPermissions?.some((request) => request.requestId === requestId)) return session.id;
+      if (session.pendingToolPermissions?.some((request) => request.requestId === requestId)) {
+        return session.id;
+      }
     }
     return null;
   }
 
-  respondToToolPermission(sessionId: string, requestId: string, decision: ToolPermissionDecision, updatedInput?: unknown): Record<string, unknown> {
-    // Resolve the live turn by requestId first — sessionId from the UI/store can lag or
-    // disagree with the active map key, which previously surfaced as no_active_turn while
-    // the CLI was still waiting on stdin for control_response.
-    let resolvedSessionId = sessionId;
-    let turn = this.active.get(sessionId);
-    if (!turn?.pendingPermissions.has(requestId)) {
-      for (const [id, activeTurn] of this.active) {
-        if (activeTurn.pendingPermissions.has(requestId)) {
-          turn = activeTurn;
-          resolvedSessionId = id;
-          break;
+  respondToToolPermission(
+    sessionId: string,
+    requestId: string,
+    decision: ToolPermissionDecision,
+    updatedInput?: unknown,
+  ): Record<string, unknown> {
+    // Official canUseTool residual (SDK Query path only).
+    for (const [id, sdk] of this.sdkSessions) {
+      if (sdk.pendingPermissions.has(requestId) || id === sessionId) {
+        const waiter = sdk.pendingPermissions.get(requestId);
+        const ok = resolveCodeSdkPermission(sdk, requestId, decision, updatedInput);
+        if (ok) {
+          if (decision === "always" && waiter?.pending.toolName) {
+            this.store.appendSessionPermissionAllowRule(id, waiter.pending.toolName);
+            const reason =
+              waiter.pending.decisionReason
+              ?? stringValue(asRecord(updatedInput).decisionReason)
+              ?? stringValue(asRecord(updatedInput).decision_reason);
+            if (reason) {
+              this.store.addAlwaysAllowedReason(id, waiter.pending.toolName, reason);
+            }
+            const applied = officialSessionDestinationSuggestions(waiter.pending.suggestions);
+            if (applied.directories.length > 0) {
+              this.store.appendSessionPermissionDirectories(id, applied.directories);
+            }
+            for (const rule of applied.rules) {
+              this.store.appendSessionPermissionAllowRule(
+                id,
+                rule.toolName,
+                rule.ruleContent,
+              );
+            }
+            if (applied.setMode) {
+              const mode = normalizePermissionMode(applied.setMode);
+              if (mode) {
+                void this.setPermissionMode(id, mode);
+              }
+            }
+            const sess = this.store.getSession(id);
+            if (
+              sess?.scheduledTaskId
+              && !waiter.pending.toolName.startsWith("browser:")
+              && !waiter.pending.toolName.startsWith("computer:")
+            ) {
+              this.callbacks.addScheduledTaskApprovedPermissions?.(
+                sess.scheduledTaskId,
+                waiter.pending.suggestions,
+              );
+            }
+          }
+          if (decision === "once" && waiter?.pending.toolName === "ExitPlanMode") {
+            const toolInput = stripBridgePermissionFields(updatedInput);
+            const target = stringValue(asRecord(toolInput)._targetMode);
+            const mode =
+              target === "acceptEdits"
+              || target === "auto"
+              || target === "bypassPermissions"
+              || target === "default"
+                ? target
+                : "default";
+            const normalized = normalizePermissionMode(mode);
+            if (normalized) {
+              const current = this.store.getSession(id);
+              if (current && current.permissionMode !== normalized) {
+                this.store.update(id, { permissionMode: normalized });
+              }
+            }
+          }
+          this.store.clearPendingToolPermission(id, requestId);
+          this.callbacks.onPermissionAttentionStop?.();
+          this.callbacks.onEvent({
+            type: "tool_permission_resolved",
+            sessionId: id,
+            request: { requestId, sessionId: id },
+          });
+          this.callbacks.onSessionUpdated(id);
+          return { ok: true, requestId, decision };
         }
       }
     }
-    if (!turn) {
-      // Stale card: process already exited. Drop store pending so the UI can clear.
-      this.store.clearPendingToolPermission(sessionId, requestId);
-      if (resolvedSessionId !== sessionId) this.store.clearPendingToolPermission(resolvedSessionId, requestId);
-      return { ok: false, error: "no_active_turn", requestId, decision };
-    }
-    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
-      return { ok: false, error: "permission_response_channel_unavailable", requestId, decision };
-    }
-    const pending = turn.pendingPermissions.get(requestId);
-    if (!pending) return { ok: false, error: "permission_request_not_found", requestId, decision };
-    // UI may attach sessionId for routing — strip bridge-only keys before CLI payload.
-    const toolInput = stripBridgePermissionFields(updatedInput);
-    const response = this.permissionResponsePayload(pending, decision, toolInput);
-    const ok = writeJsonLine(turn.child, {
-      type: "control_response",
-      response: {
-        subtype: "success",
-        request_id: requestId,
-        response,
-      },
-    });
-    if (!ok) return { ok: false, error: "permission_response_channel_unavailable", requestId, decision };
-    // Official stopFlashFrame residual after user answers the permission prompt.
-    this.callbacks.onPermissionAttentionStop?.();
-    // Official shell: ExitPlanMode once with _targetMode also updates host session.permissionMode
-    // so Mode pill seeds match CLI setMode without waiting for the next status event.
-    if (decision === "once" && pending.toolName === "ExitPlanMode") {
-      // Mirror official Mme setMode defaulting: missing/unknown _targetMode → default.
-      const target = stringValue(asRecord(toolInput)._targetMode);
-      const mode = target === "acceptEdits" || target === "auto" || target === "bypassPermissions" || target === "default"
-        ? target
-        : "default";
-      const normalized = normalizePermissionMode(mode);
-      if (normalized) {
-        const current = this.store.getSession(resolvedSessionId);
-        if (current && current.permissionMode !== normalized) {
-          this.store.update(resolvedSessionId, { permissionMode: normalized });
-          this.callbacks.onSessionUpdated(resolvedSessionId);
-        }
-      }
-    }
-    this.resolvePendingPermission(resolvedSessionId, turn, pending);
-    // Parent result may have arrived while this can_use_tool was outstanding
-    // (sensitive file under bypass). Gates just dropped — end stdin if idle so
-    // CLI can exit and host isRunning clears (composer unsticks).
-    this.tryEndStdinAfterGates(turn);
-    return { ok: true, requestId, decision };
+    this.store.clearPendingToolPermission(sessionId, requestId);
+    return { ok: false, error: "no_active_turn", requestId, decision };
   }
 
   /**
@@ -1524,533 +1471,501 @@ export class ClaudeCliRunner {
    *   if (session.query) await query.setPermissionMode(mode); // must succeed before store
    *   else host-only (next spawn/runTurn carries --permission-mode)
    *
-   * Product stream-json: active turn ≈ session.query. Distinguishes no_turn vs failed
-   * so the host does not paint bypass when CLI still runs default.
+   * Local Code: SDK Query.setPermissionMode 1:1. SSH print: control_request.
    */
   async setPermissionMode(sessionId: string, mode: string): Promise<SetPermissionModeCliResult> {
     const permissionMode = normalizePermissionMode(mode);
     if (!permissionMode) {
       return { status: "failed", error: "invalid permission mode" };
     }
-    const turn = this.active.get(sessionId);
+    // Official Query.setPermissionMode residual.
+    const sdk = this.sdkSessions.get(sessionId);
+    if (sdk) {
+      try {
+        await sdk.query.setPermissionMode(
+          permissionMode as Parameters<CodeSdkActiveSession["query"]["setPermissionMode"]>[0],
+        );
+        return { status: "informed" };
+      } catch (error) {
+        return {
+          status: "failed",
+          error: error instanceof Error ? error.message : "setPermissionMode failed",
+        };
+      }
+    }
     // Official cli_informed:false — no active query; host store + next runTurn is enough.
-    if (!turn) return { status: "no_turn" };
-    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
-      return { status: "failed", error: "CLI stdin closed" };
-    }
-    const response = await this.sendControlRequest(turn, {
-      subtype: "set_permission_mode",
-      mode: permissionMode,
-    });
-    if (response === null) {
-      return { status: "failed", error: "set_permission_mode control_request failed or timed out" };
-    }
-    return { status: "informed" };
+    return { status: "no_turn" };
   }
 
   /**
-   * Official apply_flag_settings control for effort/ultracode — same wire shape as
-   * set_permission_mode. Host store is authoritative for UI + next spawn; live turn
-   * gets the flag layer merge so the running CLI picks up the new wire effort
-   * (and workflow orchestration for ultracode) without a respawn.
+   * Official Query.setModel residual (app.asar / agent-sdk).
+   * Mid-session model change without respawn when query is warm.
+   */
+  async setSdkModel(sessionId: string, model: string | undefined): Promise<boolean> {
+    const sdk = this.sdkSessions.get(sessionId);
+    if (!sdk) return false;
+    try {
+      await sdk.query.setModel(model);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Official apply_flag_settings / Query.applyFlagSettings residual for effort/ultracode.
+   * Host store is authoritative for UI + next spawn; live query gets flag layer merge.
    */
   async applyFlagSettings(sessionId: string, settings: Record<string, unknown>): Promise<boolean> {
-    const turn = this.active.get(sessionId);
-    if (!turn) return false;
-    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) return false;
-    const response = await this.sendControlRequest(turn, {
-      subtype: "apply_flag_settings",
-      settings,
-    });
-    return response !== null;
+    const sdk = this.sdkSessions.get(sessionId);
+    if (sdk) {
+      try {
+        await sdk.query.applyFlagSettings(settings as Parameters<CodeSdkActiveSession["query"]["applyFlagSettings"]>[0]);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
   }
 
-  private handleStdoutLine(sessionId: string, line: string): void {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    let event: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(trimmed);
-      event = { ...asRecord(parsed), sessionId };
-    } catch {
-      event = { type: "text", sessionId, text: trimmed, timestamp: nowIso() };
-    }
+  /**
+   * Official LocalSessionManager.warmSession residual (app.asar):
+   * On focus / open of an existing session with cliSessionId, spawn resume query
+   * **without** a user message and keep inputStream warm so the first follow-up
+   * is enqueue-only (not cold --resume at send time).
+   *
+   * Official IdleManager: focus/visible → warm; idle 900s hidden → pauseSession.
+   */
+  async warmSession(sessionId: string): Promise<boolean> {
+    this.ensureIdleState(sessionId).isTabVisible = true;
+    this.clearIdleTimeout(sessionId);
+    if (this.sdkSessions.has(sessionId)) return true;
+    const idle = this.ensureIdleState(sessionId);
+    if (idle.warmInFlight) return idle.warmInFlight;
 
-    if (this.handleControlEvent(sessionId, event)) return;
-    if (this.handleControlResponse(sessionId, event)) return;
-
-    const cliSessionId = stringValue(event.session_id);
     const session = this.store.getSession(sessionId);
-    if (cliSessionId && session && session.cliSessionId !== cliSessionId) this.store.setCliSessionId(sessionId, cliSessionId);
-    if (event.type === "system" && stringValue(event.subtype) === "init" && Array.isArray(event.slash_commands)) {
-      this.store.setSlashCommands(sessionId, event.slash_commands.filter((command): command is string => typeof command === "string" && command.length > 0));
-    }
-    // Official worktree residual: after CLI creates/enters a worktree, resolve abs path
-    // (git porcelain) and switch session.cwd → worktreePath while keeping originCwd.
-    if (event.type === "system" && stringValue(event.subtype) === "init") {
-      const current = this.store.getSession(sessionId);
-      if (current && (current.useWorktree || current.worktreeName) && !current.worktreePath) {
-        void this.store.ensureWorktreeResolved(sessionId).then((updated) => {
-          if (updated?.worktreePath) this.callbacks.onSessionUpdated(sessionId);
-        });
-      }
-    }
-    // Official ion Fke/Uke: system init/status carry permissionMode (and init model).
-    // CLI emits system:status whenever toolPermissionContext.mode changes (EnterPlanMode,
-    // ExitPlanMode, Shift+Tab, slash /plan, etc.). Persist so composer pill re-syncs.
-    this.syncLiveMetaFromCliEvent(sessionId, event);
-
-    // Memory-only live tail for the running turn — the CLI writes the same events to the
-    // jsonl, which is the durable source (official createCoworkRawTranscriptLoader path).
-    this.store.appendTranscriptEvent(sessionId, event);
-    // Official local agent path: stream_event + durable messages are pushed as
-    // {type:"message", message:event}. session_updated is metadata-only (title /
-    // folders / permissions) — do NOT fire it on every assistant NDJSON line or the
-    // renderer will thrash and look like "old messages refresh".
-    this.callbacks.onEvent({ type: "message", sessionId, message: event });
-
-    const turn = this.active.get(sessionId);
-    const assistantText = assistantTextFromEvent(event);
-    if (assistantText && (event.type !== "result" || !turn?.sawAssistantText)) {
-      // Durable assistant content lives in the CLI jsonl (already streamed above via the
-      // live buffer) — no userData copy. Track sawAssistantText for the result-event gate.
-      if (turn) turn.sawAssistantText = true;
-    }
-    // densable Tasks Stop residual: bookend task_id set gates endInput (not tool_use ids).
-    if (turn) applyStoppableTaskBookendEvent(turn.openStoppableTasks, event);
-    if (turn && event.type === "result") {
-      turn.sawResult = true;
-      // Official A6 residual (CCD): accumulate usage from result.usage when token cap set.
-      const usage = asRecord(event.usage);
-      const inTok = numberValue(usage.input_tokens ?? usage.inputTokens);
-      const outTok = numberValue(usage.output_tokens ?? usage.outputTokens);
-      if (inTok > 0 || outTok > 0) {
-        try {
-          accumulateEnterpriseTokenUsage(inTok, outTok, {
-            getUserDataPath: () => app.getPath("userData"),
-          });
-        } catch {
-          /* soft cap — never block result path */
-        }
-      }
-      // Official signalTurnComplete → drainDeferredSends first when queue non-empty.
-      // Official enqueue-all; print.ts stdin user lines enqueue + run() (new abortController).
-      if (this.drainDeferredSends(sessionId, turn)) {
-        // Follow-up main turn already re-opened isRunning via continueActiveTurn.
-        return;
-      }
-      // Parent result = main turn content done. Keep CLI process/stdin open while
-      // openStoppableTasks (stop_task residual), but clear host isRunning so web
-      // isResponding / main spinner settle (Tasks pane tracks bookends separately).
-      // preserveLiveBuffer: process may still emit task_notification / jsonl flush.
-      this.store.setRunning(
-        sessionId,
-        false,
-        { kind: "claude-cli" },
-        { preserveLiveBuffer: true },
-      );
-      this.callbacks.onSessionUpdated(sessionId);
-    }
-
-    // endInput after first result when: no can_use_tool + no open stoppable task bookends.
-    // Keeps stop_task channel alive while CLI waiting_for_agents (bash/monitor/agent).
-    if (turn) this.tryEndStdinAfterGates(turn);
-    // session_updated only for lifecycle/meta (not each assistant/user content line).
-    // stream_event never; assistant/user content is already onEvent(message).
-    const eventType = stringValue(event.type);
-    if (
-      eventType
-      && eventType !== "stream_event"
-      && eventType !== "assistant"
-      && eventType !== "user"
-      && eventType !== "result"
-    ) {
-      this.callbacks.onSessionUpdated(sessionId);
-    }
-  }
-
-  private sendControlRequest(turn: ActiveTurn, request: Record<string, unknown>): Promise<unknown | null> {
-    const requestId = randomUUID();
-    return new Promise((resolve) => {
-      const cleanup = () => {
-        const pending = turn.pendingControlResponses.get(requestId);
-        if (pending) clearTimeout(pending.timer);
-        turn.pendingControlResponses.delete(requestId);
-      };
-      const timer = setTimeout(() => {
-        cleanup();
-        resolve(null);
-      }, CONTROL_REQUEST_TIMEOUT_MS);
-      turn.pendingControlResponses.set(requestId, { resolve, timer });
-      const ok = writeJsonLine(turn.child, { type: "control_request", request_id: requestId, request });
-      if (!ok) {
-        cleanup();
-        resolve(null);
-      }
+    if (!session?.cliSessionId) return false;
+    if (session.stopped === true) return false;
+    // Official warmSession: bD Query resume (local + SSH host-pipe via spawnClaudeCodeProcess).
+    idle.warmInFlight = this.ensureSdkSession(sessionId, session, {}).finally(() => {
+      const state = this.idleBySession.get(sessionId);
+      if (state) state.warmInFlight = undefined;
+    }).then((sdk) => {
+      if (sdk) this.callbacks.onEvent({ type: "warmed", sessionId });
+      return Boolean(sdk);
     });
-  }
-
-  private runControlRequestProbe(session: LocalSession, request: Record<string, unknown>): Promise<unknown | null> {
-    const cliSessionId = session.cliSessionId;
-    if (!cliSessionId) return Promise.resolve(null);
-    const executable = defaultClaudeExecutable();
-    // buildClaudeArgs already includes --print for stream_event partials.
-    const args = buildClaudeArgs(session, {}, cliSessionId, true, false, {
-      bypassPermissionsModeEnabled:
-        this.callbacks.isBypassPermissionsModeEnabled?.() === true,
-    });
-    const cwd = resolveCwd(session);
-    const requestId = randomUUID();
-
-    return new Promise((resolve) => {
-      let settled = false;
-      let result: unknown | null = null;
-      let child: ChildProcessWithoutNullStreams | null = null;
-      const finish = (value: unknown | null) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(value);
-      };
-      const timer = setTimeout(() => {
-        try {
-          child?.kill("SIGTERM");
-        } catch {
-          // The probe may already have exited.
-        }
-        finish(result);
-      }, CONTROL_REQUEST_TIMEOUT_MS);
-
-      void (async () => {
-        try {
-          // SSH sessions probe the remote CLI the same way as runTurn (host-pipe).
-          child = await spawnClaudeForSession(session, executable, args, cwd);
-        } catch {
-          finish(null);
-          return;
-        }
-
-        const stdout = readline.createInterface({ input: child.stdout });
-        stdout.on("line", (line) => {
-          const event = parseJsonLine(line);
-          const response = controlResponsePayload(event, requestId);
-          if (response !== undefined) result = response;
-        });
-        child.on("error", () => finish(result));
-        child.on("close", () => {
-          stdout.close();
-          finish(result);
-        });
-
-        writeJsonLine(child, {
-          type: "control_request",
-          request_id: requestId,
-          request,
-        });
-        child.stdin.end();
-      })();
-    });
-  }
-
-  private handleControlResponse(sessionId: string, event: Record<string, unknown>): boolean {
-    const turn = this.active.get(sessionId);
-    if (!turn || stringValue(event.type) !== "control_response") return false;
-    const response = asRecord(event.response);
-    const requestId = stringValue(response.request_id) ?? stringValue(event.request_id);
-    if (!requestId) return true;
-    const pending = turn.pendingControlResponses.get(requestId);
-    if (!pending) return true;
-    turn.pendingControlResponses.delete(requestId);
-    clearTimeout(pending.timer);
-    // Success with empty body (stop_task sends {}) must not look like failure —
-    // only error/timeout paths resolve null for callers (setPermissionMode / stopTask).
-    pending.resolve(
-      stringValue(response.subtype) === "success"
-        ? (response.response !== undefined ? response.response : {})
-        : null,
-    );
-    return true;
-  }
-
-  private handleControlEvent(sessionId: string, event: Record<string, unknown>): boolean {
-    const type = stringValue(event.type);
-    if (type === "keep_alive") return true;
-    if (type === "control_cancel_request") {
-      const requestId = stringValue(event.request_id);
-      if (requestId) this.cancelPendingPermission(sessionId, requestId);
-      return true;
-    }
-    if (type !== "control_request") return false;
-    const request = asRecord(event.request);
-    const requestId = stringValue(event.request_id);
-    if (stringValue(request.subtype) !== "can_use_tool" || !requestId) {
-      this.writeControlError(sessionId, requestId, `Unsupported control request subtype: ${stringValue(request.subtype) ?? "unknown"}`);
-      return true;
-    }
-    this.registerPendingPermission(sessionId, requestId, request);
-    return true;
-  }
-
-  private registerPendingPermission(sessionId: string, requestId: string, request: Record<string, unknown>): void {
-    const turn = this.active.get(sessionId);
-    if (!turn) return;
-    const pending: LocalToolPermissionRequest = {
-      alwaysAllowScope: stringValue(request.always_allow_scope) ?? stringValue(request.alwaysAllowScope) ?? stringValue(request.permission_scope),
-      decisionReason: stringValue(request.decision_reason),
-      description: stringValue(request.description) ?? stringValue(request.title) ?? stringValue(request.display_name),
-      hasAlwaysAllow: booleanValue(request.has_always_allow) ?? booleanValue(request.hasAlwaysAllow),
-      input: request.input,
-      requestId,
-      sessionId,
-      suggestions: request.permission_suggestions,
-      toolName: stringValue(request.tool_name) ?? "Tool",
-      toolUseId: stringValue(request.tool_use_id),
-    };
-    turn.pendingPermissions.set(requestId, pending);
-    this.store.setPendingToolPermission(sessionId, pending);
-    this.callbacks.onEvent({ type: "tool_permission_request", sessionId, request: pending });
-    // Official NotificationService.requestUserAttention residual (dockBounceEnabled).
-    this.callbacks.onPermissionAttention?.();
-    this.callbacks.onSessionUpdated(sessionId);
+    return idle.warmInFlight;
   }
 
   /**
-   * Official PermissionPromptToolResultSchema + ion-dist Mme / shell ExitPlanMode once:
-   *   deny  → { behavior:"deny", message }  (_feedbackMessage → official jme prefix)
-   *   allow → { behavior:"allow", updatedInput }  (keeps _targetMode)
-   *   ExitPlanMode once → updatedPermissions [{type:"setMode", mode, destination:"session"}]
-   *   always → allow + updatedPermissions (CLI suggestions preferred)
+   * Official sendMessage residual via SDK Query (bD + fJ):
+   * warm query exists → enqueue user message; mid-turn → deferredSends.
    */
-  private permissionResponsePayload(pending: LocalToolPermissionRequest, decision: ToolPermissionDecision, updatedInput?: unknown): Record<string, unknown> {
-    // Prefer original pending.input when UI sends empty/routing-only payload.
-    const fromUi = asRecord(updatedInput);
-    const fromPending = asRecord(pending.input);
-    // Routing-only keys already stripped; treat remaining UI object as authoritative when non-empty
-    // beyond host decision markers (official keeps _targetMode / _feedbackMessage on updatedInput).
-    const markerOnly = Object.keys(fromUi).every((key) => key === "_feedbackMessage" || key === "_targetMode");
-    const input = Object.keys(fromUi).length > 0 && !markerOnly ? fromUi : (Object.keys(fromUi).length > 0 ? { ...fromPending, ...fromUi } : fromPending);
-    if (decision === "deny") {
-      const feedback = stringValue(fromUi._feedbackMessage) ?? stringValue(input._feedbackMessage);
-      // Official Mme jme prefix when feedback present.
-      const denyPrefix = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\n";
-      return {
-        behavior: "deny",
-        message: feedback ? `${denyPrefix}${feedback}` : "Denied by user",
-        ...(pending.toolUseId ? { toolUseID: pending.toolUseId } : {}),
-      };
-    }
-    const body: Record<string, unknown> = {
-      behavior: "allow",
-      // Schema requires a record; empty object → CLI falls back to original tool input.
-      // Official Mme passes full updatedInput including _targetMode for ExitPlanMode.
-      updatedInput: input && typeof input === "object" ? input : {},
-    };
-    if (pending.toolUseId) body.toolUseID = pending.toolUseId;
-    if (decision === "once" && pending.toolName === "ExitPlanMode") {
-      // Official Mme / shell: setMode from _targetMode (acceptEdits|auto|bypassPermissions|default).
-      const target = stringValue(input._targetMode);
-      const mode = target === "acceptEdits" || target === "auto" || target === "bypassPermissions" ? target : "default";
-      body.updatedPermissions = [{ type: "setMode", mode, destination: "session" }];
-    } else if (decision === "always") {
-      if (Array.isArray(pending.suggestions) && pending.suggestions.length > 0) {
-        body.updatedPermissions = pending.suggestions;
-      }
-      // Do not invent replaceRules when CLI sent no suggestions — malformed updates
-      // are ignored, but empty is safer than a wrong rule shape.
-    }
-    return body;
-  }
-
-  private writeControlError(sessionId: string, requestId: string | undefined, message: string): void {
-    const turn = this.active.get(sessionId);
-    if (!turn || !requestId) return;
-    writeJsonLine(turn.child, {
-      type: "control_response",
-      response: {
-        subtype: "error",
-        request_id: requestId,
-        error: message,
-      },
-    });
-  }
-
-  private resolvePendingPermission(sessionId: string, turn: ActiveTurn, pending: LocalToolPermissionRequest): void {
-    turn.pendingPermissions.delete(pending.requestId);
-    this.store.clearPendingToolPermission(sessionId, pending.requestId);
-    this.callbacks.onEvent({ type: "tool_permission_resolved", sessionId, request: pending });
-    this.callbacks.onSessionUpdated(sessionId);
-  }
-
-  /**
-   * densable multi-turn residual: write the next user line on the **same** CLI
-   * stdin after parent `result` (process still open for bookends / waiting_for_agents).
-   * Re-opens host isRunning for the follow-up main turn; resets sawResult so a new
-   * parent result can settle the spinner again.
-   */
-  private continueActiveTurn(
+  private async runTurnViaSdkQuery(
     sessionId: string,
-    turn: ActiveTurn,
+    session: LocalSession,
     text: string,
     request: Record<string, unknown>,
     seededUuid: string | undefined,
-  ): boolean {
-    const session = this.store.getSession(sessionId);
-    if (!session) return false;
-    const spawnKind = session.sshConfig ? "claude-cli-ssh" : "claude-cli";
-    const spawnLabel = session.sshConfig
-      ? `ssh://${session.sshConfig.host}:${resolveSshRemoteCwd(session)}`
-      : defaultClaudeExecutable();
-    try {
-      turn.child.stdin.write(
-        userInputLine(
-          promptWithSelectedFiles(text, request.userSelectedFiles),
-          seededUuid,
-          request.images,
-        ),
-      );
-    } catch (error) {
-      this.finishWithError(sessionId, spawnLabel, error);
-      return false;
+  ): Promise<boolean> {
+    let sdk: CodeSdkActiveSession | undefined = this.sdkSessions.get(sessionId);
+    if (!sdk) {
+      const created = await this.ensureSdkSession(sessionId, session, request);
+      if (!created) {
+        this.emitError(sessionId, "Failed to start Claude Code query");
+        return false;
+      }
+      sdk = created;
     }
-    turn.activeUserUuid = seededUuid;
-    turn.sawResult = false;
-    turn.sawAssistantText = false;
+
+    // Official: const c = r.isRunning; if (c) deferredSends.push
+    if (sdk.isRunning && !sdk.sawResult) {
+      sdk.deferredSends.push({
+        text,
+        request: { ...request },
+        messageUuid: seededUuid,
+      });
+      return true;
+    }
+
+    const userMessage = buildCodeSdkUserMessage(
+      promptWithSelectedFiles(text, request.userSelectedFiles),
+      seededUuid,
+      request.images,
+    );
+    // Live-tail optimistic seed for web (same as print path).
+    this.store.appendTranscriptEvent(sessionId, {
+      type: "user",
+      uuid: userMessage.uuid,
+      message: userMessage.message,
+      sessionId,
+      timestamp: nowIso(),
+    });
+    this.callbacks.onEvent({
+      type: "message",
+      sessionId,
+      message: {
+        type: "user",
+        uuid: userMessage.uuid,
+        message: userMessage.message,
+        sessionId,
+      },
+    });
+
+    // Official cli_resume_not_found: remember this send so error path can retry once
+    // after clearStaleResumeHandle (same user message, fresh Query without resume).
+    this.pendingResumeRetry.set(sessionId, {
+      text,
+      request: { ...request },
+      messageUuid: seededUuid,
+    });
+
+    sdk.isRunning = true;
+    sdk.sawResult = false;
     this.store.setRunning(sessionId, true, {
-      kind: spawnKind,
-      executable: spawnLabel,
+      kind: "claude-cli",
+      executable: "sdk-query",
       startedAt: nowIso(),
       lastError: undefined,
       lastExitCode: null,
     });
     this.callbacks.onSessionUpdated(sessionId);
+    sdk.input.enqueue(userMessage);
     return true;
   }
 
-  /**
-   * Official LocalSessionManager.drainDeferredSends residual (app.asar):
-   *   if (!inputStream || !deferredSends?.length) return false
-   *   const t = deferredSends; deferredSends = void 0
-   *   for (const n of t) inputStream.enqueue(n)
-   *   isRunning = true; return true
-   *
-   * densable print.ts stdin: each user line enqueue + void run(); drainCommandQueue
-   * batches consecutive prompts. Write **all** deferred onto the same stdin.
-   */
-  private drainDeferredSends(sessionId: string, turn: ActiveTurn): boolean {
-    if (turn.deferredSends.length === 0) return false;
-    if (turn.child.stdin.destroyed || turn.child.stdin.writableEnded) {
-      // Stdin closed — cannot continue; leave queue for cancel / drop on process exit.
-      return false;
-    }
-    const queued = turn.deferredSends;
-    turn.deferredSends = [];
-    for (const next of queued) {
-      if (!this.continueActiveTurn(
-        sessionId,
-        turn,
-        next.text,
-        next.request,
-        next.messageUuid,
-      )) {
-        return false;
+  private async ensureSdkSession(
+    sessionId: string,
+    session: LocalSession,
+    request: Record<string, unknown>,
+  ): Promise<CodeSdkActiveSession | null> {
+    const existing = this.sdkSessions.get(sessionId);
+    if (existing) return existing;
+    // Official warmSession: local-only transcript existence check before resume.
+    // SSH skips local jsonl pre-check (remote transcript; cli_resume_not_found
+    // recovery still clears via error path).
+    if (session.cliSessionId && !session.sshConfig) {
+      try {
+        const { resolveCodeTranscriptPath } = await import("./codeTranscriptJsonl");
+        const fs = await import("node:fs");
+        const path = await resolveCodeTranscriptPath(session.cliSessionId, session.cwd);
+        const ok = Boolean(path) && fs.existsSync(path!) && fs.statSync(path!).size > 0;
+        if (!ok) {
+          this.store.clearStaleResumeHandle(sessionId);
+          session = this.store.getSession(sessionId) ?? session;
+        }
+      } catch {
+        this.store.clearStaleResumeHandle(sessionId);
+        session = this.store.getSession(sessionId) ?? session;
       }
     }
-    return true;
+    // Official emitInitializationStatus residual (configureSSHSpawn host-pipe subset):
+    // step progress → complete before Query is ready. Full RemoteServerController
+    // ensureReady steps are NOT invented here.
+    if (session.sshConfig) {
+      this.callbacks.onEvent({
+        type: "initialization_status",
+        sessionId,
+        initializationStatus: {
+          step: "ssh_spawn",
+          message: "Starting remote Claude over SSH…",
+          isComplete: false,
+        },
+      });
+    }
+
+    try {
+      const sdk = await createCodeSdkActiveSession({
+        callbacks: {
+          onEvent: (event) => {
+            const eventType = stringValue(asRecord(event).type);
+            // Official handleQueryError / handleResultMessage: cli_resume_not_found → clearStaleResumeHandle.
+            if (eventType === "error") {
+              const category = stringValue(asRecord(event).errorCategory);
+              const errText = stringValue(asRecord(event).error) ?? "";
+              if (
+                category === "cli_resume_not_found"
+                || /No conversation found with session ID/i.test(errText)
+              ) {
+                this.store.clearStaleResumeHandle(sessionId);
+                const dead = this.sdkSessions.get(sessionId);
+                if (dead) {
+                  closeCodeSdkSession(dead);
+                  this.sdkSessions.delete(sessionId);
+                }
+                // Same-send retry once as fresh conversation (official clear + user resend,
+                // product: automatic so "Try again" is not required for ghost resume ids).
+                const pending = this.pendingResumeRetry.get(sessionId);
+                this.pendingResumeRetry.delete(sessionId);
+                const fresh = this.store.getSession(sessionId);
+                if (pending && fresh) {
+                  void this.runTurnViaSdkQuery(
+                    sessionId,
+                    fresh,
+                    pending.text,
+                    pending.request,
+                    pending.messageUuid,
+                  );
+                }
+              }
+              // Official configureSSHSpawn disconnect residual (host-pipe subset):
+              // network drop mid-query → emit ssh_disconnected + teardown query.
+              // Full RemoteServerController auto-reconnect is NOT product residual.
+              if (
+                (category === "network_error" || /SSH connection dropped/i.test(errText))
+                && this.store.getSession(sessionId)?.sshConfig
+              ) {
+                const dead = this.sdkSessions.get(sessionId);
+                if (dead) {
+                  closeCodeSdkSession(dead);
+                  this.sdkSessions.delete(sessionId);
+                }
+                this.store.setRunning(sessionId, false, {
+                  kind: "claude-cli-ssh",
+                  finishedAt: nowIso(),
+                  lastError: errText || "SSH connection dropped",
+                });
+                this.callbacks.onEvent({ type: "ssh_disconnected", sessionId });
+                this.callbacks.onSessionUpdated(sessionId);
+              }
+            }
+            if (eventType === "message") {
+              const msgEarly = asRecord(asRecord(event).message);
+              if (stringValue(msgEarly.type) === "system" && stringValue(msgEarly.subtype) === "init") {
+                this.pendingResumeRetry.delete(sessionId);
+              }
+            }
+            // Official canUseTool → host pending queue (web Mode/permission cards hydrate).
+            if (eventType === "tool_permission_request") {
+              const request = asRecord(event.request);
+              const requestId = stringValue(request.requestId);
+              if (requestId) {
+                this.store.setPendingToolPermission(sessionId, {
+                  description: stringValue(request.description),
+                  input: request.input,
+                  requestId,
+                  sessionId,
+                  toolName: stringValue(request.toolName) ?? "Tool",
+                  toolUseId: stringValue(request.toolUseId),
+                  alwaysAllowScope: stringValue(request.alwaysAllowScope),
+                  decisionReason: stringValue(request.decisionReason),
+                  hasAlwaysAllow: typeof request.hasAlwaysAllow === "boolean"
+                    ? request.hasAlwaysAllow
+                    : undefined,
+                  suggestions: request.suggestions,
+                });
+              }
+            }
+            // Mirror CLI session_id / slash_commands from system init onto host store.
+            if (eventType === "message") {
+              const msg = asRecord(asRecord(event).message);
+              // Official Fke: system init/status → host model / permissionMode mirror.
+              // status may overwrite Mode pill; init never snaps permissionMode.
+              this.syncLiveMetaFromCliEvent(sessionId, msg);
+              // Product live-tail residual (print path appendTranscriptEvent every CLI
+              // event): keep durable message types in memory so getTranscript still has
+              // assistant after settle/refresh if CLI jsonl is delayed or suppressed.
+              // stream_event is partial (includePartialMessages) — not jsonl-durable; skip.
+              // Optimistic user seed already uses the same outer uuid → store dedupes.
+              const msgType = stringValue(msg.type);
+              if (
+                msgType === "user"
+                || msgType === "assistant"
+                || msgType === "system"
+                || msgType === "result"
+              ) {
+                this.store.appendTranscriptEvent(sessionId, msg);
+              }
+              if (stringValue(msg.type) === "system" && stringValue(msg.subtype) === "init") {
+                const cliId = stringValue(msg.session_id);
+                if (cliId) this.store.setCliSessionId(sessionId, cliId);
+                if (Array.isArray(msg.slash_commands)) {
+                  this.store.setSlashCommands(
+                    sessionId,
+                    msg.slash_commands.filter((c): c is string => typeof c === "string" && c.length > 0),
+                  );
+                }
+                const initModel = stringValue(msg.model);
+                if (initModel) {
+                  const current = this.store.getSession(sessionId);
+                  if (current && !current.model) {
+                    this.store.update(sessionId, { model: initModel });
+                  }
+                }
+              }
+            }
+            // Deliver the CLI row to the web bridge **before** markNotRunning /
+            // type:"completed". Settling first races officialStreamSettleAfterReveal
+            // and can clear Va/typewriter before the final assistant merge lands —
+            // UI then shows only a later error_during_execution red card (no text).
+            this.callbacks.onEvent(event);
+            // Official: stream-json `result` + createBaseHooks Stop → signalTurnComplete.
+            // Product residual: some 3p turns end with assistant stop_reason=end_turn and/or
+            // system/stop_hook_summary without a stream-json `result` — host isRunning sticks
+            // (Stop/Esc pill never clears). Mirror those durable end signals too.
+            if (eventType === "message") {
+              const settleMsg = asRecord(asRecord(event).message);
+              if (shouldSignalTurnCompleteFromCliMessage(settleMsg)) {
+                const active = this.sdkSessions.get(sessionId);
+                if (active) {
+                  this.signalTurnCompleteSdk(sessionId, active, session);
+                }
+              }
+            }
+          },
+          onSessionUpdated: this.callbacks.onSessionUpdated,
+          onPermissionAttention: this.callbacks.onPermissionAttention,
+          isBypassPermissionsModeEnabled: this.callbacks.isBypassPermissionsModeEnabled,
+          getLiveSession: () => this.store.getSession(sessionId),
+          shouldAutoApproveScheduledPermission:
+            this.callbacks.shouldAutoApproveScheduledPermission,
+          // Official createBaseHooks Stop → signalTurnComplete residual.
+          // Idempotent with result-path markNotRunning/drain (same host state).
+          onSignalTurnComplete: (id) => {
+            const active = this.sdkSessions.get(id);
+            if (!active) return;
+            this.signalTurnCompleteSdk(id, active, session);
+          },
+        },
+        request,
+        session,
+        sessionId,
+        warmOnly: true,
+      });
+      this.sdkSessions.set(sessionId, sdk);
+      if (session.sshConfig) {
+        this.callbacks.onEvent({
+          type: "initialization_status",
+          sessionId,
+          initializationStatus: {
+            step: "complete",
+            message: "",
+            isComplete: true,
+          },
+        });
+      }
+      return sdk;
+    } catch (error) {
+      if (session.sshConfig) {
+        this.callbacks.onEvent({
+          type: "initialization_status",
+          sessionId,
+          initializationStatus: {
+            step: "error",
+            message: error instanceof Error ? error.message : "sdk_query_start_failed",
+            isComplete: true,
+          },
+        });
+      }
+      this.emitError(
+        sessionId,
+        error instanceof Error ? error.message : "sdk_query_start_failed",
+      );
+      return null;
+    }
   }
 
   /**
-   * After parent `result`, end stdin once:
-   * - no outstanding can_use_tool, and
-   * - no open system task_started bookends (densable Tasks Stop residual).
-   * Called from stream handler and after permission resolve/cancel.
-   *
-   * After endInput, detach drained active turns so the next user send can spawn
-   * a fresh process without waiting for process close (or racing already_running).
+   * Official setSessionVisibility residual:
+   * visible → clear idle + warm if no query; hidden + pending result → start idle timeout.
    */
-  private tryEndStdinAfterGates(turn: ActiveTurn): void {
-    if (!turn.sawResult) return;
-    if (
-      !shouldEndStdinAfterResult({
-        pendingPermissionCount: turn.pendingPermissions.size,
-        openStoppableTaskCount: turn.openStoppableTasks.size,
-        stdinDestroyed: turn.child.stdin.destroyed,
-        stdinWritableEnded: turn.child.stdin.writableEnded,
-      })
-    ) {
+  setSessionTabVisible(sessionId: string, visible: boolean): void {
+    if (!sessionId) return;
+    const state = this.ensureIdleState(sessionId);
+    const wasVisible = state.isTabVisible;
+    state.isTabVisible = visible;
+    const hasQuery = this.sdkSessions.has(sessionId);
+    if (visible) {
+      this.clearIdleTimeout(sessionId);
+      if (!hasQuery) {
+        void this.warmSession(sessionId).catch(() => undefined);
+      }
       return;
     }
-    try {
-      turn.child.stdin.end();
-    } catch {
-      // stdin may race-close; ignore
+    // Became hidden after a settled turn → arm official 900s pause timer.
+    if (wasVisible && state.hasPendingResult && hasQuery) {
+      this.startIdleTimeout(sessionId);
     }
-    // endInput done — process may linger until exit. Detach active so next send
-    // can spawn; close handler no-ops when active already deleted.
-    for (const [sessionId, active] of this.active) {
-      if (active !== turn) continue;
-      if (
-        canDetachDrainedActiveTurn({
-          sawResult: turn.sawResult,
-          openStoppableTaskCount: turn.openStoppableTasks.size,
-          stdinDestroyed: turn.child.stdin.destroyed,
-          stdinWritableEnded: turn.child.stdin.writableEnded,
-        })
-      ) {
-        this.clearPendingControlResponses(turn);
-        this.clearPendingPermissions(sessionId, turn);
-        this.active.delete(sessionId);
-      }
-      break;
+  }
+
+
+  /** Official IdleManager.onMessageSent residual. */
+  private onIdleMessageSent(sessionId: string): void {
+    const state = this.ensureIdleState(sessionId);
+    this.clearIdleTimeout(sessionId);
+    state.hasPendingResult = false;
+    state.lastResultTime = null;
+  }
+
+  /** Official IdleManager.onTurnComplete residual. */
+  private onIdleTurnComplete(sessionId: string): void {
+    const state = this.ensureIdleState(sessionId);
+    state.hasPendingResult = true;
+    state.lastResultTime = Date.now();
+    if (!state.isTabVisible) this.startIdleTimeout(sessionId);
+  }
+
+  private ensureIdleState(sessionId: string): SessionIdleState {
+    let state = this.idleBySession.get(sessionId);
+    if (!state) {
+      state = {
+        isTabVisible: true,
+        hasPendingResult: false,
+        lastResultTime: null,
+      };
+      this.idleBySession.set(sessionId, state);
+    }
+    return state;
+  }
+
+  private clearIdleTimeout(sessionId: string): void {
+    const state = this.idleBySession.get(sessionId);
+    if (!state?.idleTimeoutId) return;
+    clearTimeout(state.idleTimeoutId);
+    state.idleTimeoutId = undefined;
+  }
+
+  private startIdleTimeout(sessionId: string): void {
+    const state = this.ensureIdleState(sessionId);
+    this.clearIdleTimeout(sessionId);
+    const hasQuery = this.sdkSessions.has(sessionId);
+    if (!hasQuery) return;
+    // Official: only arm when there is still a warm query.
+    state.idleTimeoutId = setTimeout(() => {
+      state.idleTimeoutId = undefined;
+      if (state.isTabVisible) return;
+      if (!this.sdkSessions.has(sessionId)) return;
+      // Mid-turn: never pause while isRunning.
+      if (this.store.getSession(sessionId)?.isRunning === true) return;
+      void this.pauseSession(sessionId);
+    }, OFFICIAL_SESSION_IDLE_TIMEOUT_MS);
+    if (typeof state.idleTimeoutId === "object" && "unref" in state.idleTimeoutId) {
+      state.idleTimeoutId.unref?.();
     }
   }
 
   /**
-   * Process-exit residual only: when the CLI child dies with open task_started
-   * bookends, it will never dual-emit task_notification. Emit host-exit-* so
-   * Tasks leave Running + taskBookends persist. Not used on Stop button path
-   * (that is control_request only + web Xr echoPending + CLI dual-emit).
+   * Official IdleManager pause residual: teardown warm query, keep host session.
    */
-  private emitHostStoppedBookends(sessionId: string, taskIds: string[], summary: string): void {
-    for (const taskId of taskIds) {
-      const id = typeof taskId === "string" ? taskId.trim() : "";
-      if (!id) continue;
-      const event = {
-        type: "system",
-        subtype: "task_notification",
-        task_id: id,
-        status: "stopped",
-        summary,
-        uuid: `host-exit-${id}`,
-        timestamp: nowIso(),
-      };
-      this.store.appendTranscriptEvent(sessionId, event);
-      this.callbacks.onEvent({ type: "message", sessionId, message: event });
-    }
-  }
-
-  private cancelPendingPermission(sessionId: string, requestId: string): void {
-    const turn = this.active.get(sessionId);
-    const pending = turn?.pendingPermissions.get(requestId) ?? this.store.getSession(sessionId)?.pendingToolPermissions?.find((item) => item.requestId === requestId);
-    if (turn && pending) turn.pendingPermissions.delete(requestId);
-    this.store.clearPendingToolPermission(sessionId, requestId);
-    if (pending) this.callbacks.onEvent({ type: "tool_permission_resolved", sessionId, request: pending });
+  pauseSession(sessionId: string): boolean {
+    this.clearIdleTimeout(sessionId);
+    const sdk = this.sdkSessions.get(sessionId);
+    if (!sdk) return false;
+    closeCodeSdkSession(sdk);
+    this.sdkSessions.delete(sessionId);
+    this.store.setRunning(sessionId, false, {
+      kind: "claude-cli",
+      finishedAt: nowIso(),
+    });
+    this.callbacks.onEvent({ type: "paused", sessionId });
     this.callbacks.onSessionUpdated(sessionId);
-    if (turn) this.tryEndStdinAfterGates(turn);
+    return true;
   }
 
-  private clearPendingPermissions(sessionId: string, turn?: ActiveTurn): void {
-    const pending = [...(turn?.pendingPermissions.values() ?? [])];
-    this.store.clearPendingToolPermissions(sessionId);
-    for (const request of pending) this.callbacks.onEvent({ type: "tool_permission_resolved", sessionId, request });
-  }
 
-  private clearPendingControlResponses(turn?: ActiveTurn): void {
-    for (const pending of turn?.pendingControlResponses.values() ?? []) {
-      clearTimeout(pending.timer);
-      pending.resolve(null);
-    }
-    turn?.pendingControlResponses.clear();
-  }
+
+
 
   private emitError(sessionId: string, message: string): void {
     const event = { type: "error", sessionId, error: message, timestamp: nowIso() };
@@ -2059,18 +1974,4 @@ export class ClaudeCliRunner {
     this.callbacks.onSessionUpdated(sessionId);
   }
 
-  private finishWithError(sessionId: string, executable: string, error: unknown): void {
-    const current = this.active.get(sessionId);
-    this.active.delete(sessionId);
-    this.clearPendingControlResponses(current);
-    this.clearPendingPermissions(sessionId, current);
-    if (current && current.openStoppableTasks.size > 0) {
-      this.emitHostStoppedBookends(sessionId, [...current.openStoppableTasks], "Process exited");
-      current.openStoppableTasks.clear();
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    this.emitError(sessionId, message);
-    this.store.setRunning(sessionId, false, { kind: "claude-cli", executable, lastError: message, finishedAt: nowIso() });
-    this.callbacks.onSessionUpdated(sessionId);
-  }
 }
