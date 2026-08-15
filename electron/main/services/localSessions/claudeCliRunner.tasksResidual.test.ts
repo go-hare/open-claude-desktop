@@ -197,11 +197,14 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       suggestions: [],
     } as never);
     const events: Array<Record<string, unknown>> = [];
+    let sessionUpdated = 0;
     const runner = new ClaudeCliRunner(store, {
       onEvent: (event) => {
         events.push(event);
       },
-      onSessionUpdated: () => undefined,
+      onSessionUpdated: () => {
+        sessionUpdated += 1;
+      },
     });
     const sdk = plantSdk(runner, session.id, {
       sawInit: true,
@@ -218,7 +221,9 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     expect(store.getSession(session.id)?.isRunning).toBe(false);
     expect(store.getSession(session.id)?.pendingToolPermissions ?? []).toHaveLength(1);
     expect(events.some((event) => event.type === "stopped")).toBe(false);
-    expect(events.some((event) => event.type === "completed")).toBe(true);
+    // Official asar: markNotRunning + session_updated only (no type:"completed" invent).
+    expect(events.some((event) => event.type === "completed")).toBe(false);
+    expect(sessionUpdated).toBeGreaterThan(0);
   });
 
   it("stop() teardown clears host pendingToolPermissions (clearPendingPermissions residual)", async () => {
@@ -328,6 +333,30 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     ).toBe(false);
   });
 
+  it("runTurn defers while isRunning even if sawResult true (official isRunning-only gate)", async () => {
+    // densable residual: sawResult can be true mid multi-tool / after partial end
+    // while isRunning still true. Official defers on isRunning alone.
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "defer sawResult" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const enqueue = vi.fn();
+    const sdk = plantSdk(runner, session.id, {
+      isRunning: true,
+      sawResult: true,
+      deferredSends: [],
+      input: { enqueue } as never,
+    });
+    const ok = await runner.runTurn(session.id, "queued-follow", { messageUuid: "uuid-follow" });
+    expect(ok).toBe(true);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(sdk.deferredSends).toHaveLength(1);
+    expect(sdk.deferredSends[0]?.messageUuid).toBe("uuid-follow");
+  });
+
   it("cancelQueuedMessage removes SDK deferredSends by uuid", () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "cancel deferred" });
@@ -388,12 +417,15 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       executable: "sdk-query",
       startedAt: new Date().toISOString(),
     });
+    let sessionUpdated = 0;
     const events: Array<Record<string, unknown>> = [];
     const runner = new ClaudeCliRunner(store, {
       onEvent: (event) => {
         events.push(event);
       },
-      onSessionUpdated: () => undefined,
+      onSessionUpdated: () => {
+        sessionUpdated += 1;
+      },
     });
     const sdk = plantSdk(runner, session.id, {
       isRunning: false,
@@ -410,65 +442,64 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       }
     ).signalTurnCompleteSdk(session.id, sdk, session);
     expect(store.getSession(session.id)?.isRunning).toBe(false);
-    expect(events.some((event) => event.type === "completed")).toBe(true);
+    // Official asar: session_updated only (no type:"completed").
+    expect(events.some((event) => event.type === "completed")).toBe(false);
+    expect(sessionUpdated).toBeGreaterThan(0);
     expect(
       (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
     ).toBe(true);
   });
 
-  it("drainDeferredSends skipNext absorbs Stop re-entry past next tick", () => {
-    vi.useFakeTimers();
-    try {
-      const store = makeStore();
-      const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "skip drain window" });
-      store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
-      const events: Array<Record<string, unknown>> = [];
-      const runner = new ClaudeCliRunner(store, {
-        onEvent: (event) => {
-          events.push(event);
-        },
-        onSessionUpdated: () => undefined,
-      });
-      const enqueue = vi.fn();
-      const sdk = plantSdk(runner, session.id, {
-        isRunning: true,
-        sawResult: false,
-        deferredSends: [
-          { text: "queued follow-up", request: {}, messageUuid: "q-follow" },
-        ],
-        input: { enqueue } as never,
-      });
-      const signal = (
-        runner as unknown as {
-          signalTurnCompleteSdk: (
-            sessionId: string,
-            sdk: CodeSdkActiveSession,
-            session: unknown,
-          ) => void;
-        }
-      ).signalTurnCompleteSdk.bind(runner);
+  it("signalTurnCompleteSdk drain then second signal markNotRunning (official asar)", () => {
+    // Official: first signalTurnComplete with deferred → drain (isRunning true).
+    // Second with empty deferred → markNotRunning. No blockSettle invent.
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "drain then settle" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    let sessionUpdated = 0;
+    const events: Array<Record<string, unknown>> = [];
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => {
+        sessionUpdated += 1;
+      },
+    });
+    const enqueue = vi.fn();
+    const sdk = plantSdk(runner, session.id, {
+      isRunning: true,
+      sawResult: false,
+      deferredSends: [
+        { text: "queued follow-up", request: {}, messageUuid: "q-follow" },
+      ],
+      input: { enqueue } as never,
+    });
+    const signal = (
+      runner as unknown as {
+        signalTurnCompleteSdk: (
+          sessionId: string,
+          sdk: CodeSdkActiveSession,
+          session: unknown,
+        ) => void;
+      }
+    ).signalTurnCompleteSdk.bind(runner);
 
-      signal(session.id, sdk, session);
-      expect(enqueue).toHaveBeenCalled();
-      expect(sdk.isRunning).toBe(true);
-      expect(store.getSession(session.id)?.isRunning).toBe(true);
+    signal(session.id, sdk, session);
+    expect(enqueue).toHaveBeenCalled();
+    expect(sdk.isRunning).toBe(true);
+    expect(sdk.deferredSends).toEqual([]);
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+    expect(events.some((event) => event.type === "completed")).toBe(false);
 
-      // Same-turn Stop/result re-entry must not markNotRunning over follow-up.
-      vi.advanceTimersByTime(10);
-      signal(session.id, sdk, session);
-      expect(sdk.isRunning).toBe(true);
-      expect(store.getSession(session.id)?.isRunning).toBe(true);
-      expect(events.some((event) => event.type === "completed")).toBe(false);
-
-      // After drain window, real follow-up end may settle.
-      vi.advanceTimersByTime(300);
-      signal(session.id, sdk, session);
-      expect(sdk.isRunning).toBe(false);
-      expect(store.getSession(session.id)?.isRunning).toBe(false);
-      expect(events.some((event) => event.type === "completed")).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
+    // Official second signalTurnComplete with empty deferred → markNotRunning.
+    // (Esc→drain race: Stop after drain may settle early; follow-up assistant
+    // re-asserts isRunning in official handleSdkMessage — not a host invent gate.)
+    signal(session.id, sdk, session);
+    expect(sdk.isRunning).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+    expect(events.some((event) => event.type === "completed")).toBe(false);
+    expect(sessionUpdated).toBeGreaterThanOrEqual(2);
   });
 
   it("stop() tears down warm SDK query", () => {

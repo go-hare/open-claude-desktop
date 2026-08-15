@@ -13,33 +13,30 @@ import {
 } from "./claudeCliTurnLifecycle";
 
 describe("shouldSignalTurnCompleteFromCliMessage", () => {
-  it("settles on stream-json result", () => {
-    expect(shouldSignalTurnCompleteFromCliMessage({ type: "result", subtype: "success" })).toBe(true);
+  it("does not settle on stream-json result (official asar: only Stop + interrupt)", () => {
+    // Product invent result→signalTurnComplete drained then markNotRunning on Esc.
+    expect(shouldSignalTurnCompleteFromCliMessage({ type: "result", subtype: "success" })).toBe(false);
+    expect(shouldSignalTurnCompleteFromCliMessage({ type: "result", is_error: true })).toBe(false);
   });
 
-  it("settles on stop_hook_summary (durable end when result missing)", () => {
+  it("settles on stop_hook_summary (3p residual when Stop hook missed)", () => {
     expect(
       shouldSignalTurnCompleteFromCliMessage({ type: "system", subtype: "stop_hook_summary" }),
     ).toBe(true);
   });
 
-  it("settles on final assistant end_turn only", () => {
+  it("does not settle on assistant end_turn (official p is web-only; host uses Stop)", () => {
+    // Settling host on end_turn races multi-tool / post-drain follow-ups (Send while Searching).
     expect(
       shouldSignalTurnCompleteFromCliMessage({
         type: "assistant",
         message: { role: "assistant", stop_reason: "end_turn", content: [] },
       }),
-    ).toBe(true);
-    expect(
-      shouldSignalTurnCompleteFromCliMessage({
-        type: "assistant",
-        message: { role: "assistant", stop_reason: "tool_use", content: [] },
-      }),
     ).toBe(false);
     expect(
       shouldSignalTurnCompleteFromCliMessage({
         type: "assistant",
-        message: { role: "assistant", stop_reason: null, content: [] },
+        message: { role: "assistant", stop_reason: "tool_use", content: [] },
       }),
     ).toBe(false);
   });

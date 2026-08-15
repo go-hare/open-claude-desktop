@@ -1,30 +1,26 @@
 # Electron packaged bundle 对齐审计
 
-生成时间：2026-08-13T05:14:28.059Z
+生成时间：2026-08-15T07:47:37.728Z
 
-## 结论（own forge Electron shell）
+## Windows packaged 结论
 
-- 壳模型：own-forge-electron
-- 产品二进制 Contents/MacOS/Claudex 存在：是
-- 是否残留官方 MacOS/Claude 覆盖：否
-- 产品身份（Bundle ID / Name / Executable）：是
-- codesign Identifier 是否为产品 ID：是（com.local.claudex.desktop）
-- 产品 Bundle ID：com.local.claudex.desktop（期望 com.local.claudex.desktop）
-- CFBundleDocumentTypes 残差：是
-- CFBundleURLTypes 残差：是
-- Helpers/chrome-native-host：是
-- Helpers/disclaimer：是
-- smol-bin host：是
-- locale en-US.json：是
-- Electron Framework 存在：是
-- Electron Framework 是否存在绝对 symlink：否
-- app.asar integrity：是
-- app.asar 产品 main 指纹：是（ok index=499 chunks=true）
-- app.asar runtime node_modules 缺失数：0
-- app.asar.unpacked runtime 缺失数：0
-- product-web 存在：是（build-id=react-shell）
-- residual ion-dist 存在：是（build-id=spa-dev）
+- exe 存在：是
+- app.asar 存在：是
+- product-web 存在：是
+- product-web data-build-id：react-shell（禁止 spa-dev）
+- residual ion-dist 存在：是
+- residual ion-dist data-build-id：spa-dev
 - dual-root 通过：是（ok）
+- 产品 main 指纹：是（ok）
+- original-runtime-node_modules 存在：是
+- Claude Code binary 存在：是
+- Claude Code binary 大小：150534144
+- Claude Code manifest 存在：是
+- runtime 必选缺失数：0
+- runtime 可选缺失数：0
+- app.asar 含 .vite 主入口：是
+- app.asar 含 preload：是
+- app.asar 是否误打入 smoke user data：否
 - 是否通过：是
 
-说明：壳与 web 一样是我们写的产品代码 + forge Electron 运行时；选择性注入官方 residual Helpers（chrome-native-host/disclaimer）、smol-bin、locale JSON、document/URL types。不做官方 Claude.app MacOS/Frameworks 整段覆盖。CFBundleIdentifier/Name/Executable 为产品身份（Claudex）；app.asar 必须是产品 main；Resources dual-root：product-web 主 SPA + residual ion-dist（setup-desktop-3p）。
+说明：Windows package 在 win32 主机生成；加载 `app://` dual-root → `resources/product-web` 主 SPA + `resources/ion-dist` residual（setup-desktop-3p）。macOS 外层 residual 对齐仅在 darwin .app 产物存在时审计。

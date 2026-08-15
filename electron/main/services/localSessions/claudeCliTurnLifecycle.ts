@@ -62,32 +62,28 @@ export function resolveTurnPermissionMode(
 /**
  * When host `signalTurnComplete` / markNotRunning must fire for a CLI stream message.
  *
- * Official primary: stream-json `type:"result"` (and createBaseHooks Stop).
- * Product residual (observed 3p/gateway turns): CLI may emit final assistant with
- * `message.stop_reason === "end_turn"` and write `system/stop_hook_summary` to jsonl
- * **without** a stream-json `result` row — host then sticks isRunning=true (Stop/Esc
- * pill never clears). Mirror those durable turn-end signals so LocalSessionManager
- * settles the same way as result/Stop.
+ * Official LocalSessionManager (app.asar) call sites only (verified extract):
+ *   1. interruptSession success → signalTurnComplete
+ *   2. createBaseHooks Stop → signalTurnComplete(session)
  *
- * Do **not** settle on assistant without end_turn (partial / tool_use mid-turn).
- * Do **not** invent userData message storage — only host running flags.
+ * There is **no** stream-json `type:"result"` → signalTurnComplete in asar.
+ * Product invent of result-gated host settle caused Esc+queue desync:
+ *   interrupt drains deferred (isRunning true) → result row fires signalTurnComplete
+ *   again with empty deferred → markNotRunning → composer Send while follow-up runs.
+ *
+ * Do **not** settle on assistant `end_turn` here. Official web (BELz) treats
+ * end_turn as `p` (endTurnSeen) only — queue promote is result-gated (`g`/`h`) on web.
+ *
+ * Product residual: some 3p turns omit Stop hook delivery but still emit
+ * `system/stop_hook_summary` after hooks — mirror that as durable end so
+ * isRunning clears. Prefer Stop hook `onSignalTurnComplete` when present.
  */
 export function shouldSignalTurnCompleteFromCliMessage(msg: unknown): boolean {
   if (!msg || typeof msg !== "object") return false;
   const record = msg as Record<string, unknown>;
   const type = typeof record.type === "string" ? record.type : "";
-  if (type === "result") return true;
+  // Official: no result → signalTurnComplete. Stop hook owns settle.
   if (type === "system" && record.subtype === "stop_hook_summary") return true;
-  if (type === "assistant") {
-    const message =
-      record.message && typeof record.message === "object"
-        ? (record.message as Record<string, unknown>)
-        : null;
-    const stopReason =
-      message && typeof message.stop_reason === "string" ? message.stop_reason : null;
-    // Final assistant of the turn (not tool_use / max_tokens mid-stream).
-    if (stopReason === "end_turn") return true;
-  }
   return false;
 }
 

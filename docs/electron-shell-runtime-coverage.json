@@ -1,16 +1,15 @@
 {
-  "generated_at": "2026-08-06T12:14:46.737Z",
+  "generated_at": "2026-08-07T02:46:06.094Z",
   "packaged": true,
-  "signal": "SIGKILL",
+  "signal": null,
   "marker": {
     "ok": true,
-    "appPath": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/app.asar",
-    "resourcesPath": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources",
+    "appPath": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\app.asar",
+    "resourcesPath": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources",
     "mainWindowVisible": true,
-    "mainViewUrl": "app://localhost/login?returnTo=%2Ftask%2Fnew",
+    "mainViewUrl": "app://localhost/task/new",
     "findInPageVisible": false,
     "applicationMenu": [
-      "Claudex",
       "文件",
       "编辑",
       "视图",
@@ -19,8 +18,8 @@
       "帮助"
     ],
     "ipcHandlers": {
-      "total": 593,
-      "real": 593,
+      "total": 594,
+      "real": 594,
       "fallback": 0,
       "byOwner": {
         "claude.web.WindowControl": 6,
@@ -48,7 +47,7 @@
         "claude.settings.DesktopInfo": 2,
         "claude.settings.WakeScheduler": 2,
         "claude.settings.Custom3pHelperRun": 2,
-        "claude.settings.Custom3pSetup": 23,
+        "claude.settings.Custom3pSetup": 24,
         "claude.settings.Custom3pSetup.store": 2,
         "claude.settings.Extensions": 26,
         "claude.settings.SupportBundle": 1,
@@ -98,14 +97,14 @@
       "fallbackByInterface": {}
     },
     "claudeCode": {
-      "executable": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/claude-code-bin/platforms/darwin-arm64/claude",
-      "bundledExecutable": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/claude-code-bin/platforms/darwin-arm64/claude",
+      "executable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
+      "bundledExecutable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
       "usesBundledExecutable": true
     }
   },
   "ipcHandlers": {
-    "total": 593,
-    "real": 593,
+    "total": 594,
+    "real": 594,
     "fallback": 0,
     "byOwner": {
       "claude.web.WindowControl": 6,
@@ -133,7 +132,7 @@
       "claude.settings.DesktopInfo": 2,
       "claude.settings.WakeScheduler": 2,
       "claude.settings.Custom3pHelperRun": 2,
-      "claude.settings.Custom3pSetup": 23,
+      "claude.settings.Custom3pSetup": 24,
       "claude.settings.Custom3pSetup.store": 2,
       "claude.settings.Extensions": 26,
       "claude.settings.SupportBundle": 1,
@@ -183,8 +182,8 @@
     "fallbackByInterface": {}
   },
   "claudeCode": {
-    "executable": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/claude-code-bin/platforms/darwin-arm64/claude",
-    "bundledExecutable": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app/Contents/Resources/claude-code-bin/platforms/darwin-arm64/claude",
+    "executable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
+    "bundledExecutable": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64\\resources\\claude-code-bin\\platforms\\win32-x64\\claude.exe",
     "usesBundledExecutable": true
   }
 }

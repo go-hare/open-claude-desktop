@@ -34,7 +34,8 @@ export const MAIN_VIEW_CHROME_PROBE_JS = `(() => {
     const hasChoiceCard = !!document.querySelector(
       'button[aria-label="Continue with Gateway"], button[aria-label*="Continue with"], button[aria-label="Sign in to Anthropic"]',
     );
-    // Official M5t empty sVt (avatar only) / product "Loading…" — keep hold.
+    // Official M5t: void 0===r → empty sVt (bg only, no Ace). Keep hold until
+    // chooser title/cards paint so cold reveal does not flash blank shell.
     if (hasChooserTitle || hasChoiceCard) return "ready";
     return "login";
   }

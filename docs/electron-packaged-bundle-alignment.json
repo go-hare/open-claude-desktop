@@ -1,40 +1,18 @@
 {
-  "generated_at": "2026-08-13T05:14:28.059Z",
-  "project_root": "/Users/apple/work-py/hare-code/open-claude-desktop",
-  "shell_model": "own-forge-electron",
-  "packaged_app": "/Users/apple/work-py/hare-code/open-claude-desktop/out/Claudex-darwin-arm64/Claudex.app",
+  "generated_at": "2026-08-15T07:47:37.728Z",
+  "project_root": "D:\\work\\py\\claude\\open-claude-desktop",
+  "platform": "win32",
+  "packaged_root": "D:\\work\\py\\claude\\open-claude-desktop\\out\\Claudex-win32-x64",
   "executable": {
-    "path": "Contents/MacOS/Claudex",
-    "packaged_exists": true,
-    "residual_claude_overlay_present": false,
-    "packaged_sha256": "84d54ca90172439e690db062a75ec1603ebae0611d62d2aaf19694cbe53b1421"
-  },
-  "info": {
-    "CFBundleExecutable": {
-      "packaged": "Claudex"
-    },
-    "CFBundleName": {
-      "packaged": "Claudex"
-    },
-    "CFBundleIdentifier": {
-      "packaged": "com.local.claudex.desktop"
-    },
-    "CFBundleDisplayName": {
-      "packaged": "Claudex"
-    },
-    "CFBundleDocumentTypes": {
-      "packaged": "Array {\n    Dict {\n        CFBundleTypeExtensions = Array {\n            dxt\n            mcpb\n        }\n        CFBundleTypeRole = Viewer\n        CFBundleTypeName = Desktop Extension\n    }\n    Dict {\n        CFBundleTypeExtensions = Array {\n            skill\n        }\n        CFBundleTypeRole = Viewer\n        CFBundleTypeName = Skill File\n    }\n    Dict {\n        CFBundleTypeRole = Editor\n        LSItemContentTypes = Array {\n            public.folder\n        }\n        CFBundleTypeName = Folder\n    }\n    Dict {\n        CFBundleTypeRole = Viewer\n        LSItemContentTypes = Array {\n            public.data\n        }\n        CFBundleTypeName = All Files\n    }\n}"
-    },
-    "CFBundleURLTypes": {
-      "packaged": "Array {\n    Dict {\n        CFBundleURLName = Claude\n        CFBundleURLSchemes = Array {\n            claude\n        }\n    }\n}"
-    }
+    "exists": true,
+    "sha256": "6bac5759e9bcd2cfe16ae22ea7f4368989511b5880f3b0ea6406e0531ebbcf5e"
   },
   "resources": {
-    "packaged_top_level_count": 104,
+    "app_asar_exists": true,
     "product_web_exists": true,
-    "residual_ion_dist_exists": true,
-    "smol_bin_host_exists": true,
-    "locale_en_us_exists": true,
+    "product_web_build_id": "react-shell",
+    "ion_dist_exists": true,
+    "residual_ion_dist_build_id": "spa-dev",
     "dual_root": {
       "ok": true,
       "reason": null,
@@ -45,70 +23,33 @@
       "rootsDistinct": true,
       "residualIsNotProduct": true
     },
-    "dual_root_ok": true
-  },
-  "residual_helpers": {
-    "chrome_native_host": true,
-    "disclaimer": true
-  },
-  "frameworks": {
-    "top_level": [
-      "Claudex Helper (GPU).app",
-      "Claudex Helper (Plugin).app",
-      "Claudex Helper (Renderer).app",
-      "Claudex Helper.app",
-      "Electron Framework.framework",
-      "Mantle.framework",
-      "ReactiveObjC.framework",
-      "Squirrel.framework"
-    ],
-    "has_electron_framework": true
-  },
-  "symlinks": {
-    "packaged_electron_framework_top_level": [
-      {
-        "name": "Electron Framework",
-        "target": "Versions/Current/Electron Framework"
-      },
-      {
-        "name": "Helpers",
-        "target": "Versions/Current/Helpers"
-      },
-      {
-        "name": "Libraries",
-        "target": "Versions/Current/Libraries"
-      },
-      {
-        "name": "Resources",
-        "target": "Versions/Current/Resources"
-      }
-    ],
-    "has_absolute_framework_symlink": false
+    "dual_root_ok": true,
+    "original_runtime_exists": true,
+    "claude_code_binary_exists": true,
+    "claude_code_binary_size": 150534144,
+    "claude_code_binary_sha256": "568d6cbece77e10dab50ad74f45af885870a524f04543bda5c77381c1e044564",
+    "claude_code_manifest_exists": true,
+    "missing_original_runtime_entries": [],
+    "missing_optional_runtime_entries": []
   },
   "asar": {
-    "packaged_sha256": "2dcdd16d66ebdf0982ffc192d321b954ffcfae19426db088844d19190dbf61ab",
-    "packaged_header_sha256": "013b643318fd3a9c49d2f6ca5a2ff81323a5056526ec98db93002c659192a1db",
-    "plist_integrity_hash": "013b643318fd3a9c49d2f6ca5a2ff81323a5056526ec98db93002c659192a1db",
-    "plist_integrity_matches_packaged_asar": true,
+    "entry_count": 643,
+    "contains_vite_index": true,
+    "contains_vite_preload": true,
+    "contains_package_json": true,
     "contains_smoke_user_data": false,
-    "missing_runtime_node_modules_entries": [],
-    "missing_unpacked_runtime_entries": [],
     "product_main": {
       "exists": true,
-      "entryCount": 226,
+      "entryCount": 643,
       "hasViteIndex": true,
       "hasVitePre": true,
       "hasChunks": true,
-      "indexSize": 499,
+      "indexSize": 0,
       "rootIndexSize": 0,
       "hasStrayRootIndex": false,
       "hasNodeModules": true,
       "hasNodePty": true,
-      "productMarkerHits": [
-        "Claudex Desktop failed to launch",
-        "bootstrapDesktopApp",
-        "chunks\\/index-"
-      ],
+      "productMarkerHits": [],
       "looksOfficialMonolith": false,
       "looksProduct": true,
       "pollutionHits": [],
@@ -116,14 +57,6 @@
       "ok": true,
       "reason": null
     }
-  },
-  "product_identity": {
-    "expected_bundle_id": "com.local.claudex.desktop",
-    "expected_name": "Claudex",
-    "official_bundle_id": "com.anthropic.claudefordesktop",
-    "product_identity_ok": true,
-    "codesign_identifier": "com.local.claudex.desktop",
-    "codesign_identity_ok": true
   },
   "ok": true
 }

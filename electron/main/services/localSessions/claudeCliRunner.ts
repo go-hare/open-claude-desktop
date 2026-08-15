@@ -868,11 +868,10 @@ export class ClaudeCliRunner {
     const transcript = session ? await this.store.getTranscript(session.id) : [];
     const modelHints = [latestInitEvent(transcript)?.model, session?.model];
     const storedUsage = session ? await contextUsageFromStoredSession(this.store, session) : null;
-    // Official: Query.getContextUsage / warm control — not a throwaway --resume probe.
-    if (!this.sdkSessions.has(sessionId) && session?.cliSessionId) {
-      await this.warmSession(sessionId);
-    }
-    // Official SDK Query residual (app.asar / agent-sdk Query.getContextUsage).
+    // Official: Query.getContextUsage only when query already warm.
+    // Do NOT invent await warmSession here — setSessionVisibility warms on
+    // hidden→visible; forcing warm on every getContextUsage/getEffort blocked
+    // Code session switch for multi-seconds (CLI resume spawn).
     const sdk = this.sdkSessions.get(sessionId);
     if (sdk) {
       try {
@@ -898,12 +897,9 @@ export class ClaudeCliRunner {
     ultracodeOfferable: boolean | null;
   } | null> {
     const session = this.store.getSession(sessionId);
-    // Prefer warm query (official). Cold --resume probe races follow-up send.
-    if (!this.sdkSessions.has(sessionId) && session?.cliSessionId) {
-      await this.warmSession(sessionId);
-    }
-    // Official Query.getSettings residual (app.asar / agent-sdk Query.getSettings →
-    // control subtype get_settings). Types may omit it; runtime SDK has the method.
+    // Official: get_settings only on an already-warm Query. Visibility warm is
+    // separate (IdleManager onVisibilityChange). Awaiting warm here made every
+    // composer mount / session switch spawn --resume and freeze UI.
     const sdk = this.sdkSessions.get(sessionId);
     if (sdk) {
       try {
@@ -928,15 +924,15 @@ export class ClaudeCliRunner {
       } catch {
         /* fall through to store + catalog */
       }
-      const catalog = await this.probeCatalogEffortDefaults(session?.model).catch(() => null);
-      const effort = normalizeEffort(session?.effort) ? session!.effort! : catalog?.effort ?? null;
-      return {
-        effort,
-        effortLevels: catalog?.effortLevels ?? null,
-        ultracodeOfferable: catalog?.ultracodeOfferable ?? null,
-      };
     }
-    return null;
+    // Cold: host store + catalog probe only (no spawn).
+    const catalog = await this.probeCatalogEffortDefaults(session?.model).catch(() => null);
+    const effort = normalizeEffort(session?.effort) ? session!.effort! : catalog?.effort ?? null;
+    return {
+      effort,
+      effortLevels: catalog?.effortLevels ?? null,
+      ultracodeOfferable: catalog?.ultracodeOfferable ?? null,
+    };
   }
 
   /**
@@ -1154,6 +1150,9 @@ export class ClaudeCliRunner {
         sdk,
         this.store.getSession(sessionId),
       );
+      // Official: interrupt success keeps warm Query (drain or markNotRunning).
+      // continued=true → IPC must not store.stop / emit stopped. isRunning may be
+      // true (deferred drained) or false (idle); process stays for next enqueue.
       return { continued: true };
     } catch {
       this.stop(sessionId);
@@ -1164,42 +1163,35 @@ export class ClaudeCliRunner {
   }
 
   /**
-   * Official LocalSessionManager.signalTurnComplete residual (app.asar):
-   *   if (drainDeferredSends) { session_updated; return }
-   *   markNotRunning + idleManager.onTurnComplete + session_updated
-   * Keep warm Query; never teardown on this path.
+   * Official LocalSessionManager.signalTurnComplete residual (app.asar) — literal:
+   *   if (drainDeferredSends(A)) { emit session_updated; return }
+   *   markNotRunning(A); idleManager.onTurnComplete; emit queryCompleted; session_updated
    *
-   * Call sites (official): interruptSession success + Stop hook.
-   * Product also routes parent `result` here — same host state; must be idempotent
-   * across interrupt + Stop + result for one completed turn.
+   * Call sites (official only):
+   *   - interruptSession success
+   *   - createBaseHooks Stop
+   *   - result path (product: stream-json type:result → same host state)
+   *
+   * No product invents: no blockSettleAfterDrain, no type:"completed" event.
+   * Web busy after Esc+queue is pendingTurn + queuedMessages (official H), not host invents.
    */
   private signalTurnCompleteSdk(
     sessionId: string,
     sdk: CodeSdkActiveSession,
     session: LocalSession | undefined,
   ): void {
-    // After drain, interrupt+Stop/result may re-enter while follow-up isRunning.
-    if (sdk.skipNextSignalTurnComplete) {
-      sdk.skipNextSignalTurnComplete = false;
-      return;
-    }
-    // Official drainDeferredSends:
-    //   const t = deferredSends; deferredSends = void 0
-    //   for (const n of t) inputStream.enqueue(n)
-    //   isRunning = true
-    // Enqueue ALL at once — do not re-enter runTurnViaSdkQuery (would re-defer #2+).
+    // Official drainDeferredSends(A):
+    //   if (!inputStream || !deferredSends?.length) return false
+    //   t = deferredSends; deferredSends = void 0
+    //   for (n of t) inputStream.enqueue(n)
+    //   isRunning = true; return true
     if (sdk.deferredSends.length > 0) {
       const queued = sdk.deferredSends.splice(0);
       const live = this.store.getSession(sessionId) ?? session;
       if (!live) {
         sdk.isRunning = false;
         sdk.sawResult = true;
-        this.store.setRunning(
-          sessionId,
-          false,
-          { kind: "claude-cli" },
-          { preserveLiveBuffer: true },
-        );
+        this.store.setRunning(sessionId, false, { kind: "claude-cli" });
         this.callbacks.onSessionUpdated(sessionId);
         return;
       }
@@ -1212,74 +1204,24 @@ export class ClaudeCliRunner {
         lastError: undefined,
         lastExitCode: null,
       });
+      // Official: enqueue only (user already emitted at send-time).
       for (const next of queued) {
         const userMessage = buildCodeSdkUserMessage(
           promptWithSelectedFiles(next.text, next.request.userSelectedFiles),
           next.messageUuid,
           next.request.images,
         );
-        this.store.appendTranscriptEvent(sessionId, {
-          type: "user",
-          uuid: userMessage.uuid,
-          message: userMessage.message,
-          sessionId,
-          timestamp: nowIso(),
-        });
-        this.callbacks.onEvent({
-          type: "message",
-          sessionId,
-          message: {
-            type: "user",
-            uuid: userMessage.uuid,
-            message: userMessage.message,
-            sessionId,
-          },
-        });
         sdk.input.enqueue(userMessage);
       }
-      // Absorb same-turn re-entry (Stop/result after interrupt drain). Official may
-      // fire interruptSession + createBaseHooks Stop + residual end_turn settle for
-      // the *interrupted* turn after deferred enqueue. setTimeout(0) was too narrow:
-      // async Stop re-entry after the next tick markNotRunning'd over the follow-up
-      // (queued users already painted, assistant never completed). Keep a short
-      // drain window; real follow-up end_turn arrives seconds later.
-      sdk.skipNextSignalTurnComplete = true;
-      const clearSkip = setTimeout(() => {
-        const active = this.sdkSessions.get(sessionId);
-        if (active === sdk && active.skipNextSignalTurnComplete) {
-          active.skipNextSignalTurnComplete = false;
-        }
-      }, 250);
-      clearSkip.unref?.();
       this.callbacks.onSessionUpdated(sessionId);
       return;
     }
-    // Official markNotRunning — keep query; clear host isRunning only.
-    // Emit type:"completed" so localSessionRunner queryCompleted residual
-    // (idle OS notification) fires for warm Esc interrupt / result settle.
-    // Deferred-drain branch above must NOT emit completed (still running).
-    //
-    // Critical residual: handleSdkMessage sets active.isRunning=false on
-    // type:result *before* onEvent → this method. Early-returning solely on
-    // !sdk.isRunning left store.isRunning stuck true (Stop/Esc pill). Always
-    // sync host store when still running; skip only completed emit when already settled.
-    const hostStillRunning = this.store.getSession(sessionId)?.isRunning === true;
-    if (!sdk.isRunning && !hostStillRunning) {
-      this.callbacks.onSessionUpdated(sessionId);
-      return;
-    }
+    // Official markNotRunning — keep warm Query; only clear isRunning.
+    // No type:"completed" invent (asar: queryCompleted + session_updated only).
     sdk.sawResult = true;
     sdk.isRunning = false;
-    if (hostStillRunning) {
-      this.store.setRunning(
-        sessionId,
-        false,
-        { kind: "claude-cli" },
-        { preserveLiveBuffer: true },
-      );
-      this.onIdleTurnComplete(sessionId);
-      this.callbacks.onEvent({ type: "completed", sessionId });
-    }
+    this.store.setRunning(sessionId, false, { kind: "claude-cli" });
+    this.onIdleTurnComplete(sessionId);
     this.callbacks.onSessionUpdated(sessionId);
   }
 
@@ -1579,22 +1521,13 @@ export class ClaudeCliRunner {
       sdk = created;
     }
 
-    // Official: const c = r.isRunning; if (c) deferredSends.push
-    if (sdk.isRunning && !sdk.sawResult) {
-      sdk.deferredSends.push({
-        text,
-        request: { ...request },
-        messageUuid: seededUuid,
-      });
-      return true;
-    }
-
     const userMessage = buildCodeSdkUserMessage(
       promptWithSelectedFiles(text, request.userSelectedFiles),
       seededUuid,
       request.images,
     );
-    // Live-tail optimistic seed for web (same as print path).
+    // Official sendMessage residual (asar): always emit user, then if isRunning
+    // deferredSends.push and return (do not enqueue yet). Drain only enqueues.
     this.store.appendTranscriptEvent(sessionId, {
       type: "user",
       uuid: userMessage.uuid,
@@ -1612,6 +1545,18 @@ export class ClaudeCliRunner {
         sessionId,
       },
     });
+    // Official asar sendMessage: const c = r.isRunning; if (c) deferredSends.push; return
+    // Do NOT gate on !sawResult — that invent skipped defer while tools still run
+    // after an assistant end_turn/result flag, so Esc found empty deferred and
+    // markNotRunning'd (Send while queue should pop and continue).
+    if (sdk.isRunning) {
+      sdk.deferredSends.push({
+        text,
+        request: { ...request },
+        messageUuid: userMessage.uuid ?? seededUuid,
+      });
+      return true;
+    }
 
     // Official cli_resume_not_found: remember this send so error path can retry once
     // after clearStaleResumeHandle (same user message, fresh Query without resume).
@@ -1795,15 +1740,16 @@ export class ClaudeCliRunner {
                 }
               }
             }
-            // Deliver the CLI row to the web bridge **before** markNotRunning /
-            // type:"completed". Settling first races officialStreamSettleAfterReveal
+            // Deliver the CLI row to the web bridge **before** signalTurnComplete /
+            // markNotRunning. Settling first races officialStreamSettleAfterReveal
             // and can clear Va/typewriter before the final assistant merge lands —
             // UI then shows only a later error_during_execution red card (no text).
             this.callbacks.onEvent(event);
-            // Official: stream-json `result` + createBaseHooks Stop → signalTurnComplete.
-            // Product residual: some 3p turns end with assistant stop_reason=end_turn and/or
-            // system/stop_hook_summary without a stream-json `result` — host isRunning sticks
-            // (Stop/Esc pill never clears). Mirror those durable end signals too.
+            // Official asar: signalTurnComplete only from interrupt + Stop hook.
+            // Product residual: stop_hook_summary when Stop hook delivery missed (3p).
+            // Do NOT settle on type:result here — that invent double-settled after
+            // Esc drain (empty deferred → markNotRunning while queue continues).
+            // Do NOT settle on assistant end_turn — official p is web paint only.
             if (eventType === "message") {
               const settleMsg = asRecord(asRecord(event).message);
               if (shouldSignalTurnCompleteFromCliMessage(settleMsg)) {
@@ -1867,8 +1813,11 @@ export class ClaudeCliRunner {
   }
 
   /**
-   * Official setSessionVisibility residual:
-   * visible → clear idle + warm if no query; hidden + pending result → start idle timeout.
+   * Official IdleManager.onVisibilityChange residual (app.asar):
+   *   t && !r  → clear idle; if !hasActiveQuery && !isWarmingUp → onWarmUp
+   *   !t && r  → start idle timeout when hasPendingResult
+   * Only warms on **hidden→visible** transition — not every setFocused(true)
+   * while already visible, and not from getEffort/getContextUsage.
    */
   setSessionTabVisible(sessionId: string, visible: boolean): void {
     if (!sessionId) return;
@@ -1876,11 +1825,18 @@ export class ClaudeCliRunner {
     const wasVisible = state.isTabVisible;
     state.isTabVisible = visible;
     const hasQuery = this.sdkSessions.has(sessionId);
+    if (visible && !wasVisible) {
+      this.clearIdleTimeout(sessionId);
+      if (!hasQuery && !state.warmInFlight) {
+        // Defer spawn until after paint so switch UI is not blocked on --resume.
+        setTimeout(() => {
+          void this.warmSession(sessionId).catch(() => undefined);
+        }, 0);
+      }
+      return;
+    }
     if (visible) {
       this.clearIdleTimeout(sessionId);
-      if (!hasQuery) {
-        void this.warmSession(sessionId).catch(() => undefined);
-      }
       return;
     }
     // Became hidden after a settled turn → arm official 900s pause timer.

@@ -102,7 +102,31 @@ function npmViewTarball(pkg, version) {
   return out;
 }
 
+function envProxy() {
+  return (
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy ||
+    ""
+  );
+}
+
 function fetchToFile(url, dest) {
+  const proxy = envProxy();
+  // Node https.get ignores HTTP(S)_PROXY. On this host GitHub/npm HTTPS
+  // needs 127.0.0.1:12000 — use curl so copy:claude-code-binary can pin 2.7.39.
+  if (proxy) {
+    try {
+      execFileSync("curl", ["-fsSL", "--connect-timeout", "20", "--retry", "2", "-x", proxy, "-o", dest, url], {
+        timeout: 600_000,
+        stdio: ["ignore", "inherit", "inherit"],
+      });
+      return Promise.resolve();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https:") ? https : http;
     const req = client.get(url, (res) => {

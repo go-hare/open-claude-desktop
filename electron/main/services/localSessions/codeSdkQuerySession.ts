@@ -113,13 +113,6 @@ export type CodeSdkActiveSession = {
   sawInit: boolean;
   sawResult: boolean;
   sessionId: string;
-  /**
-   * Official signalTurnComplete may run from interruptSession + Stop in the same
-   * turn. After drainDeferredSends the follow-up is isRunning again; a second
-   * signalTurnComplete must not markNotRunning over it. Cleared after a short
-   * drain window (not only next-tick) so async Stop/result re-entry still absorbs.
-   */
-  skipNextSignalTurnComplete?: boolean;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -940,7 +933,12 @@ function handleSdkMessage(
   }
   if (type === "result") {
     active.sawResult = true;
-    active.isRunning = false;
+    // Official asar: isRunning is NOT cleared on the result row itself.
+    // signalTurnComplete (Stop / result path) either drainDeferredSends
+    // (isRunning stays true) or markNotRunning. Clearing isRunning here
+    // invents a race: mid-turn sendMessage sees !isRunning and enqueues
+    // instead of deferredSends — Esc then finds empty deferred and
+    // markNotRunning's (Send while queue should continue).
     // Official handleResultMessage: is_error + "No conversation found…" → session_not_found
     const isError = record.is_error === true;
     const resultText =
