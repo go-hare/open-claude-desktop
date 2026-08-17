@@ -15,6 +15,10 @@ import {
   accountSettingsFilePath,
   readAccountSettingsFromUserData,
 } from "../services/settings/toolAccessMode";
+import {
+  localDustBranchNameFromTitle,
+  localDustSessionTitleFromMessage,
+} from "./dustSessionTitle";
 
 export type BootstrapPayload = Record<string, unknown> & {
   system_prompts?: unknown;
@@ -756,8 +760,25 @@ export function createCustom3pApiHandler(options: Custom3pApiOptions) {
       });
     }
     if (pathname.endsWith("/dust/command_display_names")) return json({ results: [] });
-    if (pathname.endsWith("/dust/generate_session_title")) return json({ title: "" });
-    if (pathname.endsWith("/dust/generate_title_and_branch")) return json({ title: "" });
+    // Residual BELz eme: POST { first_session_message } → { title }.
+    // 3p has no Anthropic dust; local compact so Code Recents So typewriter can run.
+    if (pathname.endsWith("/dust/generate_session_title")) {
+      if (request.method !== "POST") return new Response(null, { status: 405 });
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const title = localDustSessionTitleFromMessage(body.first_session_message);
+      return json({ title });
+    }
+    if (pathname.endsWith("/dust/generate_title_and_branch")) {
+      if (request.method !== "POST") return new Response(null, { status: 405 });
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const title = localDustSessionTitleFromMessage(
+        body.first_session_message ?? body.message ?? body.prompt,
+      );
+      return json({
+        title,
+        ...(title ? { branch_name: localDustBranchNameFromTitle(title) } : {}),
+      });
+    }
     if (pathname === "/healthcheck") return json({ status: "healthy", timestamp: new Date().toISOString() });
     if (pathname.startsWith("/i18n/")) return fetchI18nFile(root, new URL(request.url).pathname);
     if (pathname.startsWith("/v1/code/github/")) return json({ branch_statuses: [] });

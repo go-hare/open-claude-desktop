@@ -243,6 +243,31 @@ it("Sign out clear residual: SM 3p shell without persisted 3p → account null (
   expect(payload.deployment_mode).toBe("3p");
 });
 
+it("dust generate_session_title returns local compact title from first_session_message", async () => {
+  const handle = createCustom3pApiHandler({
+    installId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    ionDistRoot: process.cwd(),
+  });
+  const response = await handle(
+    new Request("app://localhost/api/organizations/org/dust/generate_session_title", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ first_session_message: "please fix the login OAuth flow" }),
+    }),
+  );
+  const body = (await response?.json()) as { title: string };
+  expect(body.title).toBe("please fix the login OAuth flow");
+
+  const empty = await handle(
+    new Request("app://localhost/api/organizations/org/dust/generate_session_title", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ first_session_message: "1" }),
+    }),
+  );
+  expect(((await empty?.json()) as { title: string }).title).toBe("");
+});
+
 it("lists local dxt/MCP inventory when userData + mcp config provided", async () => {
   const handle = createCustom3pApiHandler({
     installId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
