@@ -493,147 +493,6 @@ function outerEventUuid(value: unknown): string | undefined {
   return undefined;
 }
 
-/**
- * Plain text blocks on a user envelope (CLI multi-block consolidates mid-turn sends).
- */
-function plainUserTextBlocksFromEvent(event: unknown): string[] {
-  const raw = asRecord(event);
-  if (raw.type !== "user" && asRecord(raw.message).role !== "user") return [];
-  if (raw.parent_tool_use_id || raw.isMeta === true || raw.isSynthetic === true) return [];
-  const nested = asRecord(raw.message);
-  const content = nested.content ?? raw.content;
-  if (typeof content === "string") {
-    const trimmed = content.trim();
-    return trimmed ? [trimmed] : [];
-  }
-  if (!Array.isArray(content)) return [];
-  const blocks: string[] = [];
-  for (const item of content) {
-    const record = asRecord(item);
-    if (record.type != null && record.type !== "" && record.type !== "text") continue;
-    if (record.type === "tool_result" || record.type === "tool_use") return [];
-    const text = typeof record.text === "string"
-      ? record.text
-      : typeof record.content === "string"
-        ? record.content
-        : "";
-    const trimmed = text.trim();
-    if (trimmed) blocks.push(trimmed);
-  }
-  return blocks;
-}
-
-/**
- * Pure multi-text plain user (go-hare mid-turn consolidation): content is ≥2 type:text only.
- */
-function isPureMultiTextUserEvent(event: unknown): boolean {
-  const blocks = plainUserTextBlocksFromEvent(event);
-  if (blocks.length < 2) return false;
-  const raw = asRecord(event);
-  const nested = asRecord(raw.message);
-  const content = nested.content ?? raw.content;
-  if (!Array.isArray(content) || content.length < 2) return false;
-  for (const item of content) {
-    const record = asRecord(item);
-    if (record.type != null && record.type !== "" && record.type !== "text") return false;
-  }
-  return true;
-}
-
-/**
- * Expand go-hare multi-text durable user into N single-text events.
- * Official residual (zke / eke): each human send → own entry / Hb pill. go-hare may write
- * ONE multi-text user for deferred mid-turn sends; product expands so Code paints N pills.
- * Derived outer uuid: `${baseUuid}#t${index}` (stable on reload).
- */
-function expandMultiTextUserEvent(event: unknown): unknown[] {
-  if (!isPureMultiTextUserEvent(event)) return [event];
-  const blocks = plainUserTextBlocksFromEvent(event);
-  const raw = asRecord(event);
-  const baseUuid = outerEventUuid(event) ?? "multi";
-  return blocks.map((text, index) => {
-    const uuid = `${baseUuid}#t${index}`;
-    return {
-      ...raw,
-      type: "user",
-      uuid,
-      message: {
-        role: "user",
-        content: [{ type: "text", text }],
-      },
-    };
-  });
-}
-
-function expandPlainMultiTextEvents(events: unknown[]): unknown[] {
-  let changed = false;
-  const out: unknown[] = [];
-  for (const event of events) {
-    if (isPureMultiTextUserEvent(event)) {
-      changed = true;
-      out.push(...expandMultiTextUserEvent(event));
-    } else {
-      out.push(event);
-    }
-  }
-  return changed ? out : events;
-}
-
-/**
- * Expand disk multi-text users; when live has host pre-echo singles covering the same
- * text multiset, prefer those host uuids in place of `${multi}#tN`. Chronology follows
- * expanded disk order; unused live events append after. Never keep multi-text as one row.
- */
-function mergeLivePreferHostSingles(fromDisk: unknown[], liveEvents: unknown[]): unknown[] {
-  const expandedDisk = expandPlainMultiTextEvents(fromDisk);
-  const multiBases = fromDisk.filter((event) => isPureMultiTextUserEvent(event));
-  if (multiBases.length === 0) {
-    return [...expandedDisk, ...liveEvents];
-  }
-  // Pool of host single-text live events available to replace derived #t slots (FIFO).
-  const hostPool = new Map<string, unknown[]>();
-  const otherLive: unknown[] = [];
-  for (const event of liveEvents) {
-    const blocks = plainUserTextBlocksFromEvent(event);
-    if (blocks.length === 1) {
-      const text = blocks[0]!;
-      const list = hostPool.get(text) ?? [];
-      list.push(event);
-      hostPool.set(text, list);
-      continue;
-    }
-    otherLive.push(event);
-  }
-  const multiBaseIds = new Set(
-    multiBases
-      .map((event) => outerEventUuid(event))
-      .filter((id): id is string => Boolean(id)),
-  );
-  const out: unknown[] = [];
-  for (const event of expandedDisk) {
-    const outer = outerEventUuid(event);
-    // Skip unexpanded multi envelope if any slipped through.
-    if (outer && multiBaseIds.has(outer) && isPureMultiTextUserEvent(event)) continue;
-    const blocks = plainUserTextBlocksFromEvent(event);
-    if (blocks.length === 1 && outer?.includes("#t") && multiBaseIds.has(outer.split("#t")[0]!)) {
-      const text = blocks[0]!;
-      const pool = hostPool.get(text);
-      if (pool && pool.length > 0) {
-        out.push(pool.shift()!);
-        if (pool.length === 0) hostPool.delete(text);
-        continue;
-      }
-      out.push(event);
-      continue;
-    }
-    out.push(event);
-  }
-  // Leftover host singles (not used as multi replacements) + other live.
-  for (const list of hostPool.values()) out.push(...list);
-  out.push(...otherLive);
-  return out;
-}
-
 function sliceThroughMessageId<T>(items: T[] | undefined, messageId?: string): T[] {
   const source = items ?? [];
   if (!messageId) return [...source];
@@ -825,9 +684,11 @@ export class LocalSessionStore {
       if (fromDisk.length > 0) {
         // Official zke: CLI echoes desktop-sent user rows with the same outer uuid —
         // drop live-tail rows already on disk so the merged view has no duplicates.
-        // Do NOT text-dedupe intentional re-sends (new outer uuid, each durable).
-        // go-hare multi-text durable: expand to N singles; prefer host pre-echo uuids
-        // over derived `${multi}#tN` so Code paints N Hb pills (eke residual).
+        // Do NOT text-dedupe live users: intentional re-sends of the same prompt use a
+        // new outer uuid and must stay visible. Mismatched-uuid double paint is handled by
+        // (1) minting messageUuid on start/send + stdin stamp, and (2) web promote of
+        // isLocalOptimistic plain-user seeds by same trimmed text.
+        // Durable shape is CLI SoT (1 send → 1 user row). No multi-text expand here.
         const onDisk = new Set(
           fromDisk.map((event) => outerEventUuid(event)).filter((id): id is string => Boolean(id)),
         );
@@ -836,11 +697,10 @@ export class LocalSessionStore {
           if (outer && onDisk.has(outer)) return false;
           return true;
         });
-        const merged = mergeLivePreferHostSingles(fromDisk, liveEvents);
         // Layer host-owned task bookends + hook stdout (stream-only) under live tail.
         return mergeTranscriptWithSidecars(
           mergeTranscriptWithTaskBookends(
-            merged,
+            [...fromDisk, ...liveEvents],
             session.taskBookends ?? [],
           ),
           session.hookBookends ?? [],

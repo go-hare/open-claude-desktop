@@ -107,29 +107,21 @@ it("getTranscript: reads jsonl from disk and appends the live tail while running
   });
 });
 
-it("getTranscript: expands multi-block durable and prefers host pre-echo singles", async () => {
-  const configDir = tempDir("code-live-multiblock-");
+it("getTranscript: uuid-dedupes live pre-echo when disk already has same outer uuid", async () => {
+  const configDir = tempDir("code-live-uuid-dedupe-");
   await withConfigDir(configDir, async () => {
     const { store } = makeStore();
-    // Mid-turn host emits 5 unique-uuid singles; CLI durable multi-text row is already on disk.
-    // Product residual (eke): expand multi → N singles; prefer host uuids (not one glued pill).
+    // Official zke: host pre-echo + CLI durable share outer uuid → one row.
     const session = store.start({ prompt: "seed", cwd: "D:\\proj", messageUuid: "seed-user" });
-    store.setCliSessionId(session.id, "cli-multi");
-    // Write durable multi-block first (same order as other getTranscript tests).
-    writeCliJsonl("D:\\proj", "cli-multi", [
+    store.setCliSessionId(session.id, "cli-uuid");
+    writeCliJsonl("D:\\proj", "cli-uuid", [
       {
         type: "user",
-        uuid: "282b9279-b49e-4090-a90f-f24345f4b4b8",
+        uuid: "host-echo-0",
         timestamp: "2026-08-17T12:00:10.000Z",
         message: {
           role: "user",
-          content: [
-            { type: "text", text: "3" },
-            { type: "text", text: "3" },
-            { type: "text", text: "3" },
-            { type: "text", text: "3" },
-            { type: "text", text: "2" },
-          ],
+          content: [{ type: "text", text: "3" }],
         },
       },
     ]);
@@ -138,76 +130,28 @@ it("getTranscript: expands multi-block durable and prefers host pre-echo singles
       executable: "sdk-query",
       startedAt: "2026-08-17T12:00:00.000Z",
     });
-    // Clear start seed so only mid-turn pre-echoes are under test.
     store.clearLiveBuffer(session.id);
-    for (const [index, text] of ["3", "3", "3", "3", "2"].entries()) {
-      store.appendTranscriptEvent(session.id, {
-        type: "user",
-        uuid: `host-echo-${index}`,
-        timestamp: `2026-08-17T12:00:0${index}.000Z`,
-        message: { role: "user", content: [{ type: "text", text }] },
-      });
-    }
+    store.appendTranscriptEvent(session.id, {
+      type: "user",
+      uuid: "host-echo-0",
+      timestamp: "2026-08-17T12:00:00.000Z",
+      message: { role: "user", content: [{ type: "text", text: "3" }] },
+    });
+    store.appendTranscriptEvent(session.id, {
+      type: "user",
+      uuid: "host-echo-1",
+      timestamp: "2026-08-17T12:00:01.000Z",
+      message: { role: "user", content: [{ type: "text", text: "2" }] },
+    });
 
     const events = (await store.getTranscript(session.id)) as Array<{
       type?: string;
       uuid?: string;
-      message?: { content?: unknown };
     }>;
     const users = events.filter((event) => event.type === "user");
     expect(users.map((event) => event.uuid)).toEqual([
       "host-echo-0",
       "host-echo-1",
-      "host-echo-2",
-      "host-echo-3",
-      "host-echo-4",
-    ]);
-    expect(users.every((event) => {
-      const content = event.message?.content;
-      return Array.isArray(content) && content.length === 1;
-    })).toBe(true);
-  });
-});
-
-it("getTranscript: expands multi-block durable alone into N singles on reload", async () => {
-  const configDir = tempDir("code-live-multiblock-reload-");
-  await withConfigDir(configDir, async () => {
-    const { store } = makeStore();
-    const session = store.start({ prompt: "seed", cwd: "D:\\proj", messageUuid: "seed-user" });
-    store.setCliSessionId(session.id, "cli-multi-reload");
-    writeCliJsonl("D:\\proj", "cli-multi-reload", [
-      {
-        type: "user",
-        uuid: "e9aaf15c-756e-48be-abee-9c7bf6d7261b",
-        timestamp: "2026-08-17T12:50:04.665Z",
-        message: {
-          role: "user",
-          content: [
-            { type: "text", text: "3" },
-            { type: "text", text: "3" },
-            { type: "text", text: "3" },
-            { type: "text", text: "2" },
-          ],
-        },
-      },
-    ]);
-    store.clearLiveBuffer(session.id);
-    store.setRunning(session.id, false);
-
-    const events = (await store.getTranscript(session.id)) as Array<{
-      type?: string;
-      uuid?: string;
-      message?: { content?: Array<{ text?: string }> };
-    }>;
-    const users = events.filter((event) => event.type === "user");
-    expect(users.map((event) => event.uuid)).toEqual([
-      "e9aaf15c-756e-48be-abee-9c7bf6d7261b#t0",
-      "e9aaf15c-756e-48be-abee-9c7bf6d7261b#t1",
-      "e9aaf15c-756e-48be-abee-9c7bf6d7261b#t2",
-      "e9aaf15c-756e-48be-abee-9c7bf6d7261b#t3",
-    ]);
-    expect(users.map((event) => event.message?.content?.[0]?.text)).toEqual([
-      "3", "3", "3", "2",
     ]);
   });
 });
