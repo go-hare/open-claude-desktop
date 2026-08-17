@@ -53,7 +53,18 @@ export function getSessionRunner(context: IpcHandlerContext, iface: SessionBridg
     onEvent: (event) => dispatchSessionRunnerEvent(context, iface, event),
     onSessionUpdated: (sessionId) => {
       const session = store.getSession(sessionId);
-      if (session) dispatchSessionRunnerEvent(context, iface, { type: "session_updated", sessionId, session });
+      if (!session) return;
+      // Mirror handlers toBridgeSession: live runner.active OR store.isRunning.
+      // Prevents disk-stale isRunning=false while the CLI child is still open.
+      const live = {
+        ...session,
+        isRunning: Boolean(session.isRunning) || runner.isActive(sessionId),
+      };
+      dispatchSessionRunnerEvent(context, iface, {
+        type: "session_updated",
+        sessionId,
+        session: live,
+      });
     },
   });
   scoped[iface] = runner;

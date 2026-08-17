@@ -32,6 +32,11 @@ export type LocalSession = {
   id: string;
   sessionId?: string;
   title: string;
+  /**
+   * Official residual titleSource: "auto" after dust generate_session_title;
+   * "user" after manual rename. Undefined = host default / unset.
+   */
+  titleSource?: "auto" | "user" | "prompt";
   kind: LocalSessionKind;
   createdAt: string;
   updatedAt: string;
@@ -98,6 +103,9 @@ function titleFromPrompt(prompt?: string): string {
   const first = prompt?.trim().split("\n")[0] ?? "New session";
   return first.length > 40 ? `${first.slice(0, 40)}…` : first || "New session";
 }
+
+/** Official code list residual: title || worktreeName || "General coding session". */
+const DEFAULT_CODE_TITLE = "General coding session";
 
 function uniqueStrings(values: unknown): string[] {
   return Array.isArray(values) ? [...new Set(values.filter((value): value is string => typeof value === "string" && value.length > 0))] : [];
@@ -248,12 +256,18 @@ export class LocalSessionStore {
     const folders = uniqueStrings(input.folders).length > 0 ? uniqueStrings(input.folders) : uniqueStrings(input.userSelectedFolders);
     const cwd = input.cwd ?? folders[0];
     const id = `${input.kind ?? this.defaultKind}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+    const kind = input.kind ?? this.defaultKind;
+    // Official residual: local code starts without prompt-as-title (list falls back to
+    // "General coding session"); auto title arrives later via titleSource:"auto".
+    // Cowork/epitaxy may still seed from first prompt line when title omitted.
+    const title = input.title
+      ?? (kind === "code" ? DEFAULT_CODE_TITLE : titleFromPrompt(prompt));
     const session: LocalSession = {
       id,
       sessionId: id,
-      title: input.title ?? titleFromPrompt(prompt),
-      kind: input.kind ?? this.defaultKind,
-      sessionKind: (input.kind ?? this.defaultKind) === "code" ? "code" : "cowork",
+      title,
+      kind,
+      sessionKind: kind === "code" ? "code" : "cowork",
       createdAt: timestamp,
       updatedAt: timestamp,
       lastActivityAt: timestamp,
@@ -293,11 +307,23 @@ export class LocalSessionStore {
     return session;
   }
 
-  update(id: string, input: Partial<LocalSession>): LocalSession | null {
+  update(id: string, input: Partial<LocalSession> & { titleSource?: LocalSession["titleSource"] }): LocalSession | null {
     const session = this.sessions.get(id);
     if (!session) return null;
     const updatedAt = nowIso();
-    const updated = { ...session, ...input, id, sessionId: id, kind: session.kind, updatedAt, lastActivityAt: updatedAt };
+    // Manual rename without titleSource → user; auto path passes titleSource:"auto".
+    const titleSource = input.titleSource
+      ?? (typeof input.title === "string" && input.title !== session.title ? "user" : session.titleSource);
+    const updated = {
+      ...session,
+      ...input,
+      id,
+      sessionId: id,
+      kind: session.kind,
+      titleSource,
+      updatedAt,
+      lastActivityAt: updatedAt,
+    };
     this.sessions.set(id, updated);
     this.save();
     return updated;

@@ -71,24 +71,24 @@ function ok(value: unknown = true) {
   return value;
 }
 
-function toBridgeSession(session: unknown): unknown {
+function toBridgeSession(session: unknown, isActive?: (sessionId: string) => boolean): unknown {
   const raw = asObject(session);
   const id = asString(raw.id) ?? asString(raw.sessionId);
   if (!id) return session;
   const updatedAt = asString(raw.updatedAt) ?? asString(raw.lastActivityAt) ?? new Date().toISOString();
+  // Live CLI turn (runner.active) wins over stale disk/store isRunning. sendMessage used
+  // to emit session_updated before runTurn setRunning(true), freezing false into Recents.
+  const storeRunning = typeof raw.isRunning === "boolean" ? raw.isRunning : raw.stopped !== true;
+  const liveRunning = isActive?.(id) === true;
   return {
     ...raw,
     id,
     sessionId: id,
     sessionKind: asString(raw.sessionKind) ?? (raw.kind === "code" ? "code" : "cowork"),
     lastActivityAt: asString(raw.lastActivityAt) ?? updatedAt,
-    isRunning: typeof raw.isRunning === "boolean" ? raw.isRunning : raw.stopped !== true,
+    isRunning: liveRunning || storeRunning,
     userSelectedFolders: Array.isArray(raw.userSelectedFolders) ? raw.userSelectedFolders : raw.folders,
   };
-}
-
-function toBridgeSessions(sessions: unknown[]): unknown[] {
-  return sessions.map(toBridgeSession);
 }
 
 async function commandExists(command: string): Promise<boolean> {
@@ -804,11 +804,13 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
     else events.localAgentModeEvent(event);
   };
 
-  const dispatchSessionEvent = (type: string, sessionId?: string, session?: unknown) => {
-    dispatchBridgeSessionEvent({ type, sessionId, session: toBridgeSession(session) });
-  };
-
   const sessionRunner = getSessionRunner(context, bridgeInterface);
+  const bridgeSession = (session: unknown) => toBridgeSession(session, (id) => sessionRunner.isActive(id));
+  const toBridgeSessions = (sessions: unknown[]) => sessions.map((session) => bridgeSession(session));
+
+  const dispatchSessionEvent = (type: string, sessionId?: string, session?: unknown) => {
+    dispatchBridgeSessionEvent({ type, sessionId, session: bridgeSession(session) });
+  };
 
   const startDiffReview = async (cwdOrSession: unknown, options: unknown, title: string) => {
     const request = { ...asObject(cwdOrSession), ...asObject(options) };
@@ -831,7 +833,7 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
     const session = store.start({ cwd, prompt, title, origin: "diff-review", permissionMode: "default" });
     dispatchSessionEvent("start", session.id, session);
     sessionRunner.runTurn(session.id, prompt, { cwd, origin: "diff-review" });
-    return toBridgeSession(session);
+    return bridgeSession(session);
   };
 
   const getTeleportReadinessFor = async (sessionOrCwd: unknown) => {
@@ -891,7 +893,7 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
     });
     dispatchSessionEvent("start", session.id, updated ?? session);
     sessionRunner.runTurn(session.id, prompt, { cwd: readiness.cwd, origin: "teleport-local-handoff" });
-    return { success: true, localOnly: true, mode: "local-handoff", session: toBridgeSession(updated ?? session), readiness };
+    return { success: true, localOnly: true, mode: "local-handoff", session: bridgeSession(updated ?? session), readiness };
   };
 
   const shellPtyBaseSessionId = (sessionId: string) => {
@@ -944,7 +946,7 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
 
   const realHandlers: InterfaceHandlers = {
     getAll: async () => toBridgeSessions(store.getAll()),
-    getSession: async (_event, id) => (asString(id) ? toBridgeSession(store.getSession(asString(id)!)) : null),
+    getSession: async (_event, id) => (asString(id) ? bridgeSession(store.getSession(asString(id)!)) : null),
     getTranscript: async (_event, id) => (asString(id) ? store.getTranscript(asString(id)!) : []),
     start: async (_event, input) => {
       const request = asObject(input);
@@ -959,38 +961,42 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
         dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", "CCDScheduledTasks", "onScheduledTaskEvent", payload);
         dispatchBridgeEvent(context.windows.mainView.webContents, "claude.web", "CoworkScheduledTasks", "onScheduledTaskEvent", payload);
       }
-      return toBridgeSession(store.getSession(session.id) ?? session);
+      return bridgeSession(store.getSession(session.id) ?? session);
     },
     importCliSession: async (_event, input) => {
       const session = store.importSession(asObject(input) as never);
       dispatchSessionEvent("start", session.id, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     updateSession: async (_event, id, input) => {
       const sessionId = asString(id);
       const session = sessionId ? store.update(sessionId, asObject(input) as never) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     sendMessage: async (_event, id, text) => {
       const sessionId = asString(id);
       const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text) : null;
-      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      // Official: isRunning true with the open turn. Do NOT emit session_updated while
+      // store still has isRunning false — that raced re-entry / Recents into idle chrome
+      // (static spark + Send) until the next stream tick. runTurn setRunning(true) +
+      // onSessionUpdated is the single running meta event; return post-runTurn session.
       if (sessionId && session && typeof text === "string") sessionRunner.runTurn(sessionId, text);
-      return toBridgeSession(sessionId ? store.getSession(sessionId) ?? session : session);
+      else if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      return bridgeSession(sessionId ? store.getSession(sessionId) ?? session : session);
     },
     sendSideChatMessage: async (_event, id, text) => {
       const sessionId = asString(id);
       const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text, "user") : null;
-      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
       if (sessionId && session && typeof text === "string") sessionRunner.runTurn(sessionId, text);
-      return toBridgeSession(session);
+      else if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
+      return bridgeSession(sessionId ? store.getSession(sessionId) ?? session : session);
     },
     forkSession: async (_event, id, messageId) => {
       const sessionId = asString(id);
       const session = sessionId ? store.fork(sessionId, asString(messageId) ?? undefined) : null;
       if (session) dispatchSessionEvent("start", session.id, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     archive: async (_event, id) => {
       const sessionId = asString(id);
@@ -1042,13 +1048,13 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
       const sessionId = asString(id);
       const session = sessionId ? store.addFolders(sessionId, directories) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     addFolderToSession: async (_event, id, folder) => {
       const sessionId = asString(id);
       const session = sessionId ? store.addFolders(sessionId, [folder]) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     addTrustedFolder: async (_event, folder) => {
       const target = asString(folder);
@@ -1088,12 +1094,12 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
     getCodeStats: async (_event, cwdOrSession) => (cwdOrSession ? getWorkspaceCodeStats(cwdFromSession(store, cwdOrSession)) : getSessionUsageCodeStats(store)),
     getDefaultEffort: async () => "medium",
     getEffort: async (_event, id) => (asString(id) ? store.getSession(asString(id)!)?.effort ?? "medium" : "medium"),
-    setEffort: async (_event, id, effort) => toBridgeSession(asString(id) ? store.update(asString(id)!, { effort: String(effort ?? "medium") }) : null),
+    setEffort: async (_event, id, effort) => bridgeSession(asString(id) ? store.update(asString(id)!, { effort: String(effort ?? "medium") }) : null),
     getDefaultPermissionMode: async () => "default",
     getPermissionMode: async (_event, id) => (asString(id) ? store.getSession(asString(id)!)?.permissionMode ?? "default" : "default"),
-    setPermissionMode: async (_event, id, mode) => toBridgeSession(asString(id) ? store.update(asString(id)!, { permissionMode: String(mode ?? "default") }) : null),
-    setModel: async (_event, id, model) => toBridgeSession(asString(id) ? store.update(asString(id)!, { model: String(model ?? "") }) : null),
-    setVisibility: async (_event, id, visibility) => toBridgeSession(asString(id) ? store.update(asString(id)!, { visibility: String(visibility ?? "") }) : null),
+    setPermissionMode: async (_event, id, mode) => bridgeSession(asString(id) ? store.update(asString(id)!, { permissionMode: String(mode ?? "default") }) : null),
+    setModel: async (_event, id, model) => bridgeSession(asString(id) ? store.update(asString(id)!, { model: String(model ?? "") }) : null),
+    setVisibility: async (_event, id, visibility) => bridgeSession(asString(id) ? store.update(asString(id)!, { visibility: String(visibility ?? "") }) : null),
     setFocusedSession: async () => true,
     setFastMode: async () => true,
     setAutoFixEnabled: async () => true,
@@ -1101,19 +1107,19 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
       const sessionId = asString(id);
       const session = sessionId ? store.update(sessionId, { mcpServers } as never) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     replaceEnabledMcpTools: async (_event, id, enabledMcpTools) => {
       const sessionId = asString(id);
       const session = sessionId ? store.update(sessionId, { enabledMcpTools: Array.isArray(enabledMcpTools) ? enabledMcpTools : [] } as never) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     replaceRemoteMcpServers: async (_event, id, remoteMcpServers) => {
       const sessionId = asString(id);
       const session = sessionId ? store.update(sessionId, { remoteMcpServers } as never) : null;
       if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      return toBridgeSession(session);
+      return bridgeSession(session);
     },
     setAvailableCodeModels: async () => true,
     setChromePermissionMode: async () => true,
@@ -1495,7 +1501,7 @@ function createSessionHandlers(store: LocalSessionStore, context: IpcHandlerCont
       const updated = store.update(session.id, { metadata: { ...(session.metadata ?? {}), sideChat: true, parentSessionId: parentId } });
       dispatchSessionEvent("start", session.id, updated ?? session);
       if (prompt) sessionRunner.runTurn(session.id, prompt, request);
-      return toBridgeSession(updated ?? session);
+      return bridgeSession(updated ?? session);
     },
     stopSideChat: async (_event, id) => {
       const sessionId = asString(id) ?? asString(asObject(id).sessionId);

@@ -413,6 +413,11 @@ export class ClaudeCliRunner {
     return true;
   }
 
+  /** Live process map — source of truth for host isRunning while a turn is open. */
+  isActive(sessionId: string): boolean {
+    return this.active.has(sessionId);
+  }
+
   findSessionIdForPermission(requestId: string): string | null {
     for (const [sessionId, turn] of this.active) {
       if (turn.pendingPermissions.has(requestId)) return sessionId;
