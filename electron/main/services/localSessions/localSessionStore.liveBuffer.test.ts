@@ -236,6 +236,78 @@ it("taskBookends: process-exit host-exit residual collapses with later CLI task_
   });
 });
 
+it("hookBookends: system hook_progress/response survive clearLiveBuffer for residual gw/TM", async () => {
+  const configDir = tempDir("code-hook-bookends-");
+  await withConfigDir(configDir, async () => {
+    const { store, filePath } = makeStore();
+    const session = store.start({ prompt: "review", cwd: "D:\\proj", messageUuid: "user-hook" });
+    store.setCliSessionId(session.id, "cli-hook");
+    writeCliJsonl("D:\\proj", "cli-hook", [
+      {
+        type: "user",
+        uuid: "user-hook",
+        timestamp: "2026-08-01T13:00:00.000Z",
+        message: { role: "user", content: "review" },
+      },
+    ]);
+
+    const progressStdout =
+      '<remote-review-progress>{"stage":"verifying","bugs_found":2,"bugs_verified":0,"bugs_refuted":0}</remote-review-progress>'
+      + '<review-bug>{"id":"b1","name":"Null deref","file":"a.ts","line":10,"status":"verifying"}</review-bug>';
+    store.appendTranscriptEvent(session.id, {
+      type: "system",
+      subtype: "hook_progress",
+      hook_id: "hook-tm-1",
+      stdout: progressStdout,
+      uuid: "hook-p1",
+      timestamp: "2026-08-01T13:00:02.000Z",
+    });
+    // Later progress for same hook_id collapses (latest-wins).
+    store.appendTranscriptEvent(session.id, {
+      type: "system",
+      subtype: "hook_progress",
+      hook_id: "hook-tm-1",
+      stdout:
+        '<remote-review-progress>{"stage":"synthesizing","bugs_found":2,"bugs_verified":1,"bugs_refuted":0}</remote-review-progress>',
+      uuid: "hook-p2",
+      timestamp: "2026-08-01T13:00:05.000Z",
+    });
+    store.appendTranscriptEvent(session.id, {
+      type: "system",
+      subtype: "hook_response",
+      hook_id: "hook-tm-1",
+      stdout: progressStdout,
+      outcome: "success",
+      uuid: "hook-r1",
+      timestamp: "2026-08-01T13:00:10.000Z",
+    });
+
+    store.setRunning(session.id, false);
+    expect(store.getLiveEvents(session.id)).toHaveLength(0);
+    const settled = (await store.getTranscript(session.id)) as Array<{
+      type?: string;
+      subtype?: string;
+      hook_id?: string;
+      uuid?: string;
+      outcome?: string;
+    }>;
+    const hooks = settled.filter(
+      (event) => event.type === "system" && (event.subtype === "hook_progress" || event.subtype === "hook_response"),
+    );
+    expect(hooks).toHaveLength(2);
+    expect(hooks.map((event) => event.subtype)).toEqual(["hook_progress", "hook_response"]);
+    expect(hooks[0]?.uuid).toBe("hook-p2");
+    expect(hooks[1]?.outcome).toBe("success");
+
+    const disk = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+      sessions: Array<{ id: string; hookBookends?: unknown[] }>;
+    };
+    const row = disk.sessions.find((item) => item.id === session.id);
+    expect(Array.isArray(row?.hookBookends)).toBe(true);
+    expect(row?.hookBookends).toHaveLength(2);
+  });
+});
+
 it("getTranscript: intentional same-text re-send keeps second live user (new uuid)", async () => {
   const configDir = tempDir("code-live-resend-");
   await withConfigDir(configDir, async () => {

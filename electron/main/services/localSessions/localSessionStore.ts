@@ -116,6 +116,11 @@ export type LocalSession = {
   lastActivityAt?: string;
   isRunning?: boolean;
   /**
+   * Official O.tags residual (c119 oi / ri): e.g. "ultrareview" marks init chrome.
+   * Product: set on launchUltrareview / startDiffReview local invent sessions.
+   */
+  tags?: string[];
+  /**
    * Official CodeStatusGlyph / u_e residual:
    * hasCompleted && isUnread → ready (green status-dot) when not focused.
    * Cleared on setFocusedSession / open.
@@ -176,6 +181,14 @@ export type LocalSession = {
    * lifecycle without this sidecar. Kept small; not full transcript.
    */
   taskBookends?: unknown[];
+  /**
+   * Host-owned system hook_progress / hook_response (c119 gw / residual TM).
+   * print.ts emits them on stream-json stdout when verbose hooks run; they are not
+   * guaranteed in session jsonl. After clearLiveBuffer, residualExtractUltrareviewProgress
+   * would lose we without this sidecar. Cap small; not invent progress — only retain
+   * real CLI envelopes when present.
+   */
+  hookBookends?: unknown[];
 };
 
 /** Official session.prs entry subset (number + state + optional url/title/repo). */
@@ -219,6 +232,8 @@ export type StartLocalSessionInput = {
   systemPromptAppend?: string;
   tools?: unknown[];
   origin?: string;
+  /** Official O.tags — e.g. ["ultrareview"] for residual oi chrome. */
+  tags?: string[];
   userSelectedFolders?: string[];
   userSelectedFiles?: string[];
   mountedProjects?: LocalMountedProject[];
@@ -358,12 +373,22 @@ function messageIdentity(value: unknown): string | undefined {
 const TASK_BOOKEND_SUBTYPES = new Set(["task_started", "task_progress", "task_notification"]);
 /** Cap host-owned bookends so code-sessions.json stays small. */
 const MAX_TASK_BOOKENDS = 200;
+/** Residual TM: hook stdout subtypes (c119 gw). Separate from task bookends. */
+const HOOK_STDOUT_SUBTYPES = new Set(["hook_progress", "hook_response"]);
+const MAX_HOOK_BOOKENDS = 100;
 
 function isTaskBookendEvent(event: unknown): boolean {
   const raw = asRecord(event);
   if (raw.type !== "system") return false;
   const subtype = typeof raw.subtype === "string" ? raw.subtype : "";
   return TASK_BOOKEND_SUBTYPES.has(subtype);
+}
+
+function isHookStdoutEvent(event: unknown): boolean {
+  const raw = asRecord(event);
+  if (raw.type !== "system") return false;
+  const subtype = typeof raw.subtype === "string" ? raw.subtype : "";
+  return HOOK_STDOUT_SUBTYPES.has(subtype);
 }
 
 function taskBookendKey(event: unknown): string | undefined {
@@ -383,9 +408,45 @@ function taskBookendKey(event: unknown): string | undefined {
   return `${subtype}:${taskId}`;
 }
 
+/** Collapse progress to latest per hook_id; keep terminal response per hook_id. */
+function hookBookendKey(event: unknown): string | undefined {
+  const raw = asRecord(event);
+  const hookId =
+    (typeof raw.hook_id === "string" && raw.hook_id)
+    || (typeof raw.hookId === "string" && raw.hookId)
+    || "";
+  const subtype = typeof raw.subtype === "string" ? raw.subtype : "";
+  if (!hookId || !subtype) {
+    const uuid = outerEventUuid(event);
+    return uuid ? `hook-uuid:${uuid}` : undefined;
+  }
+  if (subtype === "hook_progress") return `hook_progress:${hookId}`;
+  return `hook_response:${hookId}`;
+}
+
 function eventTimestampIso(event: unknown): string {
   const raw = asRecord(event);
   return typeof raw.timestamp === "string" ? raw.timestamp : "";
+}
+
+function mergeTranscriptWithSidecars(base: unknown[], ...sidecars: unknown[][]): unknown[] {
+  const extras = sidecars.flat().filter((event) => event != null);
+  if (extras.length === 0) return base;
+  // Prefer disk/live rows when uuid already present; append host-only sidecars.
+  const onBase = new Set(
+    base.map((event) => outerEventUuid(event)).filter((id): id is string => Boolean(id)),
+  );
+  const missing = extras.filter((event) => {
+    const uuid = outerEventUuid(event);
+    return !uuid || !onBase.has(uuid);
+  });
+  if (missing.length === 0) return base;
+  return [...base, ...missing].sort((a, b) => {
+    const ta = eventTimestampIso(a);
+    const tb = eventTimestampIso(b);
+    if (ta && tb && ta !== tb) return ta.localeCompare(tb);
+    return 0;
+  });
 }
 
 function mergeTranscriptWithTaskBookends(base: unknown[], bookends: unknown[]): unknown[] {
@@ -635,14 +696,20 @@ export class LocalSessionStore {
           if (outer && onDisk.has(outer)) return false;
           return true;
         });
-        // Layer host-owned task bookends (SDK stream-only) under live tail.
-        return mergeTranscriptWithTaskBookends(
-          [...fromDisk, ...liveEvents],
-          session.taskBookends ?? [],
+        // Layer host-owned task bookends + hook stdout (stream-only) under live tail.
+        return mergeTranscriptWithSidecars(
+          mergeTranscriptWithTaskBookends(
+            [...fromDisk, ...liveEvents],
+            session.taskBookends ?? [],
+          ),
+          session.hookBookends ?? [],
         );
       }
     }
-    return mergeTranscriptWithTaskBookends(liveEvents, session.taskBookends ?? []);
+    return mergeTranscriptWithSidecars(
+      mergeTranscriptWithTaskBookends(liveEvents, session.taskBookends ?? []),
+      session.hookBookends ?? [],
+    );
   }
 
   /**
@@ -954,6 +1021,9 @@ export class LocalSessionStore {
       tools: input.tools,
       scheduledTaskId: input.scheduledTaskId,
       origin: input.origin,
+      tags: Array.isArray(input.tags) && input.tags.length > 0
+        ? [...new Set(input.tags.filter((tag): tag is string => typeof tag === "string" && tag.length > 0))]
+        : undefined,
       userSelectedFiles,
       mountedProjects: input.mountedProjects,
       isRunning: false,
@@ -1063,6 +1133,11 @@ export class LocalSessionStore {
     if (isTaskBookendEvent(event)) {
       this.rememberTaskBookend(session, event);
     }
+    // Residual TM (c119 gw): retain real hook_progress/hook_response when CLI emits them.
+    // Not invent progress — only preserve envelopes that already arrived on stream-json.
+    if (isHookStdoutEvent(event)) {
+      this.rememberHookBookend(session, event);
+    }
     session.updatedAt = timestamp;
     session.lastActivityAt = timestamp;
     this.save();
@@ -1089,6 +1164,28 @@ export class LocalSessionStore {
     list.push(event);
     while (list.length > MAX_TASK_BOOKENDS) list.shift();
     session.taskBookends = list;
+  }
+
+  /**
+   * Persist system hook_progress / hook_response for residual gw / TM after settle.
+   * Progress latest-wins per hook_id; response kept per hook_id.
+   */
+  private rememberHookBookend(session: LocalSession, event: unknown): void {
+    const key = hookBookendKey(event);
+    const list = Array.isArray(session.hookBookends) ? [...session.hookBookends] : [];
+    if (key) {
+      const index = list.findIndex((item) => hookBookendKey(item) === key);
+      if (index >= 0) list.splice(index, 1);
+    } else {
+      const uuid = outerEventUuid(event);
+      if (uuid) {
+        const index = list.findIndex((item) => outerEventUuid(item) === uuid);
+        if (index >= 0) list.splice(index, 1);
+      }
+    }
+    list.push(event);
+    while (list.length > MAX_HOOK_BOOKENDS) list.shift();
+    session.hookBookends = list;
   }
 
   /**
@@ -1423,6 +1520,7 @@ export class LocalSessionStore {
       transcript: [],
       // Bookends already interleaved into the sliced live transcript; avoid double-merge.
       taskBookends: [],
+      hookBookends: [],
       isRunning: false,
       stopped: false,
       runtime: { kind: "local", finishedAt: timestamp },
@@ -1453,6 +1551,7 @@ export class LocalSessionStore {
       transcript: [],
       // Bookends already interleaved into the sliced live transcript; avoid double-merge.
       taskBookends: [],
+      hookBookends: [],
       updatedAt: timestamp,
       lastActivityAt: timestamp,
       isRunning: false,
@@ -1481,6 +1580,7 @@ export class LocalSessionStore {
     session.messages = [];
     session.transcript = [];
     session.taskBookends = [];
+    session.hookBookends = [];
     this.clearLiveBuffer(id);
     session.updatedAt = nowIso();
     this.save();

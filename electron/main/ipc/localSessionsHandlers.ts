@@ -65,6 +65,7 @@ import {
   type SessionSshConfig,
 } from "../services/localSessions/sshTranscriptSync";
 import { resolveCodeTranscriptPath } from "../services/localSessions/codeTranscriptJsonl";
+import { CodeSessionSummaryService } from "../services/localSessions/codeSessionSummary";
 import {
   getTranscriptSearchWorkerHost,
   type TranscriptSearchSession,
@@ -94,7 +95,7 @@ const TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
 // Code LocalSessions only. Cowork LocalAgentModeSessions is registered solely via
 // coworkSessionsHandlers + CoworkSessionManager (see registerDesktopIpc).
 const LOCAL_SESSIONS_METHODS = [
-  "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkPty","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getAvailablePermissionModes","getDetectedProjects","getDiffFileContent","getEffort","getEffortCatalogDefaults","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getMergeBase","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrIssueComments","getPrReviewComments","getPrReviews","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
+  "addDirectories","archive","cancelQueuedMessage","checkGhAvailable","checkPty","checkRemoteTrust","checkTrust","clearSession","commitAllChanges","commitWipForBranchSwitch","createAgent","createLocalPr","delete","disableAutoMerge","discardWorkingTree","enableAutoMerge","ensureBranchPushed","ensureSSHConnected","forkSession","generateLocalPrContent","getAgents","getAll","getCodeStats","getCommitDiff","getContextUsage","getDefaultEffort","getDefaultPermissionMode","getAvailablePermissionModes","getDetectedProjects","getDiffFileContent","getEffort","getEffortCatalogDefaults","getGhIssue","getGitCommits","getGitDiff","getGitDiffStats","getGitInfo","getInstalledEditors","getLocalBranches","getMergeBase","getPermissionMode","getPlanForSession","getPrChecks","getPrDetails","getPrIssueComments","getPrReviewComments","getPrReviews","getPrStateForBranch","getSSHConfigs","getSSHGitInfo","getSSHSupportedCommands","getSession","getSessionsForScheduledTask","getShellPtyBuffer","getSupportedCommands","getTeleportReadiness","getTranscript","getTrustedSSHHosts","getUncommittedChanges","getWorkingTreeStatus","importCliSession","installGh","interrupt","isVSCodeInstalled","isWorkingTreeDirty","launchUltrareview","listGhIssues","listSSHDirectory","listSessionDirectory","logCliEvent","mergePr","openInEditor","openInVSCode","pickFileAtCwd","pickSessionFile","popBackgroundTaskSuggestion","readFileAtCwd","readSessionFile","readSessionImageAsDataUrl","releaseWorktree","replaceEnabledMcpTools","replaceRemoteMcpServers","resizePty","resizeShellPty","resolveSSHSettings","respondToSSHPassword","respondToToolPermission","reviewDiff","rewind","runBashCommand","saveTrust","searchSessions","sendMessage","sendSideChatMessage","setAutoFixEnabled","setAvailableCodeModels","setEffort","setFastMode","setFocusedSession","setMcpServers","setModel","setPermissionMode","setSSHConfigs","setTrustedSSHHosts","setVisibility","shareSession","start","startPty","startShellPty","startSideChat","stashWorkingTree","stop","stopPty","stopSessionSummary","stopShellPty","stopSideChat","stopTask","submitFeedback","summarizeSession","summarizeTranscript","refreshSessionTitle","teleportToCloud","testSSHConnection","unarchive","updatePrBody","updateSession","validateSSHPath","writePty","writeSessionFile","writeShellPty",
 ] as const;
 
 function asString(value: unknown): string | null {
@@ -171,6 +172,8 @@ const BRIDGE_SESSION_KEYS = [
   "visibility",
   "agent",
   "origin",
+  // Official O.tags residual — ultrareview oi chrome (c119 ri).
+  "tags",
   "archived",
   "stopped",
   "isRunning",
@@ -1103,6 +1106,21 @@ function createSessionHandlers(
   const sessionRunner = getLocalSessionRunner(context);
 
   /**
+   * Residual SessionSummary (app.asar LocalSessionManager):
+   * emits session_summary_result / session_summary_error on LocalSessions event bus.
+   */
+  const sessionSummaryService = new CodeSessionSummaryService({
+    emit: (event) => {
+      dispatchBridgeSessionEvent({
+        type: event.type,
+        sessionId: event.sessionId,
+        data: event.data,
+        error: event.error,
+      });
+    },
+  });
+
+  /**
    * Official LocalSessionManager.getAllSessions residual:
    * list comes from userData session store only (metadata). Never scan/read
    * ~/.claude/projects/*.jsonl here — that is on-demand getTranscript only.
@@ -1176,11 +1194,34 @@ function createSessionHandlers(
       clippedDiff,
       "```",
     ].join("\n");
-    const session = store.start({ cwd, prompt, title, origin: "diff-review", permissionMode: "default" });
+    // Residual O.tags includes "ultrareview" for oi init chrome (c119 ri).
+    // Residual TM (we=gw) needs system hook_progress/hook_response with
+    // <remote-review-progress> from CCR bughunter SessionStart (run_hunt.sh) —
+    // NOT from a plain local review turn. Product deliberately does not invent Mx /
+    // remote CCR (云端不要); this path only tags + local diff prompt so oi chrome
+    // can mount. Real hook stdout is retained if/when CLI emits it (hookBookends).
+    const isUltrareview = /ultrareview/i.test(title) || originLooksUltrareview(request);
+    const session = store.start({
+      cwd,
+      prompt,
+      title,
+      origin: "diff-review",
+      permissionMode: "default",
+      tags: isUltrareview ? ["ultrareview"] : ["diff-review"],
+    });
     dispatchSessionEvent("start", session.id, session);
     sessionRunner.runTurn(session.id, prompt, { cwd, origin: "diff-review" });
     return bridgeSession(session);
   };
+
+  function originLooksUltrareview(request: Record<string, unknown>): boolean {
+    const tag = request.tag ?? request.mode ?? request.kind;
+    if (typeof tag === "string" && /ultrareview/i.test(tag)) return true;
+    if (Array.isArray(request.tags) && request.tags.some((t) => typeof t === "string" && /ultrareview/i.test(t))) {
+      return true;
+    }
+    return false;
+  }
 
   const getTeleportReadinessFor = async (sessionOrCwd: unknown) => {
     const sessionId = asString(sessionOrCwd) && store.getSession(asString(sessionOrCwd)!) ? asString(sessionOrCwd) : asString(asObject(sessionOrCwd).sessionId);
@@ -2077,18 +2118,45 @@ function createSessionHandlers(
         };
       }
     },
+    /**
+     * Residual summarizeSession(sessionId) — fire-and-forget fork; results via
+     * session_summary_result / session_summary_error (c4bf Df/Ff). Returns boolean
+     * start success for residual Df.start (not invent title/summary dump).
+     */
     summarizeSession: async (_event, id) => {
       const sessionId = asString(id);
-      if (!sessionId) return { summary: "", title: null };
-      const transcript = await store.getTranscript(sessionId);
-      const summary = transcript.map(textFromTranscriptItem).join("\n").slice(0, 1000);
-      // Refresh placeholder titles after content exists (web may call this on turn settle).
-      // Reads the durable jsonl (custom-title wins) — the live buffer is cleared by then.
-      const refreshed = await store.refreshTitleFromTranscript(sessionId) ?? store.getSession(sessionId);
-      if (refreshed) dispatchSessionEvent("session_updated", sessionId, refreshed);
-      return { summary, title: refreshed?.title ?? null, session: bridgeSession(refreshed) };
+      if (!sessionId) return false;
+      const session = store.getSession(sessionId);
+      return sessionSummaryService.summarizeSession(session);
     },
-    summarizeTranscript: async (_event, transcript) => Array.isArray(transcript) ? transcript.map(textFromTranscriptItem).join("\n").slice(0, 1000) : "",
+    /**
+     * Residual summarizeTranscript(sessionId, transcriptText) — non-local path dump.
+     * Residual web cC passes (id, text); older product invent took only transcript array.
+     */
+    summarizeTranscript: async (_event, idOrTranscript, maybeTranscript) => {
+      const sessionId = asString(idOrTranscript);
+      if (sessionId && typeof maybeTranscript === "string") {
+        return sessionSummaryService.summarizeTranscript(sessionId, maybeTranscript);
+      }
+      // Residual also accepts start(sessionId, text) only; bare array was product invent.
+      if (typeof idOrTranscript === "string" && !maybeTranscript) {
+        // treat as transcript-only with synthetic id — not residual; reject.
+        return false;
+      }
+      return false;
+    },
+    /**
+     * Product title SoT after turn settle (was incorrectly piggybacked on invent summarizeSession).
+     * Not residual SessionSummary — only refreshTitleFromTranscript + session_updated.
+     */
+    refreshSessionTitle: async (_event, id) => {
+      const sessionId = asString(id);
+      if (!sessionId) return null;
+      const refreshed =
+        (await store.refreshTitleFromTranscript(sessionId)) ?? store.getSession(sessionId);
+      if (refreshed) dispatchSessionEvent("session_updated", sessionId, refreshed);
+      return bridgeSession(refreshed);
+    },
     getPlanForSession: async (_event, id) => {
       const sessionId = asString(id) ?? asString(asObject(id).sessionId);
       return sessionId ? planFromTranscript(await store.getTranscript(sessionId)) : null;
@@ -3050,12 +3118,12 @@ function createSessionHandlers(
     },
     /**
      * Official stopSessionSummary(sessionId) → boolean (true only if a forked
-     * summary query was aborted). Product summarizeSession is local/sync — nothing
-     * to cancel; never soft-true true.
+     * summary query was aborted). Residual LocalSessionManager.stopSessionSummary.
      */
     stopSessionSummary: async (_event, id) => {
-      void id;
-      return false;
+      const sessionId = asString(id);
+      if (!sessionId) return false;
+      return sessionSummaryService.stop(sessionId);
     },
     // Official LocalSessions.cancelQueuedMessage(sessionId, messageUuid) → boolean
     cancelQueuedMessage: async (_event, id, messageUuid) => {
