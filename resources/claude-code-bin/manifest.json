@@ -2,26 +2,26 @@
   "source": "@go-hare/claude-code@2.7.43",
   "package": "@go-hare/claude-code",
   "version": "2.7.43",
-  "binary": "claude",
-  "platform": "darwin",
-  "arch": "arm64",
-  "size": 99292672,
-  "sha256": "8cc45f1153ed13ef53a1b53bc876850910c176a26bf3d31294c0ec25efe5e00b",
+  "binary": "claude.exe",
+  "platform": "win32",
+  "arch": "x64",
+  "size": 134761472,
+  "sha256": "8354537c7afe236d8fc8be4adbcd88e75b193147d034f97e145c051e2da0f45d",
   "versionLabel": "2.7.43 (Claude Code)",
   "topLevel": {
-    "claude": {
-      "from": "platforms/darwin-arm64/claude",
-      "size": 99292672,
-      "sha256": "8cc45f1153ed13ef53a1b53bc876850910c176a26bf3d31294c0ec25efe5e00b",
+    "claude.exe": {
+      "from": "platforms/win32-x64/claude.exe",
+      "size": 134761472,
+      "sha256": "8354537c7afe236d8fc8be4adbcd88e75b193147d034f97e145c051e2da0f45d",
       "version": "2.7.43 (Claude Code)"
     }
   },
   "vendor": {
     "path": "vendor",
     "ripgrep": {
-      "path": "vendor/ripgrep/arm64-darwin/rg",
-      "size": 4520320,
-      "mode": "755"
+      "path": "vendor/ripgrep/x64-win32/rg.exe",
+      "size": 5407744,
+      "mode": "666"
     }
   },
   "binaries": {
@@ -31,8 +31,15 @@
       "size": 99855074,
       "sha256": "d0c45d40df4791b96220349b02aa0556f9af3a1c0b1356f08c154bc242b0558a",
       "version": "2.7.43 (Claude Code)"
+    },
+    "win32-x64": {
+      "binary": "claude.exe",
+      "path": "platforms/win32-x64/claude.exe",
+      "size": 134761472,
+      "sha256": "8354537c7afe236d8fc8be4adbcd88e75b193147d034f97e145c051e2da0f45d",
+      "version": "2.7.43 (Claude Code)"
     }
   },
-  "mode": "host-only",
-  "hostKey": "darwin-arm64"
+  "mode": "platforms:darwin-arm64+win32-x64",
+  "hostKey": "win32-x64"
 }

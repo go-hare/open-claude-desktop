@@ -11,6 +11,7 @@
  * Env:
  *   CLAUDE_CODE_NPM_VERSION   default 2.7.43
  *   CLAUDE_CODE_BINARY_SOURCE / CLAUDE_CODE_EXECUTABLE  optional override for host binary only
+ *   CLAUDE_CODE_PLATFORMS=darwin-arm64,win32-x64  comma list — dual-host coexist (overrides host-only)
  *   CLAUDE_CODE_ALL_PLATFORMS=1  fetch all PLATFORM_PACKAGES (opt-in fat tree)
  *   CLAUDE_CODE_SKIP_PLATFORMS=1  legacy alias of host-only (default; kept for scripts)
  */
@@ -28,11 +29,17 @@ import { pipeline } from "node:stream/promises";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetRoot = path.join(projectRoot, "resources", "claude-code-bin");
 const VERSION = process.env.CLAUDE_CODE_NPM_VERSION || "2.7.43";
+/** Explicit platform list (e.g. darwin-arm64,win32-x64). Wins over host-only / all. */
+const PLATFORM_FILTER = (process.env.CLAUDE_CODE_PLATFORMS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 /** Opt-in fat matrix. Default is host-only (mac packages mac, win packages win). */
 const ALL_PLATFORMS = process.env.CLAUDE_CODE_ALL_PLATFORMS === "1";
 /** Legacy env: when set to 1, force host-only even if ALL_PLATFORMS is also set. */
 const FORCE_HOST_ONLY = process.env.CLAUDE_CODE_SKIP_PLATFORMS === "1";
-const HOST_ONLY = FORCE_HOST_ONLY || !ALL_PLATFORMS;
+const HOST_ONLY =
+  PLATFORM_FILTER.length === 0 && (FORCE_HOST_ONLY || !ALL_PLATFORMS);
 
 /** Platform package key → binary file name inside the npm package. */
 const PLATFORM_PACKAGES = [
@@ -327,12 +334,30 @@ async function main() {
 
   const binaries = {};
   const hostKey = hostPlatformKey();
-  // Default host-only: mac packages mac, win packages win. Fat matrix is opt-in.
-  const toFetch = HOST_ONLY
-    ? PLATFORM_PACKAGES.filter((entry) => entry.key === hostKey)
-    : PLATFORM_PACKAGES;
+  // Default host-only: mac packages mac, win packages win.
+  // CLAUDE_CODE_PLATFORMS=… → explicit coexist list; ALL_PLATFORMS=1 → full matrix.
+  let toFetch;
+  let modeLabel;
+  if (PLATFORM_FILTER.length > 0) {
+    const unknown = PLATFORM_FILTER.filter(
+      (key) => !PLATFORM_PACKAGES.some((entry) => entry.key === key),
+    );
+    if (unknown.length > 0) {
+      throw new Error(
+        `Unknown CLAUDE_CODE_PLATFORMS: ${unknown.join(",")} (known: ${PLATFORM_PACKAGES.map((e) => e.key).join(",")})`,
+      );
+    }
+    toFetch = PLATFORM_PACKAGES.filter((entry) => PLATFORM_FILTER.includes(entry.key));
+    modeLabel = `platforms:${PLATFORM_FILTER.join("+")}`;
+  } else if (HOST_ONLY) {
+    toFetch = PLATFORM_PACKAGES.filter((entry) => entry.key === hostKey);
+    modeLabel = "host-only";
+  } else {
+    toFetch = PLATFORM_PACKAGES;
+    modeLabel = "all-platforms";
+  }
   console.log(
-    `[copy-claude-code-binary] mode=${HOST_ONLY ? "host-only" : "all-platforms"} host=${hostKey} fetch=[${toFetch.map((e) => e.key).join(",")}]`,
+    `[copy-claude-code-binary] mode=${modeLabel} host=${hostKey} fetch=[${toFetch.map((e) => e.key).join(",")}]`,
   );
 
   for (const entry of toFetch) {
@@ -378,10 +403,11 @@ async function main() {
   await replaceFile(hostSource, topClaude);
   if (process.platform !== "win32") await fs.chmod(topClaude, 0o755);
 
-  // Top-level foreign binaries only when fat matrix is requested.
+  // Top-level foreign binaries when multi-platform tree is requested.
   // Host-only mac must NOT ship claude.exe (was ~140MB dead weight).
+  const multiPlatform = !HOST_ONLY || PLATFORM_FILTER.length > 1;
   const topExe = path.join(targetRoot, "claude.exe");
-  if (!HOST_ONLY) {
+  if (multiPlatform) {
     const winSrc =
       binaries["win32-x64"] && path.join(targetRoot, binaries["win32-x64"].path);
     if (winSrc && fsSync.existsSync(winSrc) && hostBinaryName !== "claude.exe") {
@@ -442,7 +468,7 @@ async function main() {
       : null,
     binaries,
   };
-  if (!HOST_ONLY && fsSync.existsSync(topExe) && hostBinaryName !== "claude.exe") {
+  if (multiPlatform && fsSync.existsSync(topExe) && hostBinaryName !== "claude.exe") {
     manifest.topLevel["claude.exe"] = {
       from: binaries["win32-x64"]?.path ?? "claude.exe",
       size: fsSync.statSync(topExe).size,
@@ -450,7 +476,7 @@ async function main() {
       version: binaries["win32-x64"]?.version ?? `${VERSION} (Claude Code)`,
     };
   }
-  manifest.mode = HOST_ONLY ? "host-only" : "all-platforms";
+  manifest.mode = modeLabel;
   manifest.hostKey = hostKey;
 
   await fs.writeFile(path.join(targetRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
