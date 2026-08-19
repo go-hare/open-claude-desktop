@@ -15,8 +15,27 @@
 /**
  * Residual chrome probe for first opaque reveal.
  * Returns "ready" | "loading" | "login" from the mainView document.
+ *
+ * Official 1p cold start loads mN (claude.ai) — product LoginDesktop probe
+ * must not hold opacity:0 waiting for chooser chrome that never mounts there.
+ * Anthropic host → ready immediately (shell +50ms reveal like official).
  */
 export const MAIN_VIEW_CHROME_PROBE_JS = `(() => {
+  const host = (location.hostname || "").toLowerCase();
+  const href = String(location.href || "");
+  // Official mN / Anthropic twin hosts after NQt("1p") relaunch.
+  if (
+    host === "claude.ai"
+    || host.endsWith(".claude.ai")
+    || host === "www.anthropic.com"
+    || host.endsWith(".anthropic.com")
+    || href.startsWith("https://claude.ai/")
+    || href.startsWith("https://www.anthropic.com/")
+  ) {
+    return "ready";
+  }
+  // Failed 1p navigation often lands about:blank — do not hold forever.
+  if (href === "about:blank" || href === "") return "ready";
   const path = location.pathname || "";
   // Official Gns residual footer trigger — only mounted in signed-in shell.
   if (document.querySelector('[data-testid="user-menu-button"]')) return "ready";

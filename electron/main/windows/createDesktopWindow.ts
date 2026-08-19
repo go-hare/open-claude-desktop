@@ -120,6 +120,8 @@ function installMainWindowEvents(
    * residual chrome so LoginRoute / DesktopFrame is not blank when opacity hits 1.
    * Soft got("3p") loadURL: coldRevealStarted already true → no re-reveal (official
    * also does not re-opacity on mainView soft loadURL).
+   * 1p mN (claude.ai): probe treats Anthropic host as ready; did-fail-load also
+   * reveals so region/network abort does not leave opacity:0 forever.
    */
   const scheduleColdRevealFromMainView = () => {
     if (coldRevealStarted) return;
@@ -138,6 +140,17 @@ function installMainWindowEvents(
   };
 
   mainView.webContents.on("did-finish-load", () => {
+    scheduleColdRevealFromMainView();
+  });
+  // 1p claude.ai can abort (ERR_ABORTED / region redirect) without a usable
+  // did-finish-load paint — still reveal so the user is not stuck on opacity:0.
+  mainView.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    console.warn("[mainView] did-fail-load", {
+      errorCode,
+      errorDescription,
+      validatedURL,
+    });
     scheduleColdRevealFromMainView();
   });
 
@@ -265,6 +278,22 @@ function isAppProtocolUrl(url: string): boolean {
   }
 }
 
+function isAnthropicMainViewUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === "claude.ai"
+      || host.endsWith(".claude.ai")
+      || host === "www.anthropic.com"
+      || host.endsWith(".anthropic.com")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isTransientAppLoadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
   // Electron: Error: ERR_FAILED (-2) loading 'app://localhost'
@@ -279,12 +308,25 @@ async function loadMainViewUrlWithRetry(
     await webContents.loadURL(url);
     return;
   } catch (error) {
-    if (!isAppProtocolUrl(url) || !isTransientAppLoadError(error)) throw error;
-    console.warn("[mainView] app:// load failed; retrying once", {
-      url,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    await webContents.loadURL(url);
+    if (isAppProtocolUrl(url) && isTransientAppLoadError(error)) {
+      console.warn("[mainView] app:// load failed; retrying once", {
+        url,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await webContents.loadURL(url);
+      return;
+    }
+    // Official 1p mN: network/region abort must not kill bootstrapDesktopApp
+    // ("Claudex Desktop failed to launch"). Keep process alive; did-fail-load
+    // / cold reveal path surfaces the window. Do not invent a fake OAuth shell.
+    if (isAnthropicMainViewUrl(url)) {
+      console.error("[mainView] Anthropic host load failed (keeping process)", {
+        url,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    throw error;
   }
 }

@@ -75,8 +75,8 @@ function proxyConfigFromBag(
 }
 
 /**
- * Apply bag proxy (or clear to direct) on product renderer sessions.
- * Safe to call repeatedly after Setup write/apply without relaunch.
+ * Apply bag proxy (or restore OS system proxy when bag has none) on product
+ * renderer sessions. Safe to call repeatedly after Setup write/apply without relaunch.
  */
 export async function applyRendererSessionProxy(
   config: Custom3pEnterpriseConfig | Record<string, unknown> | null | undefined,
@@ -104,15 +104,19 @@ export async function applyRendererSessionProxy(
     await Promise.all(
       sessions.map(async (ses) => {
         try {
-          // Clear product override so Chromium does not keep a stale fixed proxy
-          // after the user removes inferenceHttp(s)Proxy from the bag.
-          await ses.setProxy({ mode: "direct" });
+          // No bag inferenceHttp(s)Proxy: follow OS / IE system proxy (Windows
+          // ProxyEnable), not force direct. Forced direct previously broke 1p
+          // claude.ai loads when egress IP is region-blocked but system proxy
+          // reaches an allowed CF POP (app-unavailable-in-region → about:blank).
+          // Clearing a stale fixed_servers override still happens — mode:system
+          // replaces it. Official Electron default without setProxy is system.
+          await ses.setProxy({ mode: "system" });
           if (typeof ses.forceReloadProxyConfig === "function") {
             await ses.forceReloadProxyConfig();
           }
         } catch (error) {
           console.warn(
-            "[proxy] clear renderer proxy failed",
+            "[proxy] restore system renderer proxy failed",
             error instanceof Error ? error.message : String(error),
           );
         }
@@ -122,7 +126,7 @@ export async function applyRendererSessionProxy(
       applied: false,
       proxyRules: null,
       proxyBypassRules: null,
-      mode: "direct",
+      mode: "system",
       source: "none",
     };
   }
@@ -216,7 +220,7 @@ export async function applyRendererProxyFromUserData(
       applied: false,
       proxyRules: null,
       proxyBypassRules: null,
-      mode: "direct",
+      mode: "system",
       source: "none",
     };
   }
