@@ -62,29 +62,69 @@ export function resolveTurnPermissionMode(
 /**
  * When host `signalTurnComplete` / markNotRunning must fire for a CLI stream message.
  *
- * Official LocalSessionManager (app.asar) call sites only (verified extract):
+ * Official LocalSessionManager (app.asar) call sites (verified extract):
  *   1. interruptSession success → signalTurnComplete
  *   2. createBaseHooks Stop → signalTurnComplete(session)
+ *   3. handleResultMessage(parent `type:"result"`) → drainDeferredSends else markNotRunning
+ *      (+ idleManager / queryCompleted / session_updated) — same host state as signalTurnComplete
  *
- * There is **no** stream-json `type:"result"` → signalTurnComplete in asar.
- * Product invent of result-gated host settle caused Esc+queue desync:
- *   interrupt drains deferred (isRunning true) → result row fires signalTurnComplete
- *   again with empty deferred → markNotRunning → composer Send while follow-up runs.
+ * createBaseHooks does **not** register StopFailure. On max_output_tokens / isApiErrorMessage
+ * CLI skips Stop hooks (executeStopFailureHooks only) but QueryEngine still yields
+ * `type:"result"` — so handleResultMessage is what clears isRunning. Without result-settle,
+ * host stays isRunning → web seedPendingTurnIfHostRunning keeps Stop sticky.
  *
  * Do **not** settle on assistant `end_turn` here. Official web (BELz) treats
  * end_turn as `p` (endTurnSeen) only — queue promote is result-gated (`g`/`h`) on web.
  *
+ * Parent-only: nested/agent results (`parent_tool_use_id`) must not settle the main turn
+ * (asar handleResultMessage runs on the parent query result row).
+ *
  * Product residual: some 3p turns omit Stop hook delivery but still emit
  * `system/stop_hook_summary` after hooks — mirror that as durable end so
- * isRunning clears. Prefer Stop hook `onSignalTurnComplete` when present.
+ * isRunning clears. Prefer Stop hook / result `onSignalTurnComplete` when present.
+ *
+ * Esc+queue (warm multi-turn): interrupt may drainDeferredSends, then a late interrupted-turn
+ * `result` can markNotRunning while follow-up is already enqueued. Official does **not**
+ * invent skipNextResultSettle — asar `handleAssistantMessage` re-asserts
+ * `isRunning=true` on the next parent `assistant` (`!isRunning && !parent_tool_use_id`).
+ * Product mirrors that via `shouldReassertRunningFromAssistantMessage`.
  */
 export function shouldSignalTurnCompleteFromCliMessage(msg: unknown): boolean {
   if (!msg || typeof msg !== "object") return false;
   const record = msg as Record<string, unknown>;
   const type = typeof record.type === "string" ? record.type : "";
-  // Official: no result → signalTurnComplete. Stop hook owns settle.
   if (type === "system" && record.subtype === "stop_hook_summary") return true;
+  if (type === "result") {
+    // Official handleResultMessage: parent result only.
+    const parent =
+      record.parent_tool_use_id
+      ?? record.parentToolUseId;
+    if (parent != null && parent !== "") return false;
+    return true;
+  }
   return false;
+}
+
+/**
+ * Official LocalSessionManager.handleAssistantMessage residual (app.asar):
+ *   if (assistant && !isRunning && !(parent_tool_use_id in msg && parent_tool_use_id))
+ *     isRunning = true; emit session_updated
+ *
+ * Re-opens host busy after a late result settled under a drained follow-up (Esc+queue).
+ * Nested/agent assistants (`parent_tool_use_id` truthy) must not re-assert.
+ */
+export function shouldReassertRunningFromAssistantMessage(
+  msg: unknown,
+  isRunning: boolean,
+): boolean {
+  if (isRunning) return false;
+  if (!msg || typeof msg !== "object") return false;
+  const record = msg as Record<string, unknown>;
+  if (record.type !== "assistant") return false;
+  const parent = record.parent_tool_use_id ?? record.parentToolUseId;
+  // Official: !("parent_tool_use_id" in t && t.parent_tool_use_id)
+  if (parent != null && parent !== "") return false;
+  return true;
 }
 
 /**

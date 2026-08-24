@@ -24,6 +24,7 @@ import { getClaudePreviewCliMcpConfigCache, setClaudePreviewSessionCwd } from ".
 import { asMcpServerMap, toCliMcpConfigWire } from "./mcpConfigWire";
 import {
   resolveTurnPermissionMode,
+  shouldReassertRunningFromAssistantMessage,
   shouldSignalTurnCompleteFromCliMessage,
 } from "./claudeCliTurnLifecycle";
 import {
@@ -1167,13 +1168,19 @@ export class ClaudeCliRunner {
    *   if (drainDeferredSends(A)) { emit session_updated; return }
    *   markNotRunning(A); idleManager.onTurnComplete; emit queryCompleted; session_updated
    *
-   * Call sites (official only):
-   *   - interruptSession success
-   *   - createBaseHooks Stop
-   *   - result path (product: stream-json type:result → same host state)
+   * Call sites (official LocalSessionManager / asar):
+   *   - interruptSession success → signalTurnComplete
+   *   - createBaseHooks Stop → signalTurnComplete
+   *   - handleResultMessage(parent type:"result") → drainDeferredSends else markNotRunning
+   *     (product: shouldSignalTurnCompleteFromCliMessage → this method)
+   *
+   * Esc+queue: late result may markNotRunning under a drained follow-up; official
+   * handleAssistantMessage re-asserts isRunning on the next parent assistant
+   * (shouldReassertRunningFromAssistantMessage) — do not invent skipNextResultSettle.
    *
    * No product invents: no blockSettleAfterDrain, no type:"completed" event.
-   * Web busy after Esc+queue is pendingTurn + queuedMessages (official H), not host invents.
+   * Official web H = Qke(pendingTurn && !endTurnSeen). Drain keeps isRunning true so
+   * follow-up continues; web queuedMessages alone must not invent H / isRunning.
    */
   private signalTurnCompleteSdk(
     sessionId: string,
@@ -1745,18 +1752,28 @@ export class ClaudeCliRunner {
             // and can clear Va/typewriter before the final assistant merge lands —
             // UI then shows only a later error_during_execution red card (no text).
             this.callbacks.onEvent(event);
-            // Official asar: signalTurnComplete only from interrupt + Stop hook.
-            // Product residual: stop_hook_summary when Stop hook delivery missed (3p).
-            // Do NOT settle on type:result here — that invent double-settled after
-            // Esc drain (empty deferred → markNotRunning while queue continues).
+            // Official asar call sites → signalTurnComplete / markNotRunning:
+            //   interruptSession · createBaseHooks Stop · handleResultMessage(parent result)
+            // Product: shouldSignalTurnCompleteFromCliMessage (result + stop_hook_summary).
             // Do NOT settle on assistant end_turn — official p is web paint only.
+            // Esc+queue: late result may markNotRunning under drained follow-up; official
+            // handleAssistantMessage re-asserts isRunning on next parent assistant.
             if (eventType === "message") {
               const settleMsg = asRecord(asRecord(event).message);
-              if (shouldSignalTurnCompleteFromCliMessage(settleMsg)) {
-                const active = this.sdkSessions.get(sessionId);
-                if (active) {
-                  this.signalTurnCompleteSdk(sessionId, active, session);
-                }
+              const active = this.sdkSessions.get(sessionId);
+              if (active && shouldReassertRunningFromAssistantMessage(settleMsg, active.isRunning)) {
+                active.isRunning = true;
+                active.sawResult = false;
+                this.store.setRunning(sessionId, true, {
+                  kind: "claude-cli",
+                  executable: "sdk-query",
+                  startedAt: nowIso(),
+                  lastError: undefined,
+                  lastExitCode: null,
+                });
+                this.callbacks.onSessionUpdated(sessionId);
+              } else if (active && shouldSignalTurnCompleteFromCliMessage(settleMsg)) {
+                this.signalTurnCompleteSdk(sessionId, active, session);
               }
             }
           },

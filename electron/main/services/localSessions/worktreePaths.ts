@@ -115,6 +115,71 @@ export function getWorktreeParentDir(
 }
 
 /**
+ * Official WorktreeManager.isManagedWorktreePath residual (app.asar):
+ *   path inside baseRepo/.claude/worktrees, or inside chillingSloth customPath/<basename(baseRepo)>.
+ * Returns resolved path when managed, otherwise false.
+ */
+export async function isManagedWorktreePath(
+  worktreePath: string,
+  baseRepo: string,
+  chillingSlothLocation: ChillingSlothLocation = "default",
+): Promise<string | false> {
+  const target = path.resolve(worktreePath);
+  const repo = path.resolve(baseRepo);
+
+  const inside = async (candidate: string, parent: string): Promise<string | false> => {
+    let realCandidate: string;
+    let realParent: string;
+    try {
+      realCandidate = await fs.promises.realpath(candidate);
+    } catch {
+      // Official fl(): missing path → not managed.
+      return false;
+    }
+    try {
+      realParent = await fs.promises.realpath(parent);
+    } catch {
+      try {
+        realParent = path.resolve(parent);
+      } catch {
+        return false;
+      }
+    }
+    const rel = path.relative(realParent, realCandidate);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+    // Official: realpath(candidate) !== realpath(parent) → managed child.
+    if (realCandidate === realParent) return false;
+    return realCandidate;
+  };
+
+  const defaultParent = path.join(repo, ".claude", "worktrees");
+  const hitDefault = await inside(target, defaultParent);
+  if (hitDefault) return hitDefault;
+
+  if (
+    chillingSlothLocation
+    && typeof chillingSlothLocation === "object"
+    && "customPath" in chillingSlothLocation
+    && typeof chillingSlothLocation.customPath === "string"
+    && chillingSlothLocation.customPath.trim()
+  ) {
+    const customRoot = path.resolve(chillingSlothLocation.customPath);
+    // Official: customPath that is a filesystem root → reject.
+    if (path.parse(customRoot).root === customRoot) return false;
+    const customParent = path.join(customRoot, path.basename(repo));
+    const relToCustom = path.relative(customRoot, customParent);
+    if (relToCustom.startsWith("..") || path.isAbsolute(relToCustom)) return false;
+    const hitCustom = await inside(target, customParent);
+    if (hitCustom) return hitCustom;
+  }
+
+  return false;
+}
+
+/** Official UK residual used by getUncommittedChanges porcelain exclude. */
+export const WORKTREE_KEEP_EXCLUDE = ".worktree-keep";
+
+/**
  * Official getBranchName residual:
  *   const t = gi("ccBranchPrefix").replace(/\//g, "");
  *   return t ? `${t}/${name}` : name;

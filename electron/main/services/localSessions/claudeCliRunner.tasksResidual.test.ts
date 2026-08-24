@@ -407,6 +407,144 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     ).toBe(true);
   });
 
+  it("parent assistant re-asserts isRunning after late result settle (handleAssistantMessage)", async () => {
+    // Esc drain → late interrupted result markNotRunning → follow-up parent assistant
+    // must set isRunning true again (official asar handleAssistantMessage).
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "assistant reassert" });
+    store.setCliSessionId(session.id, "cli-reassert");
+    let capturedOnEvent: ((event: Record<string, unknown>) => void) | null = null;
+    createCodeSdkActiveSession.mockImplementation(async (opts: {
+      callbacks: CodeSdkSessionCallbacks;
+      sessionId: string;
+    }) => {
+      capturedOnEvent = opts.callbacks.onEvent;
+      return {
+        deferredSends: [],
+        input: { enqueue: vi.fn() },
+        isRunning: false,
+        isStopping: false,
+        loop: Promise.resolve(),
+        pendingPermissions: new Map(),
+        query: {
+          interrupt: vi.fn(async () => undefined),
+          stopTask: vi.fn(async () => undefined),
+          close: vi.fn(),
+          setPermissionMode: vi.fn(async () => undefined),
+          setModel: vi.fn(async () => undefined),
+          applyFlagSettings: vi.fn(async () => true),
+          getContextUsage: vi.fn(async () => null),
+        },
+        sawInit: true,
+        sawResult: true,
+        sessionId: opts.sessionId,
+      } as unknown as CodeSdkActiveSession;
+    });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.warmSession(session.id)).resolves.toBe(true);
+    const sdk = (
+      runner as unknown as { sdkSessions: Map<string, CodeSdkActiveSession> }
+    ).sdkSessions.get(session.id)!;
+    expect(sdk.isRunning).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+
+    capturedOnEvent!({
+      type: "message",
+      sessionId: session.id,
+      message: {
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: { role: "assistant", content: [{ type: "text", text: "follow-up" }] },
+      },
+    });
+    expect(sdk.isRunning).toBe(true);
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+
+    // Nested assistant must not re-assert when already handled; force idle then nested.
+    sdk.isRunning = false;
+    store.setRunning(session.id, false, { kind: "claude-cli" });
+    capturedOnEvent!({
+      type: "message",
+      sessionId: session.id,
+      message: {
+        type: "assistant",
+        parent_tool_use_id: "toolu_nested",
+        message: { role: "assistant", content: [] },
+      },
+    });
+    expect(sdk.isRunning).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+  });
+
+  it("parent result message settles via shouldSignalTurnComplete (handleResultMessage)", async () => {
+    // max_output_tokens skips Stop hooks; parent result still clears isRunning.
+    const store = makeStore();
+    const session = store.start({ prompt: "max tokens", cwd: "/tmp/proj", title: "result settle" });
+    store.setCliSessionId(session.id, "cli-result-settle");
+    store.setRunning(session.id, true, {
+      kind: "claude-cli",
+      executable: "sdk-query",
+      startedAt: new Date().toISOString(),
+    });
+    let capturedOnEvent: ((event: Record<string, unknown>) => void) | null = null;
+    createCodeSdkActiveSession.mockImplementation(async (opts: {
+      callbacks: CodeSdkSessionCallbacks;
+      sessionId: string;
+    }) => {
+      capturedOnEvent = opts.callbacks.onEvent;
+      return {
+        deferredSends: [],
+        input: { enqueue: vi.fn() },
+        isRunning: true,
+        isStopping: false,
+        loop: Promise.resolve(),
+        pendingPermissions: new Map(),
+        query: {
+          interrupt: vi.fn(async () => undefined),
+          stopTask: vi.fn(async () => undefined),
+          close: vi.fn(),
+          setPermissionMode: vi.fn(async () => undefined),
+          setModel: vi.fn(async () => undefined),
+          applyFlagSettings: vi.fn(async () => true),
+          getContextUsage: vi.fn(async () => null),
+        },
+        sawInit: true,
+        sawResult: false,
+        sessionId: opts.sessionId,
+      } as unknown as CodeSdkActiveSession;
+    });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.warmSession(session.id)).resolves.toBe(true);
+    const sdk = (
+      runner as unknown as { sdkSessions: Map<string, CodeSdkActiveSession> }
+    ).sdkSessions.get(session.id)!;
+    sdk.isRunning = true;
+    store.setRunning(session.id, true, {
+      kind: "claude-cli",
+      executable: "sdk-query",
+      startedAt: new Date().toISOString(),
+    });
+
+    capturedOnEvent!({
+      type: "message",
+      sessionId: session.id,
+      message: {
+        type: "result",
+        subtype: "error_max_tokens",
+        is_error: true,
+        parent_tool_use_id: null,
+      },
+    });
+    expect(sdk.isRunning).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
+  });
+
   it("signalTurnCompleteSdk settles host when handleSdkMessage already cleared sdk.isRunning", () => {
     // handleSdkMessage sets active.isRunning=false on result before onEvent → signal.
     // Host store must still markNotRunning or Stop/Esc sticks.

@@ -1470,11 +1470,30 @@ function createSessionHandlers(
       if (session) dispatchSessionEvent("start", session.id, session);
       return bridgeSession(session);
     },
-    archive: async (_event, id) => {
+    // Official LocalSessions.archive residual (app.asar):
+    //   isArchived=true → save → emit archived → THEN cleanupWorktree (fire-and-forget).
+    // Do NOT releaseWorktree before archive — Recents/Dve must see archived first.
+    archive: async (_event, id, options) => {
       const sessionId = asString(id);
-      const ok = sessionId ? store.archive(sessionId) : false;
-      if (ok && sessionId) dispatchSessionEvent("archived", sessionId);
-      return ok;
+      if (!sessionId) return false;
+      const rawOpts = typeof options === "object" && options !== null
+        ? (options as Record<string, unknown>)
+        : {};
+      // Official sidebar always passes cleanupWorktree:!0; default true when omitted.
+      const cleanupWorktree = rawOpts.cleanupWorktree !== false;
+      const before = store.getSession(sessionId);
+      const ok = store.archive(sessionId);
+      if (!ok) return false;
+      dispatchSessionEvent("archived", sessionId, store.getSession(sessionId));
+      // Official: only when cleanupWorktree !== false AND session.worktreePath was set.
+      if (cleanupWorktree && before?.worktreePath) {
+        void store.releaseWorktree(sessionId, { cleanupWorktree: true }).then((session) => {
+          if (session) dispatchSessionEvent("session_updated", sessionId, session);
+        }).catch((error) => {
+          console.warn(`[LocalSessions] Failed to release worktree for archived ${sessionId}`, error);
+        });
+      }
+      return true;
     },
     unarchive: async (_event, id) => {
       const sessionId = asString(id);
@@ -2756,7 +2775,23 @@ function createSessionHandlers(
       };
     },
     getWorkingTreeStatus: async (_event, cwdOrSession) => runGitInRepository(cwdFromSession(store, cwdOrSession), ["status", "--short", "--branch"]),
-    getUncommittedChanges: async (_event, cwdOrSession) => runGit(cwdFromSession(store, cwdOrSession), ["status", "--porcelain=v1"]),
+    // Official CT.getUncommittedChanges → string[] | null for $Yt (managed worktree only).
+    getUncommittedChanges: async (_event, sessionIdOrCwd) => {
+      const sessionId = asString(sessionIdOrCwd);
+      if (!sessionId) return null;
+      // Official IPC validates string sessionId — not a free-form cwd.
+      if (store.getSession(sessionId)) {
+        return store.getUncommittedChanges(sessionId);
+      }
+      // Legacy callers may pass cwd; only succeed when it maps to a session with that cwd/worktree.
+      const byPath = store.getAll(true).find((session) =>
+        session.id === sessionId
+        || session.cwd === sessionId
+        || session.worktreePath === sessionId
+      );
+      if (!byPath) return null;
+      return store.getUncommittedChanges(byPath.id);
+    },
     isWorkingTreeDirty: async (_event, cwdOrSession) => {
       const result = await runGit(cwdFromSession(store, cwdOrSession), ["status", "--porcelain=v1"]);
       return result.ok && String(result.stdout ?? "").trim().length > 0;
@@ -3292,25 +3327,39 @@ function ensureCodeAutoArchiveEngine(context: IpcHandlerContext): CodeAutoArchiv
     writePrs: (sessionId, prs) => {
       store.update(sessionId, { prs });
     },
+    // Same residual as LocalSessions.archive: archive+emit first, THEN
+    // fire-and-forget cleanupWorktree (do NOT await release before archived).
     archiveSession: async (sessionId, options) => {
-      if (options?.cleanupWorktree) {
-        try {
-          await store.releaseWorktree(sessionId, { cleanupWorktree: true });
-        } catch {
-          /* best-effort cleanup */
-        }
-      }
+      const cleanupWorktree = options?.cleanupWorktree !== false;
+      const before = store.getSession(sessionId);
       const ok = store.archive(sessionId);
-      if (ok) {
-        dispatchBridgeEvent(
-          context.windows.mainView.webContents,
-          "claude.web",
-          "LocalSessions",
-          "onEvent",
-          { type: "archived", sessionId },
-        );
+      if (!ok) return false;
+      dispatchBridgeEvent(
+        context.windows.mainView.webContents,
+        "claude.web",
+        "LocalSessions",
+        "onEvent",
+        { type: "archived", sessionId },
+      );
+      if (cleanupWorktree && before?.worktreePath) {
+        void store.releaseWorktree(sessionId, { cleanupWorktree: true }).then((session) => {
+          if (session) {
+            dispatchBridgeEvent(
+              context.windows.mainView.webContents,
+              "claude.web",
+              "LocalSessions",
+              "onEvent",
+              { type: "session_updated", sessionId, session },
+            );
+          }
+        }).catch((error) => {
+          console.warn(
+            `[LocalSessions] AutoArchive failed to release worktree for ${sessionId}`,
+            error,
+          );
+        });
       }
-      return ok;
+      return true;
     },
   });
   engine.start();

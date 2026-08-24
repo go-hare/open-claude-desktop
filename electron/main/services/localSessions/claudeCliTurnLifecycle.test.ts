@@ -9,14 +9,25 @@ import {
   shouldDeferMidStreamSend,
   shouldEmitProcessExitError,
   shouldEndStdinAfterResult,
+  shouldReassertRunningFromAssistantMessage,
   shouldSignalTurnCompleteFromCliMessage,
 } from "./claudeCliTurnLifecycle";
 
 describe("shouldSignalTurnCompleteFromCliMessage", () => {
-  it("does not settle on stream-json result (official asar: only Stop + interrupt)", () => {
-    // Product invent result→signalTurnComplete drained then markNotRunning on Esc.
-    expect(shouldSignalTurnCompleteFromCliMessage({ type: "result", subtype: "success" })).toBe(false);
-    expect(shouldSignalTurnCompleteFromCliMessage({ type: "result", is_error: true })).toBe(false);
+  it("settles on parent stream-json result (official asar handleResultMessage)", () => {
+    // max_output_tokens skips Stop hooks; result still clears isRunning.
+    expect(shouldSignalTurnCompleteFromCliMessage({ type: "result", subtype: "success" })).toBe(true);
+    expect(shouldSignalTurnCompleteFromCliMessage({ type: "result", is_error: true })).toBe(true);
+    expect(shouldSignalTurnCompleteFromCliMessage({ type: "result", parent_tool_use_id: null })).toBe(true);
+  });
+
+  it("does not settle on nested/agent result (parent_tool_use_id set)", () => {
+    expect(
+      shouldSignalTurnCompleteFromCliMessage({
+        type: "result",
+        parent_tool_use_id: "toolu_nested",
+      }),
+    ).toBe(false);
   });
 
   it("settles on stop_hook_summary (3p residual when Stop hook missed)", () => {
@@ -25,7 +36,7 @@ describe("shouldSignalTurnCompleteFromCliMessage", () => {
     ).toBe(true);
   });
 
-  it("does not settle on assistant end_turn (official p is web-only; host uses Stop)", () => {
+  it("does not settle on assistant end_turn (official p is web-only; host uses Stop/result)", () => {
     // Settling host on end_turn races multi-tool / post-drain follow-ups (Send while Searching).
     expect(
       shouldSignalTurnCompleteFromCliMessage({
@@ -45,6 +56,43 @@ describe("shouldSignalTurnCompleteFromCliMessage", () => {
     expect(shouldSignalTurnCompleteFromCliMessage({ type: "stream_event" })).toBe(false);
     expect(shouldSignalTurnCompleteFromCliMessage({ type: "user" })).toBe(false);
     expect(shouldSignalTurnCompleteFromCliMessage({ type: "system", subtype: "init" })).toBe(false);
+  });
+});
+
+describe("shouldReassertRunningFromAssistantMessage", () => {
+  it("re-asserts on parent assistant when host is idle (official handleAssistantMessage)", () => {
+    expect(
+      shouldReassertRunningFromAssistantMessage(
+        { type: "assistant", message: { role: "assistant", content: [] } },
+        false,
+      ),
+    ).toBe(true);
+    expect(
+      shouldReassertRunningFromAssistantMessage(
+        { type: "assistant", parent_tool_use_id: null, message: { role: "assistant", content: [] } },
+        false,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not re-assert while already running", () => {
+    expect(
+      shouldReassertRunningFromAssistantMessage({ type: "assistant" }, true),
+    ).toBe(false);
+  });
+
+  it("does not re-assert nested/agent assistant (parent_tool_use_id set)", () => {
+    expect(
+      shouldReassertRunningFromAssistantMessage(
+        { type: "assistant", parent_tool_use_id: "toolu_nested" },
+        false,
+      ),
+    ).toBe(false);
+  });
+
+  it("ignores non-assistant rows", () => {
+    expect(shouldReassertRunningFromAssistantMessage({ type: "result" }, false)).toBe(false);
+    expect(shouldReassertRunningFromAssistantMessage({ type: "user" }, false)).toBe(false);
   });
 });
 

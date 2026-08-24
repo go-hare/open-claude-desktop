@@ -1,7 +1,9 @@
 import { app } from "electron";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   clearCodeTranscriptCaches,
   readCodeSessionMetadata,
@@ -16,11 +18,15 @@ import {
 import { createRemoteWorktree, removeRemoteWorktree } from "./sshRemoteWorktree";
 import {
   createLocalWorktree,
+  isManagedWorktreePath,
   removeGitWorktree,
   resolveWorktreePath,
+  WORKTREE_KEEP_EXCLUDE,
   type ChillingSlothLocation,
 } from "./worktreePaths";
 import type { WorktreePool } from "./worktreePool";
+
+const execFileAsync = promisify(execFile);
 
 export type LocalSessionKind = "epitaxy" | "code";
 
@@ -949,6 +955,57 @@ export class LocalSessionStore {
       useWorktree: false,
       sourceBranch: undefined,
     });
+  }
+
+  /**
+   * Official WorktreeManager.getUncommittedChanges residual (app.asar):
+   *   getWorktreeForSession → isManagedWorktreePath → access →
+   *   git status --porcelain --untracked-files=all -- . :(exclude).worktree-keep
+   * Returns string[] porcelain lines, or null when no managed worktree / git fail.
+   * $Yt treats null/empty as proceed without VYt dialog.
+   */
+  async getUncommittedChanges(sessionId: string): Promise<string[] | null> {
+    const session = this.sessions.get(sessionId);
+    const worktreePath = session?.worktreePath;
+    if (!session || !worktreePath) return null;
+    const baseRepo = session.originCwd ?? session.cwd;
+    if (!baseRepo) return null;
+    const chilling = this.worktreePrefs.getChillingSlothLocation?.() ?? "default";
+    const managed = await isManagedWorktreePath(worktreePath, baseRepo, chilling);
+    if (!managed) return null;
+    try {
+      await fs.promises.access(managed);
+    } catch {
+      return null;
+    }
+    try {
+      const { stdout } = await execFileAsync(
+        "git",
+        [
+          "status",
+          "--porcelain",
+          "--untracked-files=all",
+          "--",
+          ".",
+          `:(exclude)${WORKTREE_KEEP_EXCLUDE}`,
+        ],
+        {
+          cwd: managed,
+          timeout: 15_000,
+          maxBuffer: 8 * 1024 * 1024,
+        },
+      );
+      return String(stdout ?? "")
+        .replace(/\r\n/g, "\n")
+        .split("\n")
+        .filter((line) => line.length > 0);
+    } catch (error) {
+      console.warn(
+        `[LocalSessionStore] getUncommittedChanges: git status failed in ${managed}:`,
+        error,
+      );
+      return null;
+    }
   }
 
   getSessionsForScheduledTask(scheduledTaskId: string): LocalSession[] {
