@@ -22,6 +22,7 @@ vi.mock("./codeSdkQuerySession", async (importOriginal) => {
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  createCodeSdkActiveSession.mockReset();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -168,7 +169,9 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     expect(store.getSession(session.id)?.isRunning).toBe(false);
   });
 
-  it("interrupt() before system/init is official no-query → stopSession", async () => {
+  it("interrupt() before system/init still races query.interrupt (official !query gate)", async () => {
+    // Official interruptSession: `if(!(t!=null&&t.query))` stopSession.
+    // Query exists as soon as bD()/sdkQuery() returns — !sawInit is not the gate.
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt before init" });
     store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
@@ -176,12 +179,12 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       onEvent: () => undefined,
       onSessionUpdated: () => undefined,
     });
-    const sdk = plantSdk(runner, session.id, { sawInit: false, isRunning: true });
-    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: false });
-    expect(sdk.query.interrupt).not.toHaveBeenCalled();
+    const sdk = plantSdk(runner, session.id, { sawInit: false, isRunning: true, deferredSends: [] });
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: true });
+    expect(sdk.query.interrupt).toHaveBeenCalledTimes(1);
     expect(
       (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
-    ).toBe(false);
+    ).toBe(true);
     expect(store.getSession(session.id)?.isRunning).toBe(false);
   });
 
@@ -331,6 +334,68 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
           event.type === "error" && String(event.error ?? "").includes("claude_session_already_running"),
       ),
     ).toBe(false);
+  });
+
+  it("concurrent runTurn during ensureSdkSession shares one Query (start mutex)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "mutex share query" });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    let releaseCreate!: () => void;
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const enqueue = vi.fn();
+    createCodeSdkActiveSession.mockImplementation(async (opts: { sessionId: string }) => {
+      const interrupt = vi.fn(async () => undefined);
+      const stopTask = vi.fn(async () => undefined);
+      const close = vi.fn();
+      const sdk = {
+        deferredSends: [],
+        input: { enqueue },
+        isRunning: false,
+        isStopping: false,
+        loop: Promise.resolve(),
+        pendingPermissions: new Map(),
+        query: {
+          interrupt,
+          stopTask,
+          close,
+          setPermissionMode: vi.fn(async () => undefined),
+          setModel: vi.fn(async () => undefined),
+          applyFlagSettings: vi.fn(async () => true),
+          getContextUsage: vi.fn(async () => null),
+        },
+        sawInit: false,
+        sawResult: false,
+        sessionId: opts.sessionId,
+      } as unknown as CodeSdkActiveSession;
+      await createGate;
+      return sdk;
+    });
+
+    const first = runner.runTurn(session.id, "first-turn", { messageUuid: "u1" });
+    await vi.waitFor(() => {
+      expect(createCodeSdkActiveSession).toHaveBeenCalledTimes(1);
+    });
+    const second = runner.runTurn(session.id, "queued-follow", { messageUuid: "u2" });
+    await Promise.resolve();
+    expect(createCodeSdkActiveSession).toHaveBeenCalledTimes(1);
+
+    releaseCreate();
+    await expect(first).resolves.toBe(true);
+    await expect(second).resolves.toBe(true);
+
+    const sdk = (
+      runner as unknown as { sdkSessions: Map<string, CodeSdkActiveSession> }
+    ).sdkSessions.get(session.id);
+    expect(sdk).toBeTruthy();
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(sdk?.deferredSends).toHaveLength(1);
+    expect(sdk?.deferredSends[0]?.text).toBe("queued-follow");
+    expect(sdk?.isRunning).toBe(true);
   });
 
   it("runTurn defers while isRunning even if sawResult true (official isRunning-only gate)", async () => {

@@ -848,6 +848,17 @@ export class ClaudeCliRunner {
    */
   private readonly sdkSessions = new Map<string, CodeSdkActiveSession>();
   /**
+   * Official LocalSessionManager startResumeInFlight residual: concurrent
+   * send/warm share one create so follow-ups land on the same Query.
+   */
+  private readonly sdkEnsureInFlight = new Map<string, Promise<CodeSdkActiveSession | null>>();
+  /**
+   * Official acquireStartMutex residual: serialize sendMessage isRunning /
+   * deferredSends so mid-turn send #2 cannot enqueue on a Query whose
+   * isRunning is still false (Esc would then find empty deferred).
+   */
+  private readonly startMutexTail = new Map<string, Promise<void>>();
+  /**
    * Official Session IdleManager residual (VDe / jer=900s):
    * after turn complete, if tab not visible → start idle timeout → pauseSession
    * (teardown query, keep host session). Focus/message clears timeout; focus warms.
@@ -1120,12 +1131,9 @@ export class ClaudeCliRunner {
    */
   async interrupt(sessionId: string): Promise<{ continued: boolean }> {
     const sdk = this.sdkSessions.get(sessionId);
-    if (!sdk) {
-      this.stop(sessionId);
-      return { continued: false };
-    }
-    // Official: pre system/init → no ready query → stopSession.
-    if (!sdk.sawInit) {
+    // Official interruptSession: `if(!(t!=null&&t.query))` → stopSession.
+    // Query exists as soon as bD()/sdkQuery() returns — do NOT extra-stop on !sawInit.
+    if (!sdk?.query) {
       this.stop(sessionId);
       return { continued: false };
     }
@@ -1242,6 +1250,7 @@ export class ClaudeCliRunner {
       this.sdkSessions.delete(sessionId);
       this.clearIdleTimeout(sessionId);
     }
+    this.startMutexTail.delete(sessionId);
     this.store.clearPendingToolPermissions(sessionId);
     // Always clear host running so composer stopOnce settles.
     this.store.setRunning(sessionId, false, { kind: "claude-cli", finishedAt: nowIso() });
@@ -1508,10 +1517,47 @@ export class ClaudeCliRunner {
   }
 
   /**
+   * Official LocalSessionManager.acquireStartMutex residual.
+   * Chain senders so send #2 waits until send #1 has set isRunning / deferred.
+   */
+  private async acquireStartMutex(sessionId: string): Promise<() => void> {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prev = this.startMutexTail.get(sessionId) ?? Promise.resolve();
+    this.startMutexTail.set(
+      sessionId,
+      prev.then(() => held, () => held),
+    );
+    try {
+      await prev;
+    } catch {
+      // Previous send failure must not block the next send.
+    }
+    return release;
+  }
+
+  /**
    * Official sendMessage residual via SDK Query (bD + fJ):
    * warm query exists → enqueue user message; mid-turn → deferredSends.
    */
   private async runTurnViaSdkQuery(
+    sessionId: string,
+    session: LocalSession,
+    text: string,
+    request: Record<string, unknown>,
+    seededUuid: string | undefined,
+  ): Promise<boolean> {
+    const release = await this.acquireStartMutex(sessionId);
+    try {
+      return await this.enqueueOrDeferSdkTurn(sessionId, session, text, request, seededUuid);
+    } finally {
+      release();
+    }
+  }
+
+  private async enqueueOrDeferSdkTurn(
     sessionId: string,
     session: LocalSession,
     text: string,
@@ -1588,6 +1634,26 @@ export class ClaudeCliRunner {
   }
 
   private async ensureSdkSession(
+    sessionId: string,
+    session: LocalSession,
+    request: Record<string, unknown>,
+  ): Promise<CodeSdkActiveSession | null> {
+    const existing = this.sdkSessions.get(sessionId);
+    if (existing) return existing;
+    const inFlight = this.sdkEnsureInFlight.get(sessionId);
+    if (inFlight) return inFlight;
+    const created = this.createSdkSessionUncached(sessionId, session, request);
+    this.sdkEnsureInFlight.set(sessionId, created);
+    try {
+      return await created;
+    } finally {
+      if (this.sdkEnsureInFlight.get(sessionId) === created) {
+        this.sdkEnsureInFlight.delete(sessionId);
+      }
+    }
+  }
+
+  private async createSdkSessionUncached(
     sessionId: string,
     session: LocalSession,
     request: Record<string, unknown>,
@@ -1927,6 +1993,7 @@ export class ClaudeCliRunner {
     if (!sdk) return false;
     closeCodeSdkSession(sdk);
     this.sdkSessions.delete(sessionId);
+    this.startMutexTail.delete(sessionId);
     this.store.setRunning(sessionId, false, {
       kind: "claude-cli",
       finishedAt: nowIso(),
