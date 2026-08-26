@@ -182,7 +182,11 @@ it("publishes isRunning again on multi-turn send after a settled result", async 
     sessionId,
     type: "session_updated",
   });
-  const second = await nextUserMessage(harness.factoryInputs[0]!.prompt);
+  // Official idleGraceMs=0 tears down the warm query; send resumes via start().
+  expect(harness.factoryInputs.length).toBeGreaterThanOrEqual(2);
+  const second = await nextUserMessage(
+    harness.factoryInputs[harness.factoryInputs.length - 1]!.prompt,
+  );
   expect(second).toMatchObject({ uuid: "message-2" });
 });
 
@@ -3119,6 +3123,45 @@ it("idle grace expiry tears down process when still idle", async () => {
   }
 });
 
+it("idleGraceMs=0 tears down process immediately (official else branch)", async () => {
+  const harness = createManagerHarness();
+  const manager = createTestManager(harness, {
+    getIdleGraceMs: () => 0,
+    resolveHostLoopMode: () => true,
+  });
+  const sessionId = await manager.start({
+    message: "hello",
+    messageUuid: "message-1",
+  });
+  await vi.waitFor(() => {
+    expect(manager.getSession(sessionId)?.isRunning).toBe(true);
+  });
+  const getRuntime = () =>
+    (
+      manager as unknown as {
+        repository: {
+          get: (id: string) => {
+            lifecycleState: string;
+            query: unknown;
+            inputStream: unknown;
+          } | undefined;
+        };
+      }
+    ).repository.get(sessionId)!;
+  const runtime = getRuntime();
+  runtime.lifecycleState = "idle";
+  (
+    manager as unknown as {
+      maybeArmIdleGraceAfterIdle: (
+        id: string,
+        o?: { fromRunning?: boolean },
+      ) => void;
+    }
+  ).maybeArmIdleGraceAfterIdle(sessionId, { fromRunning: true });
+  expect(runtime.query).toBeNull();
+  expect(runtime.inputStream).toBeNull();
+  expect(harness.query.closed).toBe(true);
+});
 
 it("applyMcpServersIfIdle defers while running and flushes on idle grace arm", async () => {
   const harness = createManagerHarness();
@@ -3326,7 +3369,11 @@ it("Ds residual: queryCompleted shows idle when unfocused; skips focused/schedul
   shown.length = 0;
   navigated.length = 0;
   await manager.sendMessage(sessionId, "again", undefined, undefined, "ds-2");
-  await nextUserMessage(harness.factoryInputs[0]!.prompt);
+  // Official idleGraceMs=0 tears down the warm query; send resumes via start().
+  expect(harness.factoryInputs.length).toBeGreaterThanOrEqual(2);
+  await nextUserMessage(
+    harness.factoryInputs[harness.factoryInputs.length - 1]!.prompt,
+  );
   manager.setFocusedSession(sessionId);
   harness.query.push({ is_error: false, subtype: "success", type: "result" });
   await vi.waitFor(() => {

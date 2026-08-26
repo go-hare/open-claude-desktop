@@ -32,6 +32,7 @@ import {
   closeCodeSdkSession,
   createCodeSdkActiveSession,
   officialSessionDestinationSuggestions,
+  parseClaudeProcessExitCode,
   resolveCodeSdkPermission,
   type CodeSdkActiveSession,
 } from "./codeSdkQuerySession";
@@ -1818,6 +1819,15 @@ export class ClaudeCliRunner {
             // and can clear Va/typewriter before the final assistant merge lands —
             // UI then shows only a later error_during_execution red card (no text).
             this.callbacks.onEvent(event);
+            // Official handleQueryError: emit error → teardownQuery → emit close code:1.
+            // Only the query-iterator catch sets queryExited; result is_error must not
+            // teardown the warm Query. Skip if resume/ssh already deleted the sdk.
+            if (eventType === "error" && asRecord(event).queryExited === true) {
+              this.teardownSdkQueryAfterError(
+                sessionId,
+                stringValue(asRecord(event).error) ?? "",
+              );
+            }
             // Official asar call sites → signalTurnComplete / markNotRunning:
             //   interruptSession · createBaseHooks Stop · handleResultMessage(parent result)
             // Product: shouldSignalTurnCompleteFromCliMessage (result + stop_hook_summary).
@@ -1986,11 +1996,41 @@ export class ClaudeCliRunner {
 
   /**
    * Official IdleManager pause residual: teardown warm query, keep host session.
+   * Official skip gates (app.asar pauseSession): isRunning, unexpired cron,
+   * active workflows, remoteControlEnabled.
    */
   pauseSession(sessionId: string): boolean {
     this.clearIdleTimeout(sessionId);
     const sdk = this.sdkSessions.get(sessionId);
     if (!sdk) return false;
+    const session = this.store.getSession(sessionId);
+    if (session?.isRunning === true || sdk.isRunning) {
+      return false;
+    }
+    const cronTtlMs = 4320 * 60 * 1e3;
+    const cron = session?.activeCronJobs;
+    if (cron && typeof cron === "object") {
+      const now = Date.now();
+      for (const [jobId, job] of Object.entries(cron)) {
+        const createdAt =
+          job && typeof job === "object" && typeof job.createdAt === "number"
+            ? job.createdAt
+            : 0;
+        if (now - createdAt > cronTtlMs) {
+          delete cron[jobId];
+        }
+      }
+      if (Object.keys(cron).length > 0) {
+        return false;
+      }
+    }
+    const workflows = session?.activeWorkflows;
+    if (workflows && typeof workflows === "object" && Object.keys(workflows).length > 0) {
+      return false;
+    }
+    if (session?.remoteControlEnabled) {
+      return false;
+    }
     closeCodeSdkSession(sdk);
     this.sdkSessions.delete(sessionId);
     this.startMutexTail.delete(sessionId);
@@ -2006,6 +2046,29 @@ export class ClaudeCliRunner {
 
 
 
+
+  /**
+   * Official handleQueryError teardownQuery + close residual.
+   * Crash path emits close (not stopped). Interrupt/stopSession still emits stopped.
+   */
+  private teardownSdkQueryAfterError(sessionId: string, errText: string): void {
+    const sdk = this.sdkSessions.get(sessionId);
+    if (!sdk) return;
+    closeCodeSdkSession(sdk);
+    this.sdkSessions.delete(sessionId);
+    this.startMutexTail.delete(sessionId);
+    this.clearIdleTimeout(sessionId);
+    this.store.clearPendingToolPermissions(sessionId);
+    const ssh = Boolean(this.store.getSession(sessionId)?.sshConfig);
+    this.store.setRunning(sessionId, false, {
+      kind: ssh ? "claude-cli-ssh" : "claude-cli",
+      finishedAt: nowIso(),
+      lastError: errText || undefined,
+      lastExitCode: parseClaudeProcessExitCode(errText),
+    });
+    this.callbacks.onEvent({ type: "close", sessionId, code: 1 });
+    this.callbacks.onSessionUpdated(sessionId);
+  }
 
   private emitError(sessionId: string, message: string): void {
     const event = { type: "error", sessionId, error: message, timestamp: nowIso() };

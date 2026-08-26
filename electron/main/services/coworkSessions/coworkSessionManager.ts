@@ -843,8 +843,7 @@ export class CoworkSessionManager {
   /**
    * Official transitionTo("idle") idle-grace arm residual.
    * Call when product enters idle from a successful running turn with live query.
-   * Statsig idleGraceMs inject default 0 → residual keeps warm query (no arm, no
-   * forced teardown) so existing resume path still works without inventing gate.
+   * Statsig idleGraceMs inject default 0 → official else branch teardownIdleProcess.
    */
   maybeArmIdleGraceAfterIdle(
     sessionId: string,
@@ -863,13 +862,8 @@ export class CoworkSessionManager {
       sessionType: session.sessionType,
     });
     if (!decision.arm) {
-      // Official else branch: teardownIdleProcess. Product residual when ms_zero:
-      // keep warm query for resume (matches pre-#124 behavior). Other fail reasons
-      // (error / no process / skip type) still tear down when a process is live.
-      if (
-        decision.reason !== "ms_zero" &&
-        (session.query || session.inputStream)
-      ) {
+      // Official else branch: teardownIdleProcess (including idleGraceMs===0).
+      if (session.query || session.inputStream) {
         this.teardownIdleProcess(sessionId);
       }
       return;

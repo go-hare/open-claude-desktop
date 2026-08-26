@@ -40,6 +40,13 @@ export class TestCoworkQuery implements CoworkRuntimeQuery {
     this.finish();
   }
 
+  /** Official idleGraceMs=0 teardown then resume start() needs a live Query. */
+  reopen(): void {
+    this.closed = false;
+    this.done = false;
+    this.interrupted = false;
+  }
+
   async interrupt(): Promise<void> {
     this.interrupted = true;
   }
@@ -209,6 +216,7 @@ export function createTestManager(
     now: () => 1_000,
     queryFactory: (input) => {
       harness.factoryInputs.push(input);
+      if (harness.query.closed) harness.query.reopen();
       return harness.query;
     },
     ...overrides,

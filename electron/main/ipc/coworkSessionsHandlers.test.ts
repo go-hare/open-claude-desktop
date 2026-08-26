@@ -2,7 +2,9 @@ import { expect, it, vi } from "vitest";
 import type { CoworkSessionManager } from "../services/coworkSessions/coworkSessionManager";
 import { createCoworkSessionHandlers } from "./coworkSessionsHandlers";
 
+const send = vi.fn();
 const event = {
+  sender: { isDestroyed: () => false, send },
   senderFrame: { parent: null, url: "app://localhost/cowork/session-1" },
 } as never;
 
@@ -126,6 +128,29 @@ it("initializes before reading raw session replay and transcript", async () => {
   expect(instance.getTranscript).toHaveBeenCalledWith("session-1", {
     limit: 100,
   });
+});
+
+it("replays bufferedMessages as onEvent unless skipReplay", async () => {
+  send.mockClear();
+  const instance = manager();
+  const buffered = { type: "assistant", uuid: "m1" };
+  vi.mocked(instance.getSession).mockReturnValue({
+    bufferedMessages: [buffered],
+    sessionId: "session-1",
+  } as never);
+  const handlers = createCoworkSessionHandlers(instance);
+
+  await handlers.getSession?.(event, "session-1", { skipReplay: false });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send.mock.calls[0]?.[1]).toEqual({
+    type: "message",
+    sessionId: "session-1",
+    message: buffered,
+  });
+
+  send.mockClear();
+  await handlers.getSession?.(event, "session-1", { skipReplay: true });
+  expect(send).not.toHaveBeenCalled();
 });
 
 it("forwards permission decisions to the exact-once broker", async () => {

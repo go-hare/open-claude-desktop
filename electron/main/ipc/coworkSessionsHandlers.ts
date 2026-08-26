@@ -22,7 +22,7 @@ import { parseCoworkSendMessageArgs } from "./coworkSendMessageContract";
 import { createCoworkLocalAgentResidualHandlers } from "./coworkLocalAgentResidualHandlers";
 import { createCoworkSessionWorkspaceHandlers } from "./coworkSessionWorkspaceHandlers";
 import type { InterfaceHandlers, IpcHandler } from "./registerIpc";
-import { registerInterfaceHandlers } from "./registerIpc";
+import { dispatchBridgeEvent, registerInterfaceHandlers } from "./registerIpc";
 import {
   getSessionsBridgeEnabled,
   getSessionsBridgeStatusState,
@@ -143,9 +143,29 @@ export function createCoworkSessionHandlers(manager: CoworkSessionManager): Inte
       await initialize(manager);
       return manager.getAll();
     }),
-    getSession: secured(async (_event, id, options) => {
+    getSession: secured(async (event, id, options) => {
       await initialize(manager);
-      return manager.getSession(sessionId(id), options);
+      const session = manager.getSession(sessionId(id), options);
+      // Official LocalAgentModeSessions getSession wrapper (app.asar):
+      // if session exists and !(options?.skipReplay), dispatch each buffered
+      // message as onEvent {type:"message", sessionId, message} to event.sender.
+      const skipReplay =
+        options != null &&
+        typeof options === "object" &&
+        Boolean((options as { skipReplay?: unknown }).skipReplay);
+      if (session && !skipReplay) {
+        const sender = event.sender;
+        if (sender && !sender.isDestroyed()) {
+          for (const message of session.bufferedMessages ?? []) {
+            dispatchBridgeEvent(sender, "claude.web", "LocalAgentModeSessions", "onEvent", {
+              type: "message",
+              sessionId: session.sessionId,
+              message,
+            });
+          }
+        }
+      }
+      return session;
     }),
     getSessionsForScheduledTask: secured(async (_event, taskId) => {
       await initialize(manager);

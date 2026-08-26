@@ -610,6 +610,116 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     expect(store.getSession(session.id)?.isRunning).toBe(false);
   });
 
+  it("queryExited error tears down Query, clears isRunning, emits close (handleQueryError)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "crash", cwd: "/tmp/proj", title: "fastfail teardown" });
+    store.setCliSessionId(session.id, "cli-fastfail");
+    store.setRunning(session.id, true, {
+      kind: "claude-cli",
+      executable: "sdk-query",
+      startedAt: new Date().toISOString(),
+      lastExitCode: null,
+    });
+    const events: Array<Record<string, unknown>> = [];
+    let capturedOnEvent: ((event: Record<string, unknown>) => void) | null = null;
+    createCodeSdkActiveSession.mockImplementation(async (opts: {
+      callbacks: CodeSdkSessionCallbacks;
+      sessionId: string;
+    }) => {
+      capturedOnEvent = opts.callbacks.onEvent;
+      return {
+        deferredSends: [],
+        input: { enqueue: vi.fn(), done: vi.fn() },
+        isRunning: true,
+        isStopping: false,
+        loop: Promise.resolve(),
+        pendingPermissions: new Map(),
+        query: {
+          interrupt: vi.fn(async () => undefined),
+          stopTask: vi.fn(async () => undefined),
+          close: vi.fn(),
+          setPermissionMode: vi.fn(async () => undefined),
+          setModel: vi.fn(async () => undefined),
+          applyFlagSettings: vi.fn(async () => true),
+          getContextUsage: vi.fn(async () => null),
+        },
+        sawInit: true,
+        sawResult: false,
+        sessionId: opts.sessionId,
+      } as unknown as CodeSdkActiveSession;
+    });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.warmSession(session.id)).resolves.toBe(true);
+    capturedOnEvent!({
+      type: "error",
+      sessionId: session.id,
+      error: "Claude Code process exited with code 3221226505",
+      errorCategory: "cli_fastfail",
+      queryExited: true,
+    });
+    const after = store.getSession(session.id);
+    expect(after?.isRunning).toBe(false);
+    expect(after?.runtime?.lastExitCode).toBe(3221226505);
+    expect(after?.runtime?.lastError).toBe("Claude Code process exited with code 3221226505");
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(false);
+    expect(events.some((event) => event.type === "stopped")).toBe(false);
+    expect(events.some((event) => event.type === "close" && event.code === 1)).toBe(true);
+  });
+
+  it("result is_error without queryExited does not teardown warm Query", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "result error", cwd: "/tmp/proj", title: "result no teardown" });
+    store.setCliSessionId(session.id, "cli-result-error");
+    let capturedOnEvent: ((event: Record<string, unknown>) => void) | null = null;
+    createCodeSdkActiveSession.mockImplementation(async (opts: {
+      callbacks: CodeSdkSessionCallbacks;
+      sessionId: string;
+    }) => {
+      capturedOnEvent = opts.callbacks.onEvent;
+      return {
+        deferredSends: [],
+        input: { enqueue: vi.fn(), done: vi.fn() },
+        isRunning: true,
+        isStopping: false,
+        loop: Promise.resolve(),
+        pendingPermissions: new Map(),
+        query: {
+          interrupt: vi.fn(async () => undefined),
+          stopTask: vi.fn(async () => undefined),
+          close: vi.fn(),
+          setPermissionMode: vi.fn(async () => undefined),
+          setModel: vi.fn(async () => undefined),
+          applyFlagSettings: vi.fn(async () => true),
+          getContextUsage: vi.fn(async () => null),
+        },
+        sawInit: true,
+        sawResult: false,
+        sessionId: opts.sessionId,
+      } as unknown as CodeSdkActiveSession;
+    });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.warmSession(session.id)).resolves.toBe(true);
+    capturedOnEvent!({
+      type: "error",
+      sessionId: session.id,
+      error: "prompt is too long",
+      errorCategory: "api_prompt_too_long",
+    });
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(true);
+  });
+
   it("signalTurnCompleteSdk settles host when handleSdkMessage already cleared sdk.isRunning", () => {
     // handleSdkMessage sets active.isRunning=false on result before onEvent → signal.
     // Host store must still markNotRunning or Stop/Esc sticks.
@@ -747,7 +857,6 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
   it("pauseSession tears down warm query without FM error", () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "idle pause" });
-    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
     const events: Array<Record<string, unknown>> = [];
     const runner = new ClaudeCliRunner(store, {
       onEvent: (event) => {
@@ -763,6 +872,48 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     expect(events.some((event) => event.type === "paused")).toBe(true);
     expect(events.some((event) => event.type === "error")).toBe(false);
     expect(store.getSession(session.id)?.isRunning).toBe(false);
+  });
+
+  it("pauseSession skips while query isRunning (official idle skip)", () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "idle skip running" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    plantSdk(runner, session.id, { isRunning: true });
+    expect(runner.pauseSession(session.id)).toBe(false);
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(true);
+  });
+
+  it("pauseSession skips unexpired cron / workflows / remoteControl", () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "idle skip gates" });
+    const live = store.getSession(session.id)!;
+    live.activeCronJobs = { "cron-1": { createdAt: Date.now() } };
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    plantSdk(runner, session.id, { isRunning: false });
+    expect(runner.pauseSession(session.id)).toBe(false);
+
+    delete live.activeCronJobs;
+    live.activeWorkflows = { "wf-1": {} };
+    expect(runner.pauseSession(session.id)).toBe(false);
+
+    delete live.activeWorkflows;
+    live.remoteControlEnabled = true;
+    expect(runner.pauseSession(session.id)).toBe(false);
+
+    live.remoteControlEnabled = false;
+    expect(runner.pauseSession(session.id)).toBe(true);
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(false);
   });
 
   it("setPermissionMode with warm query is informed", async () => {

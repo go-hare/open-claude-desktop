@@ -15,9 +15,7 @@
  *
  * Residual honesty:
  * - Real Statsig wr idleGraceMs product store not invented — inject getIdleGraceMs
- *   default 0.
- * - When ms===0 product keeps warm query (existing resume path) instead of official
- *   immediate teardownIdleProcess — documented residual.
+ *   default 0. Official else branch still teardownIdleProcess when ms===0.
  * - full healthMonitor / memorySync product stores not invented; mcpServersDirty
  *   deferred setMcpServers flush is product (#126) on warm arm only.
  */

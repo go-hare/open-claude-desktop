@@ -873,14 +873,20 @@ active.loop = (async () => {
         handleSdkMessage(active, message as SDKMessage, callbacks);
       }
     } catch (error) {
+      // Official handleQueryError: skip error emit when isStopping (interrupt → KwA only).
       if (!active.isStopping) {
         const text = error instanceof Error ? error.message : String(error);
-        const category = classifyCodeSdkError(text);
+        // Official n7i: cli_fastfail + last_message_type in {result, rate_limit_event}
+        // → cli_shutdown_crash_benign. Product has no ANA/messageBuffer; sawResult is
+        // the same gate. Skip s7i (no rendererGoneAt).
+        const category = remapCliFastfail(classifyCodeSdkError(error), active.sawResult);
         callbacks.onEvent({
           type: "error",
           sessionId,
           error: text,
           errorCategory: category,
+          // Product: query iterator threw — official handleQueryError path (not result is_error).
+          queryExited: true,
           timestamp: nowIso(),
         });
       }
@@ -894,29 +900,253 @@ active.loop = (async () => {
 }
 
 /**
- * Official qwA / handleQueryError residual categories used by CCD recovery.
- * `cli_resume_not_found` ← "No conversation found with session ID"
+ * Official A7i / e7i / t7i (app.asar LocalSessionManager, next to qwA).
+ * 3221226505 = STATUS_STACK_BUFFER_OVERRUN → cli_fastfail.
  */
-export function classifyCodeSdkError(message: string): string | undefined {
-  const text = message.toLowerCase();
-  if (text.includes("no conversation found with session id")) return "cli_resume_not_found";
-  if (text.includes("no message found with message.uuid")) return "cli_rewind_target_not_found";
-  if (text.includes("prompt is too long")) return "api_prompt_too_long";
-  // Official qwA residual network categories used for SSH disconnect path.
+const OFFICIAL_PROCESS_INTERRUPTED_CODES = new Set([
+  1073807364, 3221225786, 4294967295, 137, 143, -1,
+]);
+const OFFICIAL_CLI_FASTFAIL_CODE = 3221226505;
+const OFFICIAL_DLL_NOT_FOUND_CODE = 3221225781;
+
+/**
+ * Official n7i residual. `sawResult` stands in for ANA last_message_type in
+ * {result, rate_limit_event} — product has no messageBuffer.
+ */
+export function remapCliFastfail(category: string, sawResult: boolean): string {
+  return category === "cli_fastfail" && sawResult ? "cli_shutdown_crash_benign" : category;
+}
+
+export function parseClaudeProcessExitCode(message: string): number | null {
+  const match = message.match(/process exited with code (-?\d+)/);
+  if (!match) return null;
+  const code = Number(match[1]);
+  return Number.isFinite(code) ? code : null;
+}
+
+function classifyMessageFromError(error: unknown): string {
+  if (error instanceof Error) {
+    const aggregate = (error as Error & { errors?: unknown }).errors;
+    const joined = Array.isArray(aggregate)
+      ? aggregate
+        .map((item) => (item instanceof Error ? item.message : String(item)))
+        .filter(Boolean)
+        .join("; ")
+      : "";
+    return error.message || joined;
+  }
+  return String(error);
+}
+
+function exitCodeMatches(parsed: number, expected: number): boolean {
+  return parsed === expected || (parsed >>> 0) === expected;
+}
+
+function isInterruptedExitCode(parsed: number): boolean {
+  return OFFICIAL_PROCESS_INTERRUPTED_CODES.has(parsed)
+    || OFFICIAL_PROCESS_INTERRUPTED_CODES.has(parsed >>> 0);
+}
+
+/**
+ * Official qwA residual. Always returns a category (unknown default).
+ * Signed NTSTATUS (`-1073740791`) is normalized with `>>> 0` so it matches
+ * unsigned e7i/t7i/A7i the same way Node and Win32 both report the crash.
+ *
+ * `api_prompt_too_long` is official handleResultMessage (not qwA) — kept so
+ * result is_error still classifies the same string.
+ */
+export function classifyCodeSdkError(error: unknown, stderr?: string): string {
+  const r = classifyMessageFromError(error);
+  const prefix = "Claude Code returned an error result: ";
+  if (r.startsWith(prefix)) {
+    const c = r.slice(prefix.length);
+    if (c.includes("hit your limit") || c.includes("out of extra usage")) return "rate_limit";
+    if (c.includes("No conversation found with session ID")) return "cli_resume_not_found";
+    if (c.includes("No message found with message.uuid")) return "cli_rewind_target_not_found";
+    if (c.startsWith("Path ") && c.includes("does not exist")) return "cwd_not_found";
+    if (c.includes("EPERM") && (c.includes("lstat") || c.includes("stat "))) return "bun_cwd_eperm";
+    if (c.includes("ConnectionRefused")) return "network_error";
+    if (
+      c.includes("401")
+      || c.includes("403")
+      || c.toLowerCase().includes("authenticat")
+      || c.toLowerCase().includes("forbidden")
+    ) {
+      return "auth_error";
+    }
+    return "unknown";
+  }
+  const outputMatch = r.match(/Output:\s*(.*)$/s);
+  const output = outputMatch?.[1]?.trim();
+  if (r.includes("native binary not found at")) {
+    return r.includes("/disclaimer")
+      || r.includes("\\disclaimer")
+      || r.includes("Helpers/disclaimer")
+      ? "disclaimer_binary_missing"
+      : "sdk_binary_missing";
+  }
+  if (r.includes("No such file or directory") && r.includes("claude")) return "sdk_binary_missing";
+  if (r.includes("No path to Claude code executable")) return "sdk_binary_missing";
   if (
-    text.includes("connectionrefused")
-    || text.includes("econnrefused")
-    || text.includes("econnreset")
-    || text.includes("socket hang up")
-    || text.includes("ssh connection dropped")
-    || text.includes("broken pipe")
+    r.includes("Exec format error")
+    || r.includes("cannot execute binary file")
+    || r.toLowerCase().includes("bad cpu type in executable")
+  ) {
+    return "sdk_binary_arch_mismatch";
+  }
+  if (r.includes("EFTYPE") || r.includes("ENOEXEC")) return "sdk_binary_corrupt";
+  if (r.includes("disclaimer binary not found")) return "disclaimer_binary_missing";
+  if (r.includes("Working directory no longer exists")) return "cwd_not_found";
+  if (
+    r.includes("is outside the workspace folders allowed")
+    || r.includes("UNC paths are not allowed")
+    || r.includes("UNC path not allowed")
+    || r.includes("Symlink to UNC target")
+  ) {
+    return "policy_denied";
+  }
+  if (
+    r.includes("Git is required but was not found")
+    || r.includes("Git Bash is required but was not found")
+    || r.includes("Git LFS is required")
+  ) {
+    return "git_not_found";
+  }
+  if (r.includes("Failed to create worktree on remote host")) return "remote_worktree_failed";
+  if (
+    (r.startsWith("Can't switch to ") && r.includes("uncommitted changes"))
+    || r.startsWith("Failed to switch to ")
+    || r.startsWith("Invalid branch name ")
+  ) {
+    return "git_checkout_failed";
+  }
+  if (r.includes("trust approval")) return "trust_required";
+  if (r.includes("OTEL console exporter configured in") || output === "{") return "otel_console_exporter";
+  if (r.includes("Segmentation fault")) return "segfault";
+  if (
+    r.includes("[BashTool]")
+    || r.includes("Pre-flight check")
+    || r.includes("--dangerously-skip-permissions cannot be used")
+    || r.includes('"type":"control_request"')
+    || r.includes("[WARN]")
+  ) {
+    return "cli_stdout_pollution";
+  }
+  if (r.includes("bad message") || r.includes("input/output error") || r.includes("Error 74")) {
+    return "filesystem_error";
+  }
+  if (r.includes("ECONNREFUSED") || r.toLowerCase().includes("connection refused")) {
+    return "connection_refused";
+  }
+  if (
+    r.includes("ERR_CONNECTION")
+    || r.includes("ERR_NETWORK")
+    || r.includes("ERR_INTERNET")
+    || r.includes("ETIMEDOUT")
+    || r.includes("ECONNRESET")
+    || r.includes("EHOSTDOWN")
+    || r.includes("EHOSTUNREACH")
+    || r.includes("ENETUNREACH")
+    || r.includes("ENOTFOUND")
+    || r.includes("getaddrinfo")
+    || r.includes("waiting for handshake")
+    || r.includes("Connection lost before handshake")
+    || r.includes("Host denied")
+    || r.includes("SSH connection setup timed out")
+    || r.includes("network may be unreliable")
+    || r.includes("Unexpected token '<'")
+    || r.toLowerCase().includes("socket hang up")
+    || r.toLowerCase().includes("broken pipe")
+    || r.toLowerCase().includes("ssh connection dropped")
   ) {
     return "network_error";
   }
-  if (text.includes("401") || text.includes("unauthorized") || text.includes("authenticat")) {
+  if (r.includes("CLI output was not valid JSON")) return "json_parse_error";
+  if (r.includes("EBUSY")) return "binary_locked";
+  if (
+    r.includes("ENOENT")
+    || r.includes("spawn UNKNOWN")
+    || r.includes("spawn EPERM")
+    || r.includes("spawn ENXIO")
+    || r.includes("spawn ENOTDIR")
+    || r.includes("spawn EAGAIN")
+    || (r.toLowerCase().includes("spawn") && r.toLowerCase().includes("failed"))
+  ) {
+    return "spawn_failed";
+  }
+  // Official handleResultMessage strings (unprefixed result is_error).
+  if (r.includes("No conversation found with session ID")) return "cli_resume_not_found";
+  if (r.includes("No message found with message.uuid")) return "cli_rewind_target_not_found";
+  const exitMatch = r.match(/process exited with code (-?\d+)/);
+  if (exitMatch) {
+    const parsed = Number(exitMatch[1]);
+    if (
+      parsed === 137
+      && process.platform === "darwin"
+      && stderr !== undefined
+      && !stderr.trim()
+    ) {
+      return "endpoint_security_blocked";
+    }
+    if (isInterruptedExitCode(parsed)) return "process_interrupted";
+    if (exitCodeMatches(parsed, OFFICIAL_CLI_FASTFAIL_CODE)) return "cli_fastfail";
+    if (exitCodeMatches(parsed, OFFICIAL_DLL_NOT_FOUND_CODE)) return "dll_not_found";
+    if (stderr) {
+      if (stderr.includes("Bun has crashed")) return "bun_crash";
+      if (
+        stderr.includes("An unknown error occurred (Unexpected)")
+        || stderr.includes("possibly due to low max file descriptors (Unexpected)")
+        || (stderr.includes("EINTR") && (stderr.includes("lstat") || stderr.includes("stat ")))
+        || (stderr.includes("EPERM") && (stderr.includes("lstat") || stderr.includes("stat ")))
+      ) {
+        return "bun_cwd_eperm";
+      }
+      if (stderr.includes("Symbol not found:")) return "os_too_old";
+      if (stderr.includes("requires git-bash") || stderr.includes("CLAUDE_CODE_GIT_BASH_PATH")) {
+        return "git_not_found";
+      }
+      if (stderr.includes("Expected in: /usr/lib/libicucore")) return "os_too_old";
+      if (stderr.includes("Unable to verify organization")) return "auth_error";
+      if (stderr.includes("cannot be launched inside another Claude Code session")) {
+        return "claudecode_nested";
+      }
+      if (stderr.includes("Malformed Mach-o")) return "sdk_binary_missing";
+      if (stderr.includes("Bad CPU type in executable")) return "sdk_binary_arch_mismatch";
+    }
+    return "process_crashed";
+  }
+  if (r.includes("terminated by signal")) {
+    if (
+      r.includes("SIGKILL")
+      && process.platform === "darwin"
+      && stderr !== undefined
+      && !stderr.trim()
+    ) {
+      return "endpoint_security_blocked";
+    }
+    if (r.includes("SIGKILL") || r.includes("SIGTERM")) return "process_interrupted";
+    return "process_crashed";
+  }
+  if (
+    r.includes("Cannot write to process that exited")
+    || r.includes("ProcessTransport output stream not available")
+    || r.includes("Cannot write to terminated process")
+    || r.includes("Failed to write to process stdin")
+  ) {
+    return "process_crashed";
+  }
+  if (
+    r.includes("401")
+    || r.toLowerCase().includes("unauthorized")
+    || r.toLowerCase().includes("authentication")
+    || r.toLowerCase().includes("revoked")
+    || r.includes("No API token")
+    || r.includes("account information is unavailable")
+  ) {
     return "auth_error";
   }
-  return undefined;
+  if (/prompt is too long/i.test(r)) return "api_prompt_too_long";
+  return "unknown";
 }
 
 function handleSdkMessage(
@@ -947,7 +1177,9 @@ function handleSdkMessage(
       ?? stringValue(record.error);
     if (isError && resultText) {
       const category = classifyCodeSdkError(resultText);
-      if (category) {
+      // Official handleResultMessage does not emit type:error for generic is_error.
+      // Keep the known-category gate; never emit unknown on every failed result.
+      if (category && category !== "unknown") {
         callbacks.onEvent({
           type: "error",
           sessionId,

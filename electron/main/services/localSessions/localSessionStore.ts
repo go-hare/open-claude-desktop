@@ -195,6 +195,13 @@ export type LocalSession = {
    * real CLI envelopes when present.
    */
   hookBookends?: unknown[];
+  /**
+   * Official LSM pauseSession skip gates. Optional fields so the official
+   * idle-pause checks exist without inventing unused runner Maps.
+   */
+  remoteControlEnabled?: boolean;
+  activeCronJobs?: Record<string, { createdAt: number }>;
+  activeWorkflows?: Record<string, unknown>;
 };
 
 /** Official session.prs entry subset (number + state + optional url/title/repo). */
