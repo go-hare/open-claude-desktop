@@ -14,9 +14,9 @@ vi.mock("../services/localSessions/localAgentAssets", () => ({
   getLocalSkillFiles: vi.fn(async () => [
     { relativePath: "SKILL.md", content: "# Demo", path: "/tmp/demo/SKILL.md" },
   ]),
-  saveLocalSkill: vi.fn(async () => ({ id: "app-local:demo", name: "Demo" })),
-  deleteLocalSkill: vi.fn(async () => true),
-  setLocalSkillEnabled: vi.fn(async () => ({ id: "app-local:demo", enabled: false })),
+  saveLocalSkill: vi.fn(async () => ({ ok: true })),
+  deleteLocalSkill: vi.fn(async () => ({ ok: true })),
+  setLocalSkillEnabled: vi.fn(async () => ({ ok: true })),
   revealLocalSkill: vi.fn(async () => true),
 }));
 

@@ -635,11 +635,10 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   };
   const cachedCommands = async () => [
     ...(await listLocalSkills()).map((skill) => ({
-      id: `skill:${String(skill.id)}`,
-      name: String(skill.name ?? skill.title ?? skill.id),
+      id: `skill:${String(skill.skillId ?? skill.name)}`,
+      name: String(skill.name ?? skill.skillId),
       description: String(skill.description ?? ""),
       source: "skill",
-      path: skill.path,
     })),
     ...installedPlugins().map((plugin) => ({
       id: `plugin:${String(plugin.id)}`,
@@ -2042,9 +2041,15 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         return residual.length > 0 ? residual : pluginShimOps(installedPlugins());
       },
       listSkillFiles: async (_event, skillRef) => {
-        if (skillRef) return getLocalSkillFiles(skillRef);
+        if (typeof skillRef === "string" && skillRef.length > 0) {
+          return getLocalSkillFiles(skillRef);
+        }
         const skills = await listLocalSkills();
-        return (await Promise.all(skills.map((skill) => getLocalSkillFiles(skill)))).flat();
+        return (
+          await Promise.all(
+            skills.map((skill) => getLocalSkillFiles(String(skill.name ?? skill.skillId))),
+          )
+        ).flat();
       },
       revokePluginOAuth: async (_event, pluginId, cliName?, contextMode?) => {
         residualRevokePluginOAuth(pluginOAuthDeps(), pluginId, cliName, contextMode);

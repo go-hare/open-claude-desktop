@@ -188,11 +188,7 @@ export function createCoworkLocalAgentResidualHandlers(
       const name = requiredString(skillName, "name");
       const files = await getLocalSkillFiles(name);
       return files.map((file) => ({
-        path:
-          optionalString(file.relativePath) ??
-          optionalString(file.name) ??
-          optionalString(file.path) ??
-          "SKILL.md",
+        path: optionalString(file.path) ?? "SKILL.md",
         content:
           typeof file.content === "string" ? file.content : String(file.content ?? ""),
       }));
@@ -219,34 +215,12 @@ export function createCoworkLocalAgentResidualHandlers(
             'Argument "overwrite" at position 3 to method "saveLocalSkill" in interface "LocalAgentModeSessions" failed to pass validation',
           );
         }
-        const trimmed = name.trim();
-        if (!trimmed || trimmed === "." || trimmed === "..") {
-          return { ok: false, error: `Invalid skill name: "${name}"` };
-        }
-        const existing = (await listLocalSkills()).find(
-          (skill) =>
-            skillIdFromRecord(skill) === trimmed ||
-            optionalString(skill.name) === trimmed ||
-            optionalString(skill.key) === trimmed,
-        );
-        if (existing && !overwrite) {
-          return { ok: false, error: "already_exists" };
-        }
-        const saved = await saveLocalSkill({
-          name: trimmed,
-          description,
-          content: skillMd,
-        });
-        if (!saved) return { ok: false, error: "save_failed" };
-        return { ok: true };
+        return saveLocalSkill(name, description, skillMd, overwrite);
       },
     ),
     deleteLocalSkill: secured(async (_event, skillName) => {
       const name = requiredString(skillName, "name");
-      const ok = await deleteLocalSkill(name);
-      return ok
-        ? { ok: true }
-        : { ok: false, error: `"${name}" is not a user-created skill` };
+      return deleteLocalSkill(name);
     }),
     setLocalSkillEnabled: secured(async (_event, skillName, enabled) => {
       const name = requiredString(skillName, "name");
@@ -255,10 +229,7 @@ export function createCoworkLocalAgentResidualHandlers(
           'Argument "enabled" at position 1 to method "setLocalSkillEnabled" in interface "LocalAgentModeSessions" failed to pass validation',
         );
       }
-      const updated = await setLocalSkillEnabled(name, enabled);
-      return updated
-        ? { ok: true }
-        : { ok: false, error: `Skill "${name}" not found` };
+      return setLocalSkillEnabled(name, enabled);
     }),
     revealLocalSkill: secured(async (_event, skillName) => {
       const name = requiredString(skillName, "name");

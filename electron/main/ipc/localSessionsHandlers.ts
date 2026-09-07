@@ -2233,7 +2233,12 @@ function createSessionHandlers(
     listLocalSkills: async () => listLocalSkills(),
     syncSkills: async () => listLocalSkills(),
     deleteLocalSkill: async (_event, skillRef) => deleteLocalSkill(skillRef),
-    saveLocalSkill: async (_event, skillInput, filesInput) => saveLocalSkill(skillInput, filesInput),
+    saveLocalSkill: async (_event, name, description, skillMd, overwrite) => {
+      if (typeof name !== "string" || typeof description !== "string" || typeof skillMd !== "string") {
+        return { ok: false, error: "Invalid skill payload" };
+      }
+      return saveLocalSkill(name, description, skillMd, overwrite === true);
+    },
     revealLocalSkill: async (_event, skillRef) => revealLocalSkill(skillRef),
     setLocalSkillEnabled: async (_event, skillRef, enabled) => setLocalSkillEnabled(skillRef, enabled),
     // CU window mentions are LocalAgentModeSessions/Cowork residual (manager.noteCuWindowMentions).
