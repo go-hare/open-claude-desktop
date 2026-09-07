@@ -44,9 +44,10 @@ function plantSdk(
   const close = vi.fn();
   const sdk = {
     deferredSends: [],
-    input: { enqueue: vi.fn() },
+    input: { enqueue: vi.fn(), done: vi.fn(), remove: vi.fn(() => false) },
     isRunning: true,
     isStopping: false,
+    queryLoopEnded: false,
     loop: Promise.resolve(),
     pendingPermissions: new Map(),
     query: {
@@ -88,9 +89,10 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       const close = vi.fn();
       return {
         deferredSends: [],
-        input: { enqueue: vi.fn() },
+        input: { enqueue: vi.fn(), done: vi.fn() },
         isRunning: false,
         isStopping: false,
+        queryLoopEnded: false,
         loop: Promise.resolve(),
         pendingPermissions: new Map(),
         query: {
@@ -161,12 +163,19 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt fallback" });
     store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const events: Array<Record<string, unknown>> = [];
     const runner = new ClaudeCliRunner(store, {
-      onEvent: () => undefined,
+      onEvent: (event) => {
+        events.push(event);
+      },
       onSessionUpdated: () => undefined,
     });
     await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: false });
     expect(store.getSession(session.id)?.isRunning).toBe(false);
+    const closeEvent = events.find((event) => event.type === "close");
+    expect(closeEvent?.code).toBe(0);
+    expect((closeEvent?.session as { sessionId?: string } | undefined)?.sessionId).toBe(session.id);
+    expect(events.some((event) => event.type === "stopped")).toBe(false);
   });
 
   it("interrupt() before system/init still races query.interrupt (official !query gate)", async () => {
@@ -224,6 +233,7 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     expect(store.getSession(session.id)?.isRunning).toBe(false);
     expect(store.getSession(session.id)?.pendingToolPermissions ?? []).toHaveLength(1);
     expect(events.some((event) => event.type === "stopped")).toBe(false);
+    expect(events.some((event) => event.type === "close")).toBe(false);
     // Official asar: markNotRunning + session_updated only (no type:"completed" invent).
     expect(events.some((event) => event.type === "completed")).toBe(false);
     expect(sessionUpdated).toBeGreaterThan(0);
@@ -255,6 +265,7 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt drain" });
     store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    store.setCliSessionId(session.id, "cli-interrupt-drain");
     const runner = new ClaudeCliRunner(store, {
       onEvent: () => undefined,
       onSessionUpdated: () => undefined,
@@ -263,19 +274,60 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     const sdk = plantSdk(runner, session.id, {
       sawInit: true,
       isRunning: true,
+      queryLoopEnded: false,
       deferredSends: [
         { text: "queued follow-up", request: {}, messageUuid: "q-follow" },
         { text: "queued later", request: {}, messageUuid: "q-later" },
       ],
-      input: { enqueue } as never,
+      input: { enqueue, done: vi.fn() },
     });
-    // runTurnViaSdkQuery will try ensure/run — plant already has sdk; intercept via spy on enqueue path
-    // After drain, first follow-up is enqueued through runTurnViaSdkQuery → input.enqueue.
     await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: true });
     expect(sdk.query.interrupt).toHaveBeenCalledTimes(1);
     expect(sdk.deferredSends).toEqual([]);
-    // Follow-ups re-entered runTurnViaSdkQuery which sets isRunning true + enqueue.
     expect(enqueue).toHaveBeenCalled();
+    expect(createCodeSdkActiveSession).not.toHaveBeenCalled();
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(true);
+  });
+
+  it("interrupt ACK after in-flight Stop drain is markNotRunning (official double signalTurnComplete)", async () => {
+    // Official: Stop / parent result may signalTurnComplete while interrupt() is
+    // in-flight. First call drains deferred onto the same Query; ACK's second call
+    // with empty deferred is markNotRunning. Follow-up is already enqueued;
+    // handleAssistantMessage re-asserts isRunning. Do not invent interruptInFlight skip.
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "esc result race" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    store.setCliSessionId(session.id, "cli-esc-result-race");
+    const enqueue = vi.fn();
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const sdk = plantSdk(runner, session.id, {
+      sawInit: true,
+      isRunning: true,
+      queryLoopEnded: false,
+      deferredSends: [{ text: "queued follow-up", request: {}, messageUuid: "q-race" }],
+      input: { enqueue, done: vi.fn() },
+    });
+    sdk.query.interrupt = vi.fn(async () => {
+      (
+        runner as unknown as {
+          signalTurnCompleteSdk: (
+            sessionId: string,
+            sdk: CodeSdkActiveSession,
+            session: unknown,
+          ) => void;
+        }
+      ).signalTurnCompleteSdk(session.id, sdk, store.getSession(session.id));
+    });
+
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: true });
+    expect(enqueue).toHaveBeenCalled();
+    expect(createCodeSdkActiveSession).not.toHaveBeenCalled();
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
     expect(
       (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
     ).toBe(true);
@@ -285,8 +337,11 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "interrupt timeout" });
     store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const events: Array<Record<string, unknown>> = [];
     const runner = new ClaudeCliRunner(store, {
-      onEvent: () => undefined,
+      onEvent: (event) => {
+        events.push(event);
+      },
       onSessionUpdated: () => undefined,
     });
     plantSdk(runner, session.id, {
@@ -303,6 +358,10 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
     ).toBe(false);
     expect(store.getSession(session.id)?.isRunning).toBe(false);
+    expect(events.some((event) => event.type === "close" && event.code === 0)).toBe(true);
+    // Official n() close then LSM stopSession → teardownSession stopped (query existed).
+    expect(events.some((event) => event.type === "stopped")).toBe(true);
+    expect(events.some((event) => event.type === "error")).toBe(false);
   }, 10_000);
 
   it("runTurn mid-stream queues deferredSends on SDK session", async () => {
@@ -354,9 +413,10 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       const close = vi.fn();
       const sdk = {
         deferredSends: [],
-        input: { enqueue },
+        input: { enqueue, done: vi.fn() },
         isRunning: false,
         isStopping: false,
+        queryLoopEnded: false,
         loop: Promise.resolve(),
         pendingPermissions: new Map(),
         query: {
@@ -422,7 +482,7 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     expect(sdk.deferredSends[0]?.messageUuid).toBe("uuid-follow");
   });
 
-  it("cancelQueuedMessage removes SDK deferredSends by uuid", () => {
+  it("cancelQueuedMessage removes SDK deferredSends by uuid", async () => {
     const store = makeStore();
     const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "cancel deferred" });
     const runner = new ClaudeCliRunner(store, {
@@ -435,8 +495,35 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
         { text: "queued two", request: {}, messageUuid: "q2" },
       ],
     });
-    expect(runner.cancelQueuedMessage(session.id, "q1")).toBe(true);
+    await expect(runner.cancelQueuedMessage(session.id, "q1")).resolves.toBe(true);
     expect(sdk.deferredSends.map((item) => item.messageUuid)).toEqual(["q2"]);
+    expect(sdk.input.remove).not.toHaveBeenCalled();
+  });
+
+  it("cancelQueuedMessage after drain removes from inputStream (official fJ.remove)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "cancel input" });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const remove = vi.fn((uuid: string) => uuid === "q-drained");
+    plantSdk(runner, session.id, {
+      deferredSends: [],
+      input: { enqueue: vi.fn(), done: vi.fn(), remove },
+    });
+    await expect(runner.cancelQueuedMessage(session.id, "q-drained")).resolves.toBe(true);
+    expect(remove).toHaveBeenCalledWith("q-drained");
+  });
+
+  it("cancelQueuedMessage with no query is false (official)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "cancel no query" });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.cancelQueuedMessage(session.id, "q-any")).resolves.toBe(false);
   });
 
   it("signalTurnCompleteSdk on result drains deferred then keeps query", () => {
@@ -486,9 +573,10 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       capturedOnEvent = opts.callbacks.onEvent;
       return {
         deferredSends: [],
-        input: { enqueue: vi.fn() },
+        input: { enqueue: vi.fn(), done: vi.fn() },
         isRunning: false,
         isStopping: false,
+        queryLoopEnded: false,
         loop: Promise.resolve(),
         pendingPermissions: new Map(),
         query: {
@@ -562,9 +650,10 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       capturedOnEvent = opts.callbacks.onEvent;
       return {
         deferredSends: [],
-        input: { enqueue: vi.fn() },
+        input: { enqueue: vi.fn(), done: vi.fn() },
         isRunning: true,
         isStopping: false,
+        queryLoopEnded: false,
         loop: Promise.resolve(),
         pendingPermissions: new Map(),
         query: {
@@ -632,6 +721,7 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
         input: { enqueue: vi.fn(), done: vi.fn() },
         isRunning: true,
         isStopping: false,
+        queryLoopEnded: false,
         loop: Promise.resolve(),
         pendingPermissions: new Map(),
         query: {
@@ -688,6 +778,7 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
         input: { enqueue: vi.fn(), done: vi.fn() },
         isRunning: true,
         isStopping: false,
+        queryLoopEnded: false,
         loop: Promise.resolve(),
         pendingPermissions: new Map(),
         query: {
@@ -833,7 +924,9 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     ).toBe(false);
     expect(store.getSession(session.id)?.isRunning).toBe(false);
     expect(events.some((event) => event.type === "stopped")).toBe(true);
-    // closeCodeSdkSession should have been invoked via query.close path when present
+    expect(events.some((event) => event.type === "close")).toBe(false);
+    const stopped = events.find((event) => event.type === "stopped");
+    expect((stopped?.session as { sessionId?: string } | undefined)?.sessionId).toBe(session.id);
     expect(sdk).toBeTruthy();
   });
 
@@ -852,6 +945,113 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
       (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
     ).toBe(true);
     expect(store.getSession(session.id)?.isRunning).toBe(true);
+  });
+
+  it("interrupt with deferredSends drains same Query (Esc+queue)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "esc queue" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    store.setCliSessionId(session.id, "cli-esc-queue");
+    const enqueue = vi.fn();
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    plantSdk(runner, session.id, {
+      isRunning: true,
+      sawInit: true,
+      queryLoopEnded: true,
+      deferredSends: [{ text: "queued follow-up", request: {}, messageUuid: "q-follow" }],
+      input: { enqueue, done: vi.fn() },
+    });
+
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: true });
+    expect(enqueue).toHaveBeenCalled();
+    expect(createCodeSdkActiveSession).not.toHaveBeenCalled();
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+    expect(
+      (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
+    ).toBe(true);
+  });
+
+  it("interrupt with deferredSends drains live Query while iterator is still winding down", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "esc queue live" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    store.setCliSessionId(session.id, "cli-esc-queue-live");
+    const enqueue = vi.fn();
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    plantSdk(runner, session.id, {
+      isRunning: true,
+      sawInit: true,
+      queryLoopEnded: false,
+      loop: new Promise(() => undefined),
+      deferredSends: [{ text: "queued follow-up", request: {}, messageUuid: "q-follow-live" }],
+      input: { enqueue, done: vi.fn() },
+    });
+
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: true });
+    expect(enqueue).toHaveBeenCalled();
+    expect(createCodeSdkActiveSession).not.toHaveBeenCalled();
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+  });
+
+  it("reentrant interrupt while in-flight does not stopSession", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "esc reentrant" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const events: Array<Record<string, unknown>> = [];
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => undefined,
+    });
+    let releaseInterrupt!: () => void;
+    const hung = new Promise<void>((resolve) => {
+      releaseInterrupt = resolve;
+    });
+    plantSdk(runner, session.id, {
+      isRunning: true,
+      sawInit: true,
+      query: {
+        interrupt: vi.fn(() => hung),
+        stopTask: vi.fn(async () => undefined),
+        close: vi.fn(),
+        setPermissionMode: vi.fn(async () => undefined),
+        setModel: vi.fn(async () => undefined),
+        applyFlagSettings: vi.fn(async () => true),
+        getContextUsage: vi.fn(async () => null),
+      } as never,
+    });
+    const first = runner.interrupt(session.id);
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: true });
+    expect(events.some((event) => event.type === "stopped")).toBe(false);
+    expect(events.some((event) => event.type === "close")).toBe(false);
+    releaseInterrupt();
+    await expect(first).resolves.toEqual({ continued: true });
+  });
+
+  it("interrupt with no query is official stopSession (no error invent)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "esc no query" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const events: Array<Record<string, unknown>> = [];
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: false });
+    expect(events.some((event) => event.type === "close" && event.code === 0)).toBe(true);
+    expect(events.some((event) => event.type === "stopped")).toBe(false);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    const closeEvent = events.find((event) => event.type === "close");
+    expect((closeEvent?.session as { sessionId?: string } | undefined)?.sessionId).toBe(session.id);
   });
 
   it("pauseSession tears down warm query without FM error", () => {

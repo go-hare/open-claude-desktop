@@ -139,6 +139,21 @@ function applyProductAppName(): void {
 }
 
 /**
+ * Official cca089f68: `.epitaxy-root .epitaxy-bottom-scrim` uses
+ * `inset-inline:0 var(--epitaxy-scrim-inset-end, 0px)` and vI sets
+ * `--epitaxy-scrim-inset-end:16px` — overlay scrollbar width, not a
+ * classic gutter. Windows 10 Chromium paints a 10px classic bar; that
+ * shrinks the Fu sizer (`clientWidth` 1828→1818) and recenters
+ * `.epitaxy-chat-size { margin-inline:auto }` (CDP firstTurn left
+ * 596.23→591.09). Official asar has no OverlayScrollbar switch; the
+ * residual is the CSS overlay contract. Must run before ready.
+ */
+function applyWin32OverlayScrollbars(): void {
+  if (process.platform !== "win32") return;
+  app.commandLine.appendSwitch("enable-features", "OverlayScrollbar");
+}
+
+/**
  * Official loadAll residual (app.asar vst):
  *   Q = new URL(or()) // getMainWindowUrl: 1p claude.ai / 3p app://localhost
  *   sidebar → /task/new | /epitaxy
@@ -320,6 +335,7 @@ export function createDesktopAppRuntime(options: DesktopAppOptions = {}): Deskto
 export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Promise<DesktopAppRuntime> {
   configureOriginalRuntimeModules();
   applyProductAppName();
+  applyWin32OverlayScrollbars();
   applyUserDataOverride();
   registerAppProtocolScheme();
   installProcessSignalHandlers();

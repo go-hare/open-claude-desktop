@@ -217,6 +217,31 @@ export function shouldDeferMidStreamSend(input: {
   return true;
 }
 
+/**
+ * Official CCD ProcessTransport keeps the Query warm after interruptSession.
+ * Query iterator `finally` is teardown (process exit / close / clean complete) —
+ * leftover deferredSends are dropped (stopSession does not drain). Esc+queue
+ * drain is owned by interrupt ACK → signalTurnComplete on the **same** Query.
+ *
+ * Do **not** respawn Query from loop-end (not in official interruptSession).
+ */
+export type QueryLoopEndAction = "noop" | "mark-not-running";
+
+export function resolveQueryLoopEndAction(input: {
+  closedByStopSession: boolean;
+  deferredCount: number;
+  interruptInFlight: boolean;
+  /**
+   * Drain already enqueued a follow-up (`isRunning`).
+   * Late iterator `finally` must not markNotRunning that turn.
+   */
+  followUpAlreadyRunning?: boolean;
+}): QueryLoopEndAction {
+  if (input.closedByStopSession || input.interruptInFlight) return "noop";
+  if (input.followUpAlreadyRunning) return "noop";
+  return "mark-not-running";
+}
+
 /** Official deferredSends splice-by-uuid for cancelQueuedMessage. */
 export function removeDeferredSendByUuid<T extends { messageUuid?: string }>(
   deferred: T[],
@@ -232,8 +257,10 @@ export function removeDeferredSendByUuid<T extends { messageUuid?: string }>(
 
 /**
  * Official residual (app.asar LocalSessionManager + Query + ProcessTransport):
- * - interruptSession no query → emit close code 0 + stopSession (not FM).
+ * - interruptSession no query → emit close code 0 + stopSession (not FM; no query → no stopped).
+ * - interruptSession timeout/fail → emit close then stopSession (LSM stopped if query).
  * - interruptSession success → signalTurnComplete → markNotRunning / drain only.
+ * - LocalSessions.stop → LSM stopSession → teardownSession type:"stopped" if query.
  * - query iterator **clean complete** after result → teardownQuery only (no type:"error").
  * - type:"error" + close code 1 only on handleQueryError / idle timeout / auth teardown.
  * - ProcessTransport getProcessExitError: non-zero → Error; Query.readMessages: after

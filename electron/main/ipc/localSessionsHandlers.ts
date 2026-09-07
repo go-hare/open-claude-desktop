@@ -1515,21 +1515,20 @@ function createSessionHandlers(
     },
     stop: async (_event, id) => {
       const sessionId = asString(id);
-      if (sessionId) sessionRunner.stop(sessionId);
-      const ok = sessionId ? store.stop(sessionId) : false;
-      if (ok && sessionId) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
-      return ok;
+      if (!sessionId) return false;
+      // Official LocalSessions.stop → LSM stopSession → teardownSession:
+      // had query → type:"stopped" + formatSessionForEvent. Do not store.stop
+      // (sets session.stopped + liveBuffer wipe). CCD ProcessTransport close is not this IPC.
+      return sessionRunner.stop(sessionId);
     },
     interrupt: async (_event, id) => {
       const sessionId = asString(id);
       if (!sessionId) return false;
-      // Official Wr mutationFn: transport.stop prefers LocalSessions.interrupt
-      // (interruptSession), not stopSession. Success keeps the process + queue.
+      // Official Wr mutationFn: transport.stop = interruptSession only.
+      // Success: drain same Query (continued). Fail/no-query: emit close then stopSession
+      // (LSM teardown emits stopped only when query existed). Do not store.stop.
       const result = await sessionRunner.interrupt(sessionId);
-      if (result.continued) return true;
-      const ok = store.stop(sessionId);
-      if (ok) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
-      return ok;
+      return result.continued;
     },
     // Official densable Host Tasks Stop: control_request stop_task only — never session stop.
     // UI echoPending is web Xr residual; durable bookend is CLI dual-emit on stdout.
@@ -3146,10 +3145,9 @@ function createSessionHandlers(
     },
     stopSideChat: async (_event, id) => {
       const sessionId = asString(id) ?? asString(asObject(id).sessionId);
-      if (sessionId) sessionRunner.stop(sessionId);
-      const stopped = sessionId ? store.stop(sessionId) : false;
-      if (sessionId && stopped) dispatchSessionEvent("stopped", sessionId, store.getSession(sessionId));
-      return stopped;
+      if (!sessionId) return false;
+      // Official stopSession — same LSM teardown residual as LocalSessions.stop (stopped if query).
+      return sessionRunner.stop(sessionId);
     },
     /**
      * Official stopSessionSummary(sessionId) → boolean (true only if a forked

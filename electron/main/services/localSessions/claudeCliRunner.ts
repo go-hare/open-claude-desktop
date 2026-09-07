@@ -21,8 +21,10 @@ import { getLocalSessionEnvironmentSync } from "./localSessionEnvironmentStore";
 import type { LocalSession, LocalSessionStore, LocalToolPermissionRequest } from "./localSessionStore";
 import { resolveSshRemoteCwd, spawnClaudeOverSsh } from "./sshCliSpawn";
 import { getClaudePreviewCliMcpConfigCache, setClaudePreviewSessionCwd } from "../launch/claudePreviewHostRegistry";
-import { asMcpServerMap, toCliMcpConfigWire } from "./mcpConfigWire";
+import { toCliMcpConfigWire } from "./mcpConfigWire";
+import { mergeCodeQueryMcpServers } from "./codeDesktopMcpResidual";
 import {
+  resolveQueryLoopEndAction,
   resolveTurnPermissionMode,
   shouldReassertRunningFromAssistantMessage,
   shouldSignalTurnCompleteFromCliMessage,
@@ -485,14 +487,12 @@ function buildClaudeArgs(
     session.sshConfig
       ? null
       : getClaudePreviewCliMcpConfigCache();
-  const baseMcp =
-    request.mcpServers
-    ?? sessionRaw.mcpServers
-    ?? undefined;
-  const mergedMcpServers = {
-    ...asMcpServerMap(baseMcp),
-    ...asMcpServerMap(previewCliMcp),
-  };
+  const mergedMcpServers = mergeCodeQueryMcpServers({
+    sessionMcp: sessionRaw.mcpServers,
+    requestMcp: request.mcpServers,
+    previewMcp: previewCliMcp,
+    remoteMcp: request.remoteMcpServers ?? sessionRaw.remoteMcpServers,
+  });
   pushCliMcpConfig(args, mergedMcpServers);
   pushCliMcpConfig(args, request.remoteMcpServers ?? sessionRaw.remoteMcpServers);
   pushListOption(args, "--allowedTools", request.enabledMcpTools ?? request.allowedTools ?? sessionRaw.enabledMcpTools);
@@ -873,6 +873,11 @@ export class ClaudeCliRunner {
     string,
     { messageUuid?: string; request: Record<string, unknown>; text: string }
   >();
+  /**
+   * Esc interrupt in flight — Query iterator end is owned by interrupt(), not
+   * onQueryLoopEnded (would markNotRunning / double-replace under the race).
+   */
+  private readonly interruptInFlight = new Set<string>();
 
   constructor(private readonly store: LocalSessionStore, private readonly callbacks: RunnerCallbacks) {}
 
@@ -1099,29 +1104,41 @@ export class ClaudeCliRunner {
    * Official LocalSessionManager.cancelQueuedMessage residual (app.asar):
    *   no active query → false
    *   deferredSends splice by uuid → true
-   *   inputStream.remove(uuid) → true
+   *   else inputStream.remove(uuid) → true
    *   else query.cancelAsyncMessage(uuid)
    *   on success: splice messageBuffer by uuid
    *
-   * SDK deferredSends first; then live-tail optimistic rows.
+   * After Esc drain, the follow-up is already on inputStream — web Remove / Stop
+   * after the bubble popped must hit remove(), not only deferredSends.
    */
-  cancelQueuedMessage(sessionId: string, messageUuid: string): boolean {
+  async cancelQueuedMessage(sessionId: string, messageUuid: string): Promise<boolean> {
     const uuid = typeof messageUuid === "string" ? messageUuid.trim() : "";
     if (!sessionId || !uuid) return false;
     const sdk = this.sdkSessions.get(sessionId);
-    if (sdk) {
-      // Official: deferredSends splice by uuid first.
-      const idx = sdk.deferredSends.findIndex((item) => item.messageUuid === uuid);
-      if (idx >= 0) {
-        sdk.deferredSends.splice(idx, 1);
-        const liveRemoved = this.store.removeLiveEventByUuid(sessionId, uuid);
-        if (liveRemoved) this.callbacks.onSessionUpdated(sessionId);
-        return true;
+    if (!sdk?.query) return false;
+    let cancelled = false;
+    const idx = sdk.deferredSends.findIndex((item) => item.messageUuid === uuid);
+    if (idx >= 0) {
+      sdk.deferredSends.splice(idx, 1);
+      cancelled = true;
+    } else if (typeof sdk.input.remove === "function" && sdk.input.remove(uuid)) {
+      cancelled = true;
+    } else {
+      const query = sdk.query as {
+        cancelAsyncMessage?: (id: string) => Promise<boolean | undefined> | boolean;
+      };
+      if (typeof query.cancelAsyncMessage === "function") {
+        try {
+          cancelled = (await query.cancelAsyncMessage(uuid)) === true;
+        } catch {
+          return false;
+        }
       }
     }
-    const removed = this.store.removeLiveEventByUuid(sessionId, uuid);
-    if (removed) this.callbacks.onSessionUpdated(sessionId);
-    return removed;
+    if (!cancelled) return false;
+    const liveRemoved = this.store.removeLiveEventByUuid(sessionId, uuid);
+    if (liveRemoved) this.callbacks.onSessionUpdated(sessionId);
+    return true;
   }
 
   /**
@@ -1131,14 +1148,19 @@ export class ClaudeCliRunner {
    *   success → signalTurnComplete (drainDeferredSends if any else markNotRunning+idle)
    */
   async interrupt(sessionId: string): Promise<{ continued: boolean }> {
+    // Official Wr mutationFn is one in-flight interrupt — do not stopSession on reentry.
+    if (this.interruptInFlight.has(sessionId)) {
+      return { continued: true };
+    }
     const sdk = this.sdkSessions.get(sessionId);
-    // Official interruptSession: `if(!(t!=null&&t.query))` → stopSession.
-    // Query exists as soon as bD()/sdkQuery() returns — do NOT extra-stop on !sawInit.
+    // Official interruptSession: `if(!(t!=null&&t.query))` → emit close code 0 + stopSession.
     if (!sdk?.query) {
+      this.emitClose(sessionId, 0);
       this.stop(sessionId);
       return { continued: false };
     }
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    this.interruptInFlight.add(sessionId);
     try {
       // Official: Promise.race([query.interrupt().then(()=>!1), setTimeout(kkA→true)])
       const timedOut = await Promise.race([
@@ -1149,25 +1171,26 @@ export class ClaudeCliRunner {
         }),
       ]);
       if (timedOut) {
+        // Official n(): emit close code 0 + session, then stopSession.
+        // LSM stopSession → teardownSession emits type:"stopped" when query existed.
+        this.emitClose(sessionId, 0);
         this.stop(sessionId);
         return { continued: false };
       }
-      // Official interruptSession success: signalTurnComplete only.
-      // clearPendingPermissions is teardownQuery residual (stopSession), not interrupt.
-      // KwA in asar is health="healthy", not permission teardown.
+      // Official success: signalTurnComplete on the same Query (drain or markNotRunning).
+      const live = this.sdkSessions.get(sessionId) ?? sdk;
       this.signalTurnCompleteSdk(
         sessionId,
-        sdk,
-        this.store.getSession(sessionId),
+        live,
+        this.store.getSession(sessionId) ?? undefined,
       );
-      // Official: interrupt success keeps warm Query (drain or markNotRunning).
-      // continued=true → IPC must not store.stop / emit stopped. isRunning may be
-      // true (deferred drained) or false (idle); process stays for next enqueue.
       return { continued: true };
     } catch {
+      this.emitClose(sessionId, 0);
       this.stop(sessionId);
       return { continued: false };
     } finally {
+      this.interruptInFlight.delete(sessionId);
       if (timeoutId) clearTimeout(timeoutId);
     }
   }
@@ -1191,6 +1214,23 @@ export class ClaudeCliRunner {
    * Official web H = Qke(pendingTurn && !endTurnSeen). Drain keeps isRunning true so
    * follow-up continues; web queuedMessages alone must not invent H / isRunning.
    */
+  private handleSdkQueryLoopEnded(sessionId: string, ended?: CodeSdkActiveSession): void {
+    const sdk = this.sdkSessions.get(sessionId);
+    if (!sdk) return;
+    if (ended && sdk !== ended) return;
+    const action = resolveQueryLoopEndAction({
+      closedByStopSession: sdk.isStopping,
+      deferredCount: sdk.deferredSends.length,
+      interruptInFlight: this.interruptInFlight.has(sessionId),
+      followUpAlreadyRunning: sdk.isRunning,
+    });
+    if (action === "noop") return;
+    // Official query iterator complete → teardownQuery / markNotRunning.
+    // stopSession does not drain deferredSends.
+    sdk.deferredSends = [];
+    this.signalTurnCompleteSdk(sessionId, sdk, this.store.getSession(sessionId) ?? undefined);
+  }
+
   private signalTurnCompleteSdk(
     sessionId: string,
     sdk: CodeSdkActiveSession,
@@ -1242,10 +1282,14 @@ export class ClaudeCliRunner {
   }
 
   stop(sessionId: string): boolean {
-    // Official stopSession → teardownQuery:
-    //   clearPendingPermissions(sessionId); query.close()
-    // closeCodeSdkSession clears SDK waiters; host store cards clear here.
+    // Official LocalSessionManager.stopSession (asar 11182157) → teardownSession:
+    //   if (query) { inputStream.done(); teardownQuery; emit {type:"stopped", sessionId, session: formatSessionForEvent} }
+    //   else no stopped (startResumeInFlight only sets isStopping)
+    // CCD ProcessTransport.stopSession emits {type:"close",sessionId,code:0} — that is NOT
+    // LocalSessions.stop. IPC LocalSessions.stop = LSM stopSession.
+    // Web Ive: close and stopped are list metadata only — neither clears pendingTurn.
     const sdk = this.sdkSessions.get(sessionId);
+    const hadQuery = Boolean(sdk?.query);
     if (sdk) {
       closeCodeSdkSession(sdk);
       this.sdkSessions.delete(sessionId);
@@ -1253,9 +1297,8 @@ export class ClaudeCliRunner {
     }
     this.startMutexTail.delete(sessionId);
     this.store.clearPendingToolPermissions(sessionId);
-    // Always clear host running so composer stopOnce settles.
     this.store.setRunning(sessionId, false, { kind: "claude-cli", finishedAt: nowIso() });
-    this.callbacks.onEvent({ type: "stopped", sessionId });
+    if (hadQuery) this.emitStopped(sessionId);
     this.callbacks.onSessionUpdated(sessionId);
     return true;
   }
@@ -1866,12 +1909,14 @@ export class ClaudeCliRunner {
             if (!active) return;
             this.signalTurnCompleteSdk(id, active, session);
           },
+          onQueryLoopEnded: (id, ended) => this.handleSdkQueryLoopEnded(id, ended),
         },
         request,
         session,
         sessionId,
         warmOnly: true,
       });
+      if (!sdk) return null;
       this.sdkSessions.set(sessionId, sdk);
       if (session.sshConfig) {
         this.callbacks.onEvent({
@@ -2049,7 +2094,8 @@ export class ClaudeCliRunner {
 
   /**
    * Official handleQueryError teardownQuery + close residual.
-   * Crash path emits close (not stopped). Interrupt/stopSession still emits stopped.
+   * Crash path emits close code 1. interruptSession no-query / timeout emit close code 0
+   * then LSM stopSession (stopped if query). LocalSessions.stop is stopped, not close.
    */
   private teardownSdkQueryAfterError(sessionId: string, errText: string): void {
     const sdk = this.sdkSessions.get(sessionId);
@@ -2066,8 +2112,60 @@ export class ClaudeCliRunner {
       lastError: errText || undefined,
       lastExitCode: parseClaudeProcessExitCode(errText),
     });
-    this.callbacks.onEvent({ type: "close", sessionId, code: 1 });
+    this.emitClose(sessionId, 1);
     this.callbacks.onSessionUpdated(sessionId);
+  }
+
+  /**
+   * Official LocalSessionManager.formatSessionForEvent residual (asar 11208751).
+   * Ive list metadata only — no messages/transcript.
+   */
+  private formatSessionForEvent(sessionId: string): Record<string, unknown> | undefined {
+    const session = this.store.getSession(sessionId);
+    if (!session) return undefined;
+    const id = session.sessionId ?? session.id;
+    return {
+      sessionId: id,
+      cwd: session.cwd,
+      originCwd: session.originCwd,
+      isRunning: session.isRunning === true,
+      worktreePath: session.worktreePath,
+      worktreeName: session.worktreeName,
+      sourceBranch: session.sourceBranch,
+      createdAt: session.createdAt,
+      lastActivityAt: session.lastActivityAt ?? session.updatedAt,
+      model: session.model,
+      effort: session.effort,
+      isArchived: session.archived === true,
+      title: session.title,
+      pendingToolPermissions: session.pendingToolPermissions,
+      permissionMode: session.permissionMode,
+      sshConfig: session.sshConfig,
+      prs: session.prs,
+      autoFixEnabled: session.autoFixEnabled,
+      scheduledTaskId: session.scheduledTaskId,
+    };
+  }
+
+  /** Official interruptSession no-query / timeout n() / handleQueryError: type:"close". */
+  private emitClose(sessionId: string, code: number): void {
+    const session = this.formatSessionForEvent(sessionId);
+    this.callbacks.onEvent({
+      type: "close",
+      sessionId,
+      code,
+      ...(session ? { session } : {}),
+    });
+  }
+
+  /** Official LSM teardownSession (non-pause, had query): type:"stopped". */
+  private emitStopped(sessionId: string): void {
+    const session = this.formatSessionForEvent(sessionId);
+    this.callbacks.onEvent({
+      type: "stopped",
+      sessionId,
+      ...(session ? { session } : {}),
+    });
   }
 
   private emitError(sessionId: string, message: string): void {

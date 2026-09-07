@@ -142,7 +142,10 @@ export function getLocalSessionRunner(context: IpcHandlerContext): ClaudeCliRunn
           scheduledTaskId: session?.scheduledTaskId,
         });
       }
-      if (stringField(event, "type") === "stopped" && sessionId) {
+      if (
+        (stringField(event, "type") === "stopped" || stringField(event, "type") === "close")
+        && sessionId
+      ) {
         notifications.closeIdleNotificationForSession(sessionId);
       }
       // Official AskUserQuestion path also requestUserAttention + OS notification.

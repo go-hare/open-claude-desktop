@@ -9,6 +9,7 @@ import {
   shouldDeferMidStreamSend,
   shouldEmitProcessExitError,
   shouldEndStdinAfterResult,
+  resolveQueryLoopEndAction,
   shouldReassertRunningFromAssistantMessage,
   shouldSignalTurnCompleteFromCliMessage,
 } from "./claudeCliTurnLifecycle";
@@ -93,6 +94,59 @@ describe("shouldReassertRunningFromAssistantMessage", () => {
   it("ignores non-assistant rows", () => {
     expect(shouldReassertRunningFromAssistantMessage({ type: "result" }, false)).toBe(false);
     expect(shouldReassertRunningFromAssistantMessage({ type: "user" }, false)).toBe(false);
+  });
+});
+
+describe("resolveQueryLoopEndAction", () => {
+  it("interrupt ACK owns drain — loop-end is a no-op while interruptInFlight", () => {
+    expect(
+      resolveQueryLoopEndAction({
+        closedByStopSession: false,
+        deferredCount: 2,
+        interruptInFlight: true,
+      }),
+    ).toBe("noop");
+  });
+
+  it("stopSession teardown is a no-op (query already closed)", () => {
+    expect(
+      resolveQueryLoopEndAction({
+        closedByStopSession: true,
+        deferredCount: 1,
+        interruptInFlight: false,
+      }),
+    ).toBe("noop");
+  });
+
+  it("iterator death with leftover deferredSends drops them (official teardown, no replace)", () => {
+    expect(
+      resolveQueryLoopEndAction({
+        closedByStopSession: false,
+        deferredCount: 1,
+        interruptInFlight: false,
+      }),
+    ).toBe("mark-not-running");
+  });
+
+  it("clean iterator end with empty deferred marks idle", () => {
+    expect(
+      resolveQueryLoopEndAction({
+        closedByStopSession: false,
+        deferredCount: 0,
+        interruptInFlight: false,
+      }),
+    ).toBe("mark-not-running");
+  });
+
+  it("late iterator after drain does not idle the follow-up", () => {
+    expect(
+      resolveQueryLoopEndAction({
+        closedByStopSession: false,
+        deferredCount: 0,
+        interruptInFlight: false,
+        followUpAlreadyRunning: true,
+      }),
+    ).toBe("noop");
   });
 });
 
