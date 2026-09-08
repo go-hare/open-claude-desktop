@@ -316,7 +316,11 @@ export function buildHostManagedCliFlags(
     DISABLE_AUTOUPDATER: "1",
     DISABLE_GROWTHBOOK: "1",
     DISABLE_FEEDBACK_COMMAND: "1",
-    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
+    // Official YGi 3p also sets CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS — CLI treats
+    // that as a ToolSearch kill. Packaged CLI: non-1p ANTHROPIC_BASE_URL disables
+    // SearchExtraTools unless ENABLE_TOOL_SEARCH=true (tool_reference / 350-tool cap).
+    // Product 3p + managed MCP (teambition) exceeds the gateway cap without ToolSearch.
+    ENABLE_TOOL_SEARCH: "true",
     DISABLE_TELEMETRY: config.disableNonessentialTelemetry ? "1" : "",
     DISABLE_ERROR_REPORTING: config.disableEssentialTelemetry ? "1" : "",
   };
@@ -811,6 +815,9 @@ export function buildClaudeCliSpawnEnv(options: {
       if (env[key] === "") delete env[key];
     }
     env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1";
+    // Host-managed ToolSearch opt-in must survive ~/.claude env overlay.
+    env.ENABLE_TOOL_SEARCH = "true";
+    delete env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS;
     return env;
   }
 
@@ -904,6 +911,11 @@ export function buildClaudeCliSpawnEnv(options: {
   // (Code sdk-query / Cowork host-loop). Safe when CHILD_SESSION was already stripped;
   // required if any residual path re-introduces the marker mid-process.
   env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1";
+
+  // Packaged CLI: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS is a ToolSearch kill
+  // (getSearchExtraToolsMode → standard). Host-managed ENABLE_TOOL_SEARCH=true
+  // must not be overridden by process / ~/.claude inheritance.
+  delete env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS;
 
   return env;
 }

@@ -56,7 +56,9 @@ describe("custom3pCliEnv residual", () => {
       CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1",
       DISABLE_AUTOUPDATER: "1",
       DISABLE_GROWTHBOOK: "1",
+      ENABLE_TOOL_SEARCH: "true",
     });
+    expect(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBeUndefined();
   });
 
   it("maps gateway x-api-key into ANTHROPIC_API_KEY", () => {
@@ -472,6 +474,41 @@ describe("custom3pCliEnv residual", () => {
     expect(spawnEnv.CLAUDE_CODE_SKIP_PROMPT_HISTORY).toBeUndefined();
     expect(spawnEnv.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE).toBe("1");
     expect(spawnEnv.CLAUDE_CODE_ENTRYPOINT).toBe("claude-desktop-3p");
+  });
+
+  it("strips inherited CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS so ENABLE_TOOL_SEARCH holds", () => {
+    const spawnEnv = buildClaudeCliSpawnEnv({
+      processEnv: {
+        PATH: "/usr/bin",
+        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
+      },
+      appliedEnterpriseConfig: {
+        inferenceProvider: "gateway",
+        inferenceGatewayBaseUrl: "https://gw.example",
+        inferenceGatewayApiKey: "sk-x",
+      },
+    });
+    expect(spawnEnv.ENABLE_TOOL_SEARCH).toBe("true");
+    expect(spawnEnv.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBeUndefined();
+  });
+
+  it("dotClaude: host ENABLE_TOOL_SEARCH wins over ~/.claude ToolSearch kill", () => {
+    const spawnEnv = buildClaudeCliSpawnEnv({
+      processEnv: {
+        PATH: "/usr/bin",
+        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
+      },
+      persistedDeploymentMode: "dotClaude",
+      dotClaudeSettingsEnv: {
+        ANTHROPIC_BASE_URL: "https://user-cli-config.example",
+        ANTHROPIC_AUTH_TOKEN: "sk-user-cli",
+        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
+        ENABLE_TOOL_SEARCH: "false",
+      },
+    });
+    expect(spawnEnv.ENABLE_TOOL_SEARCH).toBe("true");
+    expect(spawnEnv.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBeUndefined();
+    expect(spawnEnv.ANTHROPIC_BASE_URL).toBe("https://user-cli-config.example");
   });
 
   it("lets injected appliedEnterpriseConfig override disk", () => {

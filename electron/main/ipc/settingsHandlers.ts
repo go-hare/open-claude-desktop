@@ -21,6 +21,7 @@ import {
   normalizePersistedDeploymentMode,
   resolveDeploymentModeFromUserData,
 } from "../services/custom3p/deploymentMode";
+import { invalidateCoworkEnterpriseConfigCache } from "../services/coworkHostLoop/coworkEnterpriseConfig";
 import { clearCoworkOauthTokenCache } from "../services/coworkAccount/coworkOauthTokenCache";
 import { revokeEnterpriseInteractiveAuth } from "../services/custom3p/enterpriseInteractiveAuth";
 import {
@@ -1115,6 +1116,7 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         if (isDotClaudeDeploymentMode(context)) {
           if (!isDotClaudeSetupConfigId(id)) return { ok: false, error: "config not found" };
           const result = writeDotClaudeAsConfigLibrary(custom3pConfigInput(config));
+          invalidateCoworkEnterpriseConfigCache();
           publishCustom3pBootstrapState(context);
           return result;
         }
@@ -1123,6 +1125,7 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
           id,
           custom3pConfigInput(config),
         );
+        invalidateCoworkEnterpriseConfigCache();
         publishCustom3pBootstrapState(context);
         // Product: bag proxy fields must reach Chromium sessions without waiting for relaunch
         // so MermaidIframe (claudeusercontent) can load after Network Proxy edit.
@@ -1141,6 +1144,7 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
           configNameFromInput(input),
           custom3pConfigInput(input),
         );
+        invalidateCoworkEnterpriseConfigCache();
         publishCustom3pBootstrapState(context);
         return entry;
       },
@@ -1175,7 +1179,9 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
         const userDataPath = ensureCustom3pConfigLibrary(context);
         if (typeof id === "string") {
           try {
-            return deleteCustom3pConfigLibraryEntry(userDataPath, id);
+            const result = deleteCustom3pConfigLibraryEntry(userDataPath, id);
+            invalidateCoworkEnterpriseConfigCache();
+            return result;
           } catch (error) {
             // Official Qgr: cannot delete the last configuration.
             if (
@@ -1211,6 +1217,7 @@ export function registerSettingsHandlers(context: IpcHandlerContext): void {
           typeof id === "string"
             ? setAppliedCustom3pConfigLibraryId(userDataPath, id)
             : false;
+        if (ok) invalidateCoworkEnterpriseConfigCache();
         // Product residual: Setup commitApply only calls setAppliedConfig + relaunchApp
         // (c71860c77). Login eMA needs persisted deploymentMode "3p" for synthetic
         // account — without it relaunch stays on /login dual chooser. Apply with an

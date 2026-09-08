@@ -10,7 +10,9 @@ import {
   isCoworkEnterpriseRequireFullVmSandbox,
   isEnterpriseAutoUpdatesDisabled,
   isEnterpriseNonessentialServicesDisabled,
+  invalidateCoworkEnterpriseConfigCache,
   loadCoworkEnterpriseConfig,
+  setCoworkEnterpriseUserDataPath,
   needsEnterpriseBedrockSsoAuth,
   needsEnterpriseVertexAuth,
   parseCoworkEnterpriseBoolean,
@@ -171,6 +173,72 @@ describe("loadCoworkEnterpriseConfig residual", () => {
       expect(snap.config.requireCoworkFullVmSandbox).toBe(true);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("invalidateCoworkEnterpriseConfigCache drops vi() snapshot after bag writes", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cowork-ent-inv-"));
+    try {
+      const appliedId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+      fs.mkdirSync(path.join(root, "configLibrary"), { recursive: true });
+      fs.writeFileSync(
+        resolveCoworkConfigLibraryMetaPath(root),
+        JSON.stringify({ appliedId }),
+      );
+      fs.writeFileSync(
+        path.join(root, "configLibrary", `${appliedId}.json`),
+        JSON.stringify({ requireCoworkFullVmSandbox: true }),
+      );
+      setCoworkEnterpriseUserDataPath(root);
+      const snap = loadCoworkEnterpriseConfig();
+      expect(snap.config.requireCoworkFullVmSandbox).toBe(true);
+
+      fs.writeFileSync(
+        path.join(root, "configLibrary", `${appliedId}.json`),
+        JSON.stringify({
+          requireCoworkFullVmSandbox: false,
+          managedMcpServers: [{ name: "teambition", url: "https://open.teambition.com/api/mcp" }],
+        }),
+      );
+      expect(loadCoworkEnterpriseConfig().config.requireCoworkFullVmSandbox).toBe(true);
+      invalidateCoworkEnterpriseConfigCache();
+      const fresh = loadCoworkEnterpriseConfig();
+      expect(fresh.config.requireCoworkFullVmSandbox).toBe(false);
+      expect(fresh.raw.managedMcpServers).toEqual([
+        { name: "teambition", url: "https://open.teambition.com/api/mcp" },
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("dotClaude overlays claudexDesktopSetup.managedMcpServers onto local bag", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "dotclaude-mcp-"));
+    try {
+      fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+      fs.writeFileSync(
+        path.join(home, ".claude", "settings.json"),
+        JSON.stringify({
+          claudexDesktopSetup: {
+            managedMcpServers: [
+              { name: "teambition", url: "https://open.teambition.com/api/mcp" },
+            ],
+          },
+        }),
+      );
+      const snap = loadCoworkEnterpriseConfig({
+        getManagedConfig: () => undefined,
+        getLocalConfig: () => ({ inferenceProvider: "gateway" }),
+        isDotClaudeDeployment: true,
+        getHomeDir: () => home,
+        platform: "linux",
+      });
+      expect(snap.source.type).toBe("local");
+      expect(snap.raw.managedMcpServers).toEqual([
+        { name: "teambition", url: "https://open.teambition.com/api/mcp" },
+      ]);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 

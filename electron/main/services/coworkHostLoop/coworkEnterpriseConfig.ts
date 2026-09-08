@@ -181,6 +181,14 @@ export type CoworkEnterpriseConfigDeps = {
   /** app.getName() residual for win32 Policies key. */
   getAppName?: () => string;
   log?: (message: string, ...args: unknown[]) => void;
+  /**
+   * Product dotClaude: overlay `~/.claude/settings.json#claudexDesktopSetup`
+   * onto local enterprise bag (Setup-only QB keys, including managedMcpServers).
+   * Tests inject this; live path reads userData preferences.deploymentMode.
+   */
+  isDotClaudeDeployment?: boolean;
+  /** Home dir for ~/.claude overlay. Defaults to os.homedir(). */
+  getHomeDir?: () => string;
 };
 
 let remoteTier: Record<string, unknown> | undefined;
@@ -214,6 +222,78 @@ export function resetCoworkEnterpriseConfigForTests(): void {
   remoteTier = undefined;
   cached = undefined;
   defaultUserDataPath = undefined;
+}
+
+/** Invalidate vi()/Ti() snapshot after Setup / MDM / configLibrary writes. */
+export function invalidateCoworkEnterpriseConfigCache(): void {
+  cached = undefined;
+}
+
+/**
+ * Product `claudexDesktopSetup` on ~/.claude/settings.json (dotClaude Setup bag).
+ * Same QB keys as configLibrary applied JSON — never invents missing keys.
+ */
+export function readDotClaudeDesktopSetupEnterpriseBag(
+  deps: CoworkEnterpriseConfigDeps = {},
+  keys: readonly string[] = COWORK_ENTERPRISE_QB_KEYS,
+): Record<string, unknown> {
+  const home = deps.getHomeDir?.() ?? os.homedir();
+  const settingsPath = path.join(home, ".claude", "settings.json");
+  const existsSync = deps.existsSync ?? fs.existsSync;
+  const readFileSync = deps.readFileSync ?? ((p, enc) => fs.readFileSync(p, enc));
+  if (!existsSync(settingsPath)) return {};
+  try {
+    const root = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+    const desktop = root.claudexDesktopSetup;
+    if (!desktop || typeof desktop !== "object" || Array.isArray(desktop)) return {};
+    const bag = desktop as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (bag[key] !== undefined) out[key] = bag[key];
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function readDeploymentModeFromJsonFile(
+  filePath: string,
+  existsSync: (p: string) => boolean,
+  readFileSync: (p: string, enc: "utf8") => string,
+): string | undefined {
+  try {
+    if (!existsSync(filePath)) return undefined;
+    const raw = JSON.parse(readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    const prefs = raw.preferences;
+    if (prefs && typeof prefs === "object" && !Array.isArray(prefs)) {
+      const mode = (prefs as Record<string, unknown>).deploymentMode;
+      if (typeof mode === "string") return mode;
+    }
+    if (typeof raw.deploymentMode === "string") return raw.deploymentMode;
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+function resolveIsDotClaudeDeployment(
+  deps: CoworkEnterpriseConfigDeps,
+  userDataPath?: string,
+): boolean {
+  if (typeof deps.isDotClaudeDeployment === "boolean") {
+    return deps.isDotClaudeDeployment;
+  }
+  const root = userDataPath ?? resolveEnterpriseUserDataPath(deps);
+  if (!root) return false;
+  const existsSync = deps.existsSync ?? fs.existsSync;
+  const readFileSync = deps.readFileSync ?? ((p, enc) => fs.readFileSync(p, enc));
+  const official = path.join(root, "claude_desktop_config.json");
+  const shell = path.join(root, "desktop-shell-settings.json");
+  return (
+    readDeploymentModeFromJsonFile(official, existsSync, readFileSync) === "dotClaude"
+    || readDeploymentModeFromJsonFile(shell, existsSync, readFileSync) === "dotClaude"
+  );
 }
 
 function resolveEnterpriseUserDataPath(
@@ -646,6 +726,8 @@ export function loadCoworkEnterpriseConfig(
     && !deps.readWindowsPolicyValue
     && !deps.readWindowsPolicyValues
     && !deps.convertPlistToJson
+    && deps.isDotClaudeDeployment === undefined
+    && !deps.getHomeDir
   ) {
     return cached;
   }
@@ -660,9 +742,18 @@ export function loadCoworkEnterpriseConfig(
         };
   const managedBag = readManagedEnterpriseBag(depsWithUserData);
   const hasManaged = Object.keys(managedBag).length > 0;
-  const localBag = hasManaged
+  let localBag = hasManaged
     ? {}
     : readConfigLibraryEnterpriseBag(depsWithUserData);
+  if (
+    !hasManaged
+    && resolveIsDotClaudeDeployment(depsWithUserData, resolvedUserData)
+  ) {
+    const overlay = readDotClaudeDesktopSetupEnterpriseBag(depsWithUserData);
+    if (Object.keys(overlay).length > 0) {
+      localBag = { ...localBag, ...overlay };
+    }
+  }
   const hasLocal = Object.keys(localBag).length > 0;
   const type: CoworkEnterpriseConfigSourceType = hasManaged
     ? "managed"
@@ -703,6 +794,8 @@ export function loadCoworkEnterpriseConfig(
     && !deps.readWindowsPolicyValue
     && !deps.readWindowsPolicyValues
     && !deps.convertPlistToJson
+    && deps.isDotClaudeDeployment === undefined
+    && !deps.getHomeDir
   ) {
     cached = snapshot;
   }
