@@ -140,6 +140,11 @@ export type CoworkQueryFactoryInput = {
    */
   readOnlyPluginPaths?: string[] | null;
   /**
+   * Official yI.getPluginPath() / UXe skillsPluginPath (hA).
+   * Plugin root; dual-exec / host-loop bash join `skills/` → mnt/.claude/skills ro.
+   */
+  skillsPluginPath?: string | null;
+  /**
    * Dual-exec (hostLoopMode=false) guest Claude spawn config.
    * When set, factory uses createVMSpawnFunction (tGi) instead of host child_process.
    */

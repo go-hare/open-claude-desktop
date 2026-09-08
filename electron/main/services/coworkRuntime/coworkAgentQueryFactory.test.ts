@@ -96,6 +96,23 @@ it("passes installed plugins as SDK plugins --plugin-dir residual (host + guest)
   ]);
 });
 
+it("dual-exec mounts skillsPluginPath as guest .claude/skills (official UXe hA)", () => {
+  const options = buildCoworkSdkOptions(
+    input({
+      hostLoopMode: false,
+      vmProcessName: "vm-sk",
+      skillsPluginPath:
+        "/tmp/userData/local-agent-mode-sessions/skills-plugin/org/acct",
+      hostClaudeConfigDir: "/tmp/sess/.claude",
+      hostOutputsDir: "/tmp/sess/outputs",
+      userSelectedFolders: [],
+    }),
+    { executable: "/opt/claude", spawnClaudeCodeProcess: vi.fn() },
+  );
+  expect(options.cwd).toBe("/sessions/vm-sk");
+  expect(options.plugins).toBeUndefined();
+});
+
 it("appends official auto-memory host allow rules in host-loop mode", () => {
   const withMemory = buildCoworkSdkOptions(
     input({

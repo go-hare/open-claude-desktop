@@ -84,6 +84,7 @@ import {
   collectCoworkReadOnlyPluginPaths,
 } from "./coworkReadOnlyPluginPaths";
 import { COWORK_LOCAL_AGENT_MODE_SESSIONS_DIR } from "./coworkAutoMemoryPaths";
+import { getSkillsPluginPath } from "../localSessions/localAgentAssets";
 
 type CoworkSessionRuntimeControllerOptions = {
   emit: (event: CoworkSessionEvent) => void;
@@ -439,7 +440,21 @@ export class CoworkSessionRuntimeController {
     if (needsAsync) {
       return this.createQueryAsync(session, queue, resume, rewindTo);
     }
-    return this.createQuerySync(session, queue, resume, rewindTo, null, null, null, null);
+    // Official UXe: hA = await yI.getPluginPath() even when mkdir/aFi are skipped.
+    return getSkillsPluginPath().then((skillsPluginPath) =>
+      this.createQuerySync(
+        session,
+        queue,
+        resume,
+        rewindTo,
+        null,
+        null,
+        null,
+        null,
+        undefined,
+        skillsPluginPath,
+      ),
+    );
   }
 
   private async createQueryAsync(
@@ -501,6 +516,7 @@ export class CoworkSessionRuntimeController {
       }).catch(() => undefined);
     }
 
+    const skillsPluginPath = await getSkillsPluginPath();
     return this.createQuerySync(
       session,
       queue,
@@ -511,6 +527,7 @@ export class CoworkSessionRuntimeController {
       hostUploadsDir,
       hostClaudeConfigDir,
       installedAppNames,
+      skillsPluginPath,
     );
   }
 
@@ -524,6 +541,7 @@ export class CoworkSessionRuntimeController {
     hostUploadsDir: string | null,
     hostClaudeConfigDir: string | null,
     installedAppNames?: string[] | null,
+    skillsPluginPath: string | null = null,
   ): CoworkRuntimeQuery | Promise<CoworkRuntimeQuery> {
     if (autoMemoryDir === null && this.getAutoMemoryDir) {
       autoMemoryDir = this.getAutoMemoryDir(session) ?? null;
@@ -534,28 +552,21 @@ export class CoworkSessionRuntimeController {
       hostUploadsDir ??= path.join(sessionStorageDir, "uploads");
       hostClaudeConfigDir ??= path.join(sessionStorageDir, ".claude");
     }
-    // Official session.readOnlyPluginPaths (UXe: Ke.readOnlyPluginPaths=Ve).
-    // Fill from installed_plugins.json / remote plugin dirs when session has none yet.
-    // Scans real identity + local-desktop fallback so user downloads work pre-login.
-    // Do not invent roots — collect only existing host install paths.
-    if (
-      !session.readOnlyPluginPaths
-      || session.readOnlyPluginPaths.length === 0
-    ) {
+    // Official UXe: Ve = [skillsPluginPath SA/sA, remote, local, extras…];
+    // Ke.readOnlyPluginPaths = Ve. Always include yI.getPluginPath() when present.
+    {
       const identity = this.getIdentity();
       const userDataPath = resolveCoworkUserDataFromSessionStorage(
         sessionStorageDir,
       );
-      if (userDataPath) {
-        const collected = collectCoworkReadOnlyPluginPaths({
-          accountId: identity?.accountUuid ?? null,
-          orgId: identity?.organizationUuid ?? null,
-          userDataPath,
-        });
-        if (collected.length > 0) {
-          session.readOnlyPluginPaths = collected;
-        }
-      }
+      const collected = collectCoworkReadOnlyPluginPaths({
+        accountId: identity?.accountUuid ?? null,
+        extraPaths: userDataPath ? undefined : session.readOnlyPluginPaths,
+        orgId: identity?.organizationUuid ?? null,
+        skillsPluginPath,
+        userDataPath: userDataPath ?? "",
+      });
+      session.readOnlyPluginPaths = collected;
     }
     const readOnlyPluginPaths =
       session.readOnlyPluginPaths?.filter(
@@ -594,6 +605,7 @@ export class CoworkSessionRuntimeController {
         networkDriveFolders,
         // Official UXe plugin ro mounts when session already collected host paths.
         pluginMounts: pluginMountsFromReadOnlyPaths(readOnlyPluginPaths),
+        skillsPluginPath,
         userSelectedFolders,
         vmProcessName,
       });
@@ -633,6 +645,7 @@ export class CoworkSessionRuntimeController {
       hostLoopMode: session.hostLoopMode,
       networkDriveFolders,
       readOnlyPluginPaths,
+      skillsPluginPath,
       vmProcessName,
       // Official alwaysLoad: mcp-registry + skills + plugins + cowork (dXe).
       // Path context wires LocalMcp XL/DeA staging (createSdkServer).
@@ -678,6 +691,7 @@ export class CoworkSessionRuntimeController {
                       : null;
                     return computeCoworkHostLoopBashMounts({
                       autoMemoryDir: this.getAutoMemoryDir?.(session) ?? null,
+                      claudeSkillsRoot: skillsPluginPath,
                       fileDeleteApprovedMounts:
                         session.fileDeleteApprovedMounts,
                       hostOutputsDir: outputs,

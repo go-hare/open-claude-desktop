@@ -188,6 +188,14 @@ describe("local upload marketplace + install", () => {
     expect(fs.existsSync(result.installPath)).toBe(false);
     expect(listInstalledPluginsFromDisk(paths)).toEqual([]);
   });
+
+  it("uninstall of unknown plugin id returns false", () => {
+    const userData = mkDir();
+    const paths = pathsFor(userData);
+    expect(
+      uninstallPluginFromDisk(paths, "missing-plugin@local-desktop-app-uploads"),
+    ).toBe(false);
+  });
 });
 
 describe("custom directory marketplace residual", () => {

@@ -103,8 +103,9 @@ export type CollectCoworkReadOnlyPluginPathsInput = {
   orgId?: string | null;
   userDataPath: string;
   /**
-   * Official skillsPluginPath (yI.getPluginPath) residual — staged via kK when
-   * the path contains spaces. Optional; never invent a skills root.
+   * Official skillsPluginPath (yI.getPluginPath / CUi.getPluginPath).
+   * Plugin root; Ve includes this first. Staged via kK when the path has spaces.
+   * Optional; never invent a skills root.
    */
   skillsPluginPath?: string | null;
   /** Injectable kK staging deps (tests). */
@@ -249,41 +250,44 @@ export function collectCoworkReadOnlyPluginPaths(
 
   // Collect from real account/org when present + local-desktop fallback residual
   // so user-downloaded plugins installed before login still load in sessions.
-  const accountPairs = pluginCollectAccountPairs({
-    accountId: input.accountId,
-    orgId: input.orgId,
-  });
-  const remoteEnabled =
-    input.remotePluginPathsEnabled
-    ?? isCoworkRemotePluginPathsFeatureEnabled();
+  // Official always has userData; skip account scans when path is missing.
+  if (input.userDataPath) {
+    const accountPairs = pluginCollectAccountPairs({
+      accountId: input.accountId,
+      orgId: input.orgId,
+    });
+    const remoteEnabled =
+      input.remotePluginPathsEnabled
+      ?? isCoworkRemotePluginPathsFeatureEnabled();
 
-  for (const { accountId, orgId } of accountPairs) {
-    const installedFile = coworkInstalledPluginsFile(
-      input.userDataPath,
-      accountId,
-      orgId,
-    );
-    const manifest = readJsonFile(installedFile);
-    for (const p of parseInstalledPluginInstallPaths(manifest)) {
-      push(p);
-    }
-
-    // Official H6e: if !ft("2340532315") → no remote paths.
-    if (remoteEnabled) {
-      // Official eFA residual — load enabledPlugins when caller did not inject.
-      // Product residual still collects on-disk remote installs; does not
-      // invent network marketplace sync (gQ.fetchEnabledState / install).
-      const enabledMap =
-        input.enabledPluginsMap
-        ?? readCoworkEnabledPluginsMap(input.userDataPath, accountId, orgId);
-      void enabledMap;
-      for (const remoteRoot of coworkRemotePluginDirs(
+    for (const { accountId, orgId } of accountPairs) {
+      const installedFile = coworkInstalledPluginsFile(
         input.userDataPath,
         accountId,
         orgId,
-      )) {
-        for (const p of collectRemotePluginInstallDirs(remoteRoot)) {
-          push(p);
+      );
+      const manifest = readJsonFile(installedFile);
+      for (const p of parseInstalledPluginInstallPaths(manifest)) {
+        push(p);
+      }
+
+      // Official H6e: if !ft("2340532315") → no remote paths.
+      if (remoteEnabled) {
+        // Official eFA residual — load enabledPlugins when caller did not inject.
+        // Product residual still collects on-disk remote installs; does not
+        // invent network marketplace sync (gQ.fetchEnabledState / install).
+        const enabledMap =
+          input.enabledPluginsMap
+          ?? readCoworkEnabledPluginsMap(input.userDataPath, accountId, orgId);
+        void enabledMap;
+        for (const remoteRoot of coworkRemotePluginDirs(
+          input.userDataPath,
+          accountId,
+          orgId,
+        )) {
+          for (const p of collectRemotePluginInstallDirs(remoteRoot)) {
+            push(p);
+          }
         }
       }
     }

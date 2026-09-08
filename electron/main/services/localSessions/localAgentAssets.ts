@@ -120,6 +120,23 @@ async function getPluginDir(): Promise<string | null> {
   );
 }
 
+/**
+ * Official CUi.getPluginPath: plugin dir only when `skills/` exists and is non-empty.
+ * Returns the plugin root (not the skills/ subdir) — UXe joins `skills` for mounts.
+ */
+export async function getSkillsPluginPath(): Promise<string | null> {
+  const pluginDir = await getPluginDir();
+  if (!pluginDir) return null;
+  const skillsRoot = path.join(pluginDir, SKILLS_SUBDIR);
+  if (!fsSync.existsSync(skillsRoot)) return null;
+  try {
+    if (fsSync.readdirSync(skillsRoot).length === 0) return null;
+  } catch {
+    return null;
+  }
+  return pluginDir;
+}
+
 function getSkillDir(pluginDir: string, name: string): string {
   const sanitized = sanitizeSkillsPluginName(name);
   const skillsRoot = path.join(pluginDir, SKILLS_SUBDIR);

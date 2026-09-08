@@ -88,4 +88,13 @@ describe("computeCoworkHostLoopBashMounts (j1i)", () => {
     });
     expect(result.mounts[".auto-memory"]).toMatchObject({ mode: "ro" });
   });
+
+  it("mounts claudeSkillsRoot skills/ as ro .claude/skills (official j1i)", () => {
+    const result = computeCoworkHostLoopBashMounts({
+      claudeSkillsRoot: "/tmp/userData/local-agent-mode-sessions/skills-plugin/org/acct",
+      hostOutputsDir: "/tmp/o",
+      vmProcessName: "p4",
+    });
+    expect(result.mounts[".claude/skills"]?.mode).toBe("ro");
+  });
 });

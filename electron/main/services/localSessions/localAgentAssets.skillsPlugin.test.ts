@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   deleteLocalSkill,
+  getSkillsPluginPath,
   listLocalSkills,
   resetSkillsPluginTestHooks,
   sanitizeSkillsPluginName,
@@ -41,6 +42,18 @@ describe("SkillsPlugin CUi residual (official asar CUi)", () => {
 
   it("sanitizeSkillName replaces invalid path chars", () => {
     expect(sanitizeSkillsPluginName('a<>"|?*\\/b')).toBe("a________b");
+  });
+
+  it("getPluginPath is null until skills/ has files, then returns plugin root", async () => {
+    const pluginDir = await withPlugin();
+    expect(await getSkillsPluginPath()).toBeNull();
+    await saveLocalSkill(
+      "weekly-status-report",
+      "Summarize work.",
+      '---\nname: "weekly-status-report"\ndescription: "Summarize work."\n---\n\nDo it.\n',
+      false,
+    );
+    expect(await getSkillsPluginPath()).toBe(pluginDir);
   });
 
   it("saveLocalSkill writes SKILL.md under userData/local-agent-mode-sessions/skills-plugin/{org}/{account}/skills", async () => {

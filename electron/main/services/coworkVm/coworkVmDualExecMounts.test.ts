@@ -64,4 +64,14 @@ describe("computeCoworkDualExecMounts", () => {
     expect(result.mounts.two?.mode).toBe("ro");
     expect(result.mounts["one-2"]?.mode).toBe("ro");
   });
+
+  it("mounts skillsPluginPath skills/ as ro .claude/skills (official UXe)", () => {
+    const result = computeCoworkDualExecMounts({
+      hostOutputsDir: "/tmp/o",
+      skillsPluginPath: "/tmp/userData/local-agent-mode-sessions/skills-plugin/org/acct",
+      userSelectedFolders: [],
+      vmProcessName: "vm-sk",
+    });
+    expect(result.mounts[".claude/skills"]?.mode).toBe("ro");
+  });
 });

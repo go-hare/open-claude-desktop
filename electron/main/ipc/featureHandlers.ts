@@ -100,6 +100,11 @@ import {
   type LocalPluginsPathBag,
 } from "../services/plugins/localPluginsWriter";
 import {
+  listPluginSkillFiles,
+  scanPluginManifest,
+  type HostPluginRecord,
+} from "../services/plugins/localPluginManifestScan";
+import {
   getPluginCliStatus as residualGetPluginCliStatus,
   getPluginOAuthStatus as residualGetPluginOAuthStatus,
   getPluginShimOps as residualGetPluginShimOps,
@@ -609,6 +614,31 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       return id && !fromDisk.some((d) => String(d.id) === id);
     });
     return [...fromDisk, ...fromMemory];
+  };
+
+  /**
+   * Official LocalPlugins.getPlugins → Aye + kSA.
+   * Always include skills/mcpServers/hooks/agents arrays so renderer AX/o7t
+   * can map rows. Memory-only leftovers without an installPath stay out.
+   */
+  const hostGetPlugins = (): HostPluginRecord[] => {
+    const listed = listInstalledPluginsFromDisk(resolvePluginPaths());
+    const out: HostPluginRecord[] = [];
+    for (const plugin of listed) {
+      const scanned = scanPluginManifest({
+        id: plugin.id,
+        name: plugin.name,
+        installPath: plugin.installPath,
+        enabled: plugin.enabled,
+        installedAt: plugin.installedAt,
+        lastUpdated: plugin.lastUpdated,
+        marketplaceName: plugin.marketplaceName,
+        scope: plugin.scope,
+        version: plugin.version,
+      });
+      if (scanned) out.push(scanned);
+    }
+    return out;
   };
 
   /** Residual LocalPlugins OAuth/env/shim deps (kc/PK list). */
@@ -2016,13 +2046,29 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
     },
     LocalPlugins: {
-      getPlugins: async () => installedPlugins(),
+      getPlugins: async (_event, _options?, pluginContext?) => {
+        // Official zme(pluginContext): ccd uses workspace resolver; cowork uses account.
+        // Product residual: same on-disk account tree either mode (no project-scoped
+        // installed_plugins.json until writer grows a workspace resolver).
+        void pluginContext;
+        return hostGetPlugins();
+      },
       deletePlugin: async (_event, pluginId) => {
-        const paths = resolvePluginPaths();
-        const okDisk = uninstallPluginFromDisk(paths, String(pluginId));
-        localPlugins.delete(String(pluginId));
-        persistLocalPlugins();
-        return okDisk;
+        try {
+          const paths = resolvePluginPaths();
+          const okDisk = uninstallPluginFromDisk(paths, String(pluginId));
+          localPlugins.delete(String(pluginId));
+          persistLocalPlugins();
+          if (!okDisk) {
+            return { success: false, error: `Plugin not found: ${pluginId}` };
+          }
+          return { success: true };
+        } catch (error) {
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
       },
       getDownloadedRemotePlugins: async () => installedPlugins().filter((plugin) => plugin.source === "local-upload" || plugin.source === "marketplace"),
       // Official residual oye / getPluginOAuthStatus / getPluginShimOps — not invent stubs.
@@ -2040,7 +2086,14 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         // Fall back to coarse product scan only when residual empty (no manifest clis).
         return residual.length > 0 ? residual : pluginShimOps(installedPlugins());
       },
-      listSkillFiles: async (_event, skillRef) => {
+      listSkillFiles: async (_event, skillRef, skillName?) => {
+        // Official ysr: (pluginId, skillName). Product also accepts a bare skill id
+        // for Customize user skills (CUi listSkillFiles).
+        if (typeof skillRef === "string" && typeof skillName === "string" && skillName) {
+          const plugin = hostGetPlugins().find((row) => row.id === skillRef);
+          if (!plugin) return { success: false, error: `Plugin not found: ${skillRef}` };
+          return { success: true, files: listPluginSkillFiles(plugin, skillName) };
+        }
         if (typeof skillRef === "string" && skillRef.length > 0) {
           return getLocalSkillFiles(skillRef);
         }

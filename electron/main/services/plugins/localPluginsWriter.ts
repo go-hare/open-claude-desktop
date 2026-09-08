@@ -106,14 +106,16 @@ export type InstallPluginResult =
   | { success: false; error: string; userFacing?: boolean };
 
 export type ListedPlugin = {
-  id: string;
-  name: string;
-  version?: string;
-  installPath: string;
-  source: string;
-  marketplaceName?: string;
   enabled?: boolean;
+  id: string;
+  installPath: string;
   installedAt?: string;
+  lastUpdated?: string;
+  marketplaceName?: string;
+  name: string;
+  scope?: "local" | "project" | "user";
+  source: string;
+  version?: string;
 };
 
 const DEFAULT_LOCAL_MARKETPLACE_JSON: MarketplaceJson = {
@@ -551,6 +553,10 @@ export function listInstalledPluginsFromDisk(
         typeof enabledMap[pluginId] === "boolean"
           ? (enabledMap[pluginId] as boolean)
           : true;
+      const scope =
+        entry.scope === "local" || entry.scope === "project"
+          ? entry.scope
+          : "user";
       out.push({
         id: pluginId,
         name,
@@ -559,12 +565,16 @@ export function listInstalledPluginsFromDisk(
         source:
           marketplaceName === LOCAL_DESKTOP_APP_UPLOADS_MARKETPLACE
             ? "local-upload"
-            : marketplaceName
-              ? "marketplace"
-              : "local",
+            : marketplaceName === ORG_PROVISIONED_MARKETPLACE
+              ? "org"
+              : marketplaceName
+                ? "marketplace"
+                : "local",
         marketplaceName,
         enabled,
         installedAt: entry.installedAt,
+        lastUpdated: entry.lastUpdated,
+        scope,
       });
     }
   }
@@ -1044,16 +1054,15 @@ export function uninstallPluginFromDisk(
     at > 0 ? id.slice(at + 1) : LOCAL_DESKTOP_APP_UPLOADS_MARKETPLACE;
 
   const removedPath = removePluginFromInstalled(paths, id);
+  const knownInstall = path.join(paths.marketplacesDir, marketplace, name);
+  const hadDisk = Boolean(removedPath) || fs.existsSync(knownInstall);
+  if (!hadDisk) return false;
   removePluginFromMarketplaceJson(paths, marketplace, name);
   removePluginEnabled(paths, id);
-  // Also try bare name key variants
   removePluginEnabled(paths, `${name}@${marketplace}`);
 
-  const installPath =
-    removedPath
-    ?? path.join(paths.marketplacesDir, marketplace, name);
+  const installPath = removedPath ?? knownInstall;
   if (installPath && fs.existsSync(installPath)) {
-    // Only delete if under marketplacesDir
     const rel = path.relative(paths.marketplacesDir, path.resolve(installPath));
     if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
       fs.rmSync(installPath, { recursive: true, force: true });
