@@ -25,13 +25,6 @@
     }
   },
   "binaries": {
-    "darwin-arm64": {
-      "binary": "claude",
-      "path": "platforms/darwin-arm64/claude",
-      "size": 99855074,
-      "sha256": "d0c45d40df4791b96220349b02aa0556f9af3a1c0b1356f08c154bc242b0558a",
-      "version": "2.7.43 (Claude Code)"
-    },
     "win32-x64": {
       "binary": "claude.exe",
       "path": "platforms/win32-x64/claude.exe",
@@ -40,6 +33,6 @@
       "version": "2.7.43 (Claude Code)"
     }
   },
-  "mode": "platforms:darwin-arm64+win32-x64",
+  "mode": "host-only",
   "hostKey": "win32-x64"
 }
