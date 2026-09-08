@@ -105,6 +105,10 @@ import {
   type HostPluginRecord,
 } from "../services/plugins/localPluginManifestScan";
 import {
+  listCliLocalPlugins,
+  listEnabledCliLocalPlugins,
+} from "../services/plugins/cliLocalPluginsResolver";
+import {
   getPluginCliStatus as residualGetPluginCliStatus,
   getPluginOAuthStatus as residualGetPluginOAuthStatus,
   getPluginShimOps as residualGetPluginShimOps,
@@ -617,12 +621,44 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   };
 
   /**
+   * Official zme(pluginContext): ccd → CLI ~/.claude/plugins (DkA);
+   * cowork / missing → fusion cowork_plugins.
+   */
+  const asPluginListContext = (
+    value: unknown,
+  ): { mode: "ccd"; workspacePath?: string } | { mode: "cowork" } | undefined => {
+    if (!value || typeof value !== "object") return undefined;
+    const rec = value as Record<string, unknown>;
+    if (rec.mode === "ccd") {
+      return {
+        mode: "ccd",
+        workspacePath:
+          typeof rec.workspacePath === "string" && rec.workspacePath
+            ? rec.workspacePath
+            : undefined,
+      };
+    }
+    return { mode: "cowork" };
+  };
+
+  /**
    * Official LocalPlugins.getPlugins → Aye + kSA.
    * Always include skills/mcpServers/hooks/agents arrays so renderer AX/o7t
    * can map rows. Memory-only leftovers without an installPath stay out.
    */
-  const hostGetPlugins = (): HostPluginRecord[] => {
-    const listed = listInstalledPluginsFromDisk(resolvePluginPaths());
+  const hostGetPlugins = (
+    pluginContext?: unknown,
+    enabledOnly = false,
+  ): HostPluginRecord[] => {
+    const ctx = asPluginListContext(pluginContext);
+    const listed =
+      ctx?.mode === "ccd"
+        ? enabledOnly
+          ? listEnabledCliLocalPlugins(ctx.workspacePath)
+          : listCliLocalPlugins(ctx.workspacePath)
+        : listInstalledPluginsFromDisk(resolvePluginPaths()).filter(
+            (plugin) => !enabledOnly || plugin.enabled !== false,
+          );
     const out: HostPluginRecord[] = [];
     for (const plugin of listed) {
       const scanned = scanPluginManifest({
@@ -2047,11 +2083,8 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
     },
     LocalPlugins: {
       getPlugins: async (_event, _options?, pluginContext?) => {
-        // Official zme(pluginContext): ccd uses workspace resolver; cowork uses account.
-        // Product residual: same on-disk account tree either mode (no project-scoped
-        // installed_plugins.json until writer grows a workspace resolver).
-        void pluginContext;
-        return hostGetPlugins();
+        // Official zme(pluginContext): ccd → DkA CLI plugins; cowork → fusion.
+        return hostGetPlugins(pluginContext);
       },
       deletePlugin: async (_event, pluginId) => {
         try {
@@ -2086,12 +2119,15 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         // Fall back to coarse product scan only when residual empty (no manifest clis).
         return residual.length > 0 ? residual : pluginShimOps(installedPlugins());
       },
-      listSkillFiles: async (_event, skillRef, skillName?) => {
-        // Official ysr: (pluginId, skillName). Product also accepts a bare skill id
-        // for Customize user skills (CUi listSkillFiles).
+      listSkillFiles: async (_event, skillRef, skillName?, pluginContext?) => {
+        // Official ysr: (pluginId, skillName, zme(context,{enabledOnly:true})).
+        // Product also accepts a bare skill id for Customize user skills (CUi).
         if (typeof skillRef === "string" && typeof skillName === "string" && skillName) {
-          const plugin = hostGetPlugins().find((row) => row.id === skillRef);
+          const plugin = hostGetPlugins(pluginContext, true).find((row) => row.id === skillRef);
           if (!plugin) return { success: false, error: `Plugin not found: ${skillRef}` };
+          if (!plugin.skills.some((row) => row.name === skillName)) {
+            return { success: false, error: `Skill not found: ${skillName}` };
+          }
           return { success: true, files: listPluginSkillFiles(plugin, skillName) };
         }
         if (typeof skillRef === "string" && skillRef.length > 0) {

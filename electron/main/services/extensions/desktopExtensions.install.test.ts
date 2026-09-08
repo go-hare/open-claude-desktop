@@ -6,7 +6,9 @@ import { zipSync } from "fflate";
 import {
   installDxtArchive,
   listInstalledExtensions,
+  listInstalledExtensionsSync,
 } from "./desktopExtensions";
+import { loadOfficialE6eMcpServers } from "./desktopExtensionMcpResidual";
 
 describe("installDxtArchive mcpb/dxt unpack residual", () => {
   const roots: string[] = [];
@@ -147,5 +149,48 @@ describe("installDxtArchive mcpb/dxt unpack residual", () => {
     expect(fs.existsSync(path.join(installed.path, "main.js"))).toBe(true);
     expect(fs.existsSync(path.join(installed.path, "escape.js"))).toBe(false);
     expect(fs.existsSync(path.join(installed.path, "outside.js"))).toBe(false);
+  });
+
+  it("Tze discovery uses directory name as id so disabled settings skip e6e", async () => {
+    const userData = tempUserData();
+    const installed = await installDxtArchive(userData, (() => {
+      const zipBytes = zipSync({
+        "manifest.json": Buffer.from(
+          JSON.stringify({
+            manifest_version: "0.2",
+            name: "echo",
+            display_name: "Echo",
+            version: "1.0.0",
+            description: "echo",
+            author: { name: "demo" },
+            server: {
+              type: "node",
+              entry_point: "index.js",
+              mcp_config: { command: "node", args: ["${__dirname}/index.js"] },
+            },
+          }),
+          "utf8",
+        ),
+        "index.js": Buffer.from("export default {}", "utf8"),
+      });
+      const mcpbPath = path.join(userData, "echo.dxt");
+      fs.writeFileSync(mcpbPath, zipBytes);
+      return mcpbPath;
+    })());
+    const settingsDir = path.join(userData, "extension-settings");
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(settingsDir, `${installed.id}.json`),
+      JSON.stringify({ isEnabled: false }),
+    );
+    const listed = listInstalledExtensionsSync(userData);
+    expect(listed.map((row) => row.id)).toEqual([installed.id]);
+    expect(listed[0]?.settings.isEnabled).toBe(false);
+    expect(
+      loadOfficialE6eMcpServers({
+        extensionsEnabled: true,
+        userDataPath: userData,
+      }),
+    ).toEqual({});
   });
 });

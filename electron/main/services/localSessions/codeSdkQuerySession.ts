@@ -32,8 +32,11 @@ import { CoworkAsyncInputQueue } from "../coworkSessions/coworkAsyncInputQueue";
 import { getClaudePreviewCliMcpConfigCache, setClaudePreviewSessionCwd } from "../launch/claudePreviewHostRegistry";
 import type { LocalSession, LocalToolPermissionRequest } from "./localSessionStore";
 import { resolveCodeTranscriptPath } from "./codeTranscriptJsonl";
-import { asMcpServerMap } from "./mcpConfigWire";
+import { mergeCodeQueryMcpServers } from "./codeDesktopMcpResidual";
+import { collectCcdSdkPlugins } from "./codeCcdPluginsResidual";
 import { createSshSpawnClaudeCodeProcess, resolveSshRemoteCwd } from "./sshCliSpawn";
+import { rewriteCcdPluginsForSsh } from "./sshHostPipePluginSync";
+import { normalizeSessionSshConfig } from "./sshTranscriptSync";
 import { buildCodeManagedSettingsResidual } from "./codeSdkManagedSettingsResidual";
 import { refreshCodeSdkOAuthTokenResidual } from "./codeSdkOauthResidual";
 import {
@@ -83,6 +86,12 @@ export type CodeSdkSessionCallbacks = {
    */
   onSignalTurnComplete?: (sessionId: string) => void;
   /**
+   * Query iterator ended (process exit / close / clean complete).
+   * Official CCD keeps Query warm after interruptSession; leftover deferred is
+   * drained by interrupt ACK on the same Query, not by respawning here.
+   */
+  onQueryLoopEnded?: (sessionId: string, ended: CodeSdkActiveSession) => void;
+  /**
    * Official handleToolPermission reads live session.sessionPermissionUpdates /
    * alwaysAllowedReasons mid-query (not the create-time snapshot).
    */
@@ -107,6 +116,11 @@ export type CodeSdkActiveSession = {
   input: CoworkAsyncInputQueue<CodeSdkUserMessage>;
   isRunning: boolean;
   isStopping: boolean;
+  /**
+   * True after Query iterator returns (process exit / close / complete).
+   * Official interruptSession does not respawn Query from this flag.
+   */
+  queryLoopEnded: boolean;
   loop: Promise<void>;
   pendingPermissions: Map<string, PendingPermissionWaiter>;
   query: Query;
@@ -372,13 +386,33 @@ async function buildCodeSdkOptions(
     delete options.mcpServers;
   } else {
     const previewCliMcp = session.sshConfig ? null : getClaudePreviewCliMcpConfigCache();
-    const mergedMcp = {
-      ...asMcpServerMap(request.mcpServers ?? sessionRaw.mcpServers),
-      ...asMcpServerMap(previewCliMcp),
-      ...asMcpServerMap(request.remoteMcpServers ?? sessionRaw.remoteMcpServers),
-    };
+    // Official startSession mcpServers: await al() then coordinator merge.
+    // Product: al() desktop bag + Setup managed remotes + session/preview overlay.
+    const mergedMcp = mergeCodeQueryMcpServers({
+      sessionMcp: sessionRaw.mcpServers,
+      requestMcp: request.mcpServers,
+      previewMcp: previewCliMcp,
+      remoteMcp: request.remoteMcpServers ?? sessionRaw.remoteMcpServers,
+      deps: { userDataPath },
+    });
     if (Object.keys(mergedMcp).length > 0) {
       options.mcpServers = mergedMcp as Options["mcpServers"];
+    }
+    // Official setupMcpAndPlugins: CUi getPluginPath + enabled CLI plugins → A.plugins.
+    // SSH: setupSshPluginsAndMcp / _Cr rewrites to remoteHome/.claude/remote/plugins/<hash>.
+    const ccdPlugins = await collectCcdSdkPlugins({ cwd: session.cwd });
+    if (ccdPlugins.length > 0) {
+      const ssh = session.sshConfig ? normalizeSessionSshConfig(session.sshConfig) : null;
+      if (ssh) {
+        const rewritten = await rewriteCcdPluginsForSsh(ccdPlugins, ssh);
+        if (rewritten && rewritten.length > 0) {
+          (options as Options & { plugins?: Array<{ type: "local"; path: string }> }).plugins =
+            rewritten;
+        }
+      } else {
+        (options as Options & { plugins?: Array<{ type: "local"; path: string }> }).plugins =
+          ccdPlugins;
+      }
     }
   }
 
@@ -859,6 +893,7 @@ export async function createCodeSdkActiveSession(input: {
     input: inputQueue,
     isRunning: false,
     isStopping: false,
+    queryLoopEnded: false,
     loop: Promise.resolve(),
     pendingPermissions,
     query: q,
@@ -891,8 +926,10 @@ active.loop = (async () => {
         });
       }
     } finally {
-      active.isRunning = false;
-      callbacks.onSessionUpdated(sessionId);
+      active.queryLoopEnded = true;
+      // Official CCD keeps Query warm after interrupt. Iterator finally is teardown:
+      // runner marks idle (or no-ops if interrupt ACK already drained / stopSession).
+      callbacks.onQueryLoopEnded?.(sessionId, active);
     }
   })();
 
@@ -1308,6 +1345,7 @@ export function clearCodeSdkPendingPermissions(
 
 export function closeCodeSdkSession(active: CodeSdkActiveSession): void {
   active.isStopping = true;
+  active.queryLoopEnded = true;
   active.deferredSends = [];
   clearCodeSdkPendingPermissions(active);
   try {

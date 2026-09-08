@@ -20,10 +20,11 @@
  *   - network_error → ssh_disconnected + query teardown
  *   - initialization_status ssh_spawn / complete / error (host-pipe steps only)
  *
- * Explicitly NOT productized (needs remote harness):
+ * Explicitly NOT productized (needs remote harness RPC):
  *   - RemoteServerController auto-reconnect / ensureReady warm_up loops
  *   - RPC createSpawnFunction / liveProcesses abandon
- *   - full setupSshPluginsAndMcp coordinator
+ * Plugin dir sync (_Cr) is host-pipe mapped in sshHostPipePluginSync
+ * (ssh/scp + tar), not ssh2 SFTP / files.extract_tar RPC.
  *
  * Stdin/stdout remain NDJSON stream-json (same as local spawnClaude).
  * Transcript still lands on the remote host under ~/.claude/projects; getTranscript

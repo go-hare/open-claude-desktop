@@ -235,7 +235,8 @@ async function discoverDirectoryRecords(userDataDir: string): Promise<Record<str
     if (!dirent.isDirectory()) continue;
     const dir = path.join(root, dirent.name);
     const manifest = await readManifestFromDirectory(dir);
-    const id = manifestId(manifest, dirent.name);
+    // Official Tze: id is the directory name (not a synthesized slug).
+    const id = dirent.name;
     const timestamp = nowIso();
     out[id] = { id, path: dir, kind: "directory", manifest, installedAt: timestamp, updatedAt: timestamp };
   }
@@ -250,6 +251,73 @@ export async function listInstalledExtensions(userDataDir: string): Promise<Inst
   for (const record of Object.values(merged)) {
     if (!(await exists(record.path))) continue;
     installed.push(toInstalled(record, await readSettings(userDataDir, record.id)));
+  }
+  return installed.sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+function readJsonSync<T>(filePath: string): T | null {
+  try {
+    return JSON.parse(fsSync.readFileSync(filePath, "utf8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+function readManifestFromDirectorySync(dir: string): ExtensionManifest {
+  for (const name of ["manifest.json", "dxt.json", "package.json"]) {
+    const raw = readJsonSync<Record<string, unknown>>(path.join(dir, name));
+    if (raw) return normalizeManifest(raw, path.basename(dir));
+  }
+  return normalizeManifest(null, path.basename(dir));
+}
+
+function readSettingsSync(userDataDir: string, extensionId: string): ExtensionSettings {
+  const settings = readJsonSync<Partial<ExtensionSettings>>(settingsPath(userDataDir, extensionId));
+  return {
+    isEnabled: typeof settings?.isEnabled === "boolean" ? settings.isEnabled : true,
+    ...(typeof settings?.userConfig === "object" && settings.userConfig !== null
+      ? { userConfig: settings.userConfig as Record<string, unknown> }
+      : {}),
+    ...(typeof settings?.orgBlockedReason === "string"
+      ? { orgBlockedReason: settings.orgBlockedReason }
+      : {}),
+  };
+}
+
+/** Sync residual of listInstalledExtensions for al()/e6e (Query options build). */
+export function listInstalledExtensionsSync(userDataDir: string): InstalledExtension[] {
+  const metadata = readJsonSync<MetadataFile>(metadataPath(userDataDir)) ?? { extensions: {} };
+  const root = userExtensionsDir(userDataDir);
+  const discovered: Record<string, ExtensionMetadata> = {};
+  try {
+    for (const dirent of fsSync.readdirSync(root, { withFileTypes: true })) {
+      if (!dirent.isDirectory()) continue;
+      const dir = path.join(root, dirent.name);
+      const manifest = readManifestFromDirectorySync(dir);
+      // Official Tze: id is the directory name (not a synthesized slug).
+      const id = dirent.name;
+      const timestamp = nowIso();
+      discovered[id] = {
+        id,
+        path: dir,
+        kind: "directory",
+        manifest,
+        installedAt: timestamp,
+        updatedAt: timestamp,
+      };
+    }
+  } catch {
+    /* no extensions dir */
+  }
+  const merged = { ...discovered, ...metadata.extensions };
+  const installed: InstalledExtension[] = [];
+  for (const record of Object.values(merged)) {
+    try {
+      if (!fsSync.existsSync(record.path)) continue;
+    } catch {
+      continue;
+    }
+    installed.push(toInstalled(record, readSettingsSync(userDataDir, record.id)));
   }
   return installed.sort((a, b) => a.displayName.localeCompare(b.displayName));
 }

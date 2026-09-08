@@ -69,6 +69,20 @@ it("builds dual-exec SDK options with guest cwd and VM spawn (not host bash inve
   expect(options.disallowedTools).toBeUndefined();
 });
 
+it("merges session mcpServers into Query (al/coordinator overlay residual)", () => {
+  const options = buildCoworkSdkOptions(
+    input({
+      mcpServers: {
+        custom: { type: "http", url: "https://example.test/mcp" },
+      },
+    }),
+    { executable: "/opt/claude", spawnClaudeCodeProcess: vi.fn() },
+  );
+  expect(options.mcpServers).toMatchObject({
+    custom: { type: "http", url: "https://example.test/mcp" },
+  });
+});
+
 it("passes installed plugins as SDK plugins --plugin-dir residual (host + guest)", () => {
   const host = buildCoworkSdkOptions(
     input({

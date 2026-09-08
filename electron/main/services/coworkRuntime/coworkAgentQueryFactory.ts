@@ -20,6 +20,7 @@ import {
   enrichClaudeCliSpawnEnvWithEnterpriseAuth,
 } from "../custom3p/custom3pCliEnv";
 import { resolveEnterpriseDisallowedTools } from "../coworkHostLoop/coworkEnterpriseConfig";
+import { mergeCodeQueryMcpServers } from "../localSessions/codeDesktopMcpResidual";
 import {
   createCoworkHostFileDenyResult,
   coworkAutoMemoryAllowedToolRules,
@@ -267,6 +268,7 @@ function resolveDualExecSpawn(
         hostUploadsDir: input.hostUploadsDir,
         networkDriveFolders: input.networkDriveFolders,
         pluginMounts: pluginMountsFromReadOnlyPaths(input.readOnlyPluginPaths),
+        skillsPluginPath: input.skillsPluginPath,
         userSelectedFolders: hostFolders(input.userSelectedFolders),
         vmProcessName,
       });
@@ -378,6 +380,7 @@ export function buildCoworkSdkOptions(
           hostUploadsDir: input.hostUploadsDir,
           networkDriveFolders: input.networkDriveFolders,
           pluginMounts,
+          skillsPluginPath: input.skillsPluginPath,
           userSelectedFolders: folders,
           vmProcessName: input.vmProcessName,
         })
@@ -403,6 +406,10 @@ export function buildCoworkSdkOptions(
     userDataPath,
   });
 
+  const mergedMcp = mergeCodeQueryMcpServers({
+    sessionMcp: input.mcpServers,
+    deps: { userDataPath, includeExtensionMcp: false },
+  });
   const sdkOptions: Options = {
     additionalDirectories: input.hostLoopMode
       ? folders.length > 0
@@ -418,7 +425,9 @@ export function buildCoworkSdkOptions(
     forwardSubagentText: true,
     forkSession: input.forkSession,
     includePartialMessages: true,
-    mcpServers: input.mcpServers as Options["mcpServers"],
+    ...(Object.keys(mergedMcp).length > 0
+      ? { mcpServers: mergedMcp as Options["mcpServers"] }
+      : {}),
     model: input.model,
     pathToClaudeCodeExecutable: input.hostLoopMode
       ? options.executable ?? resolveCoworkClaudeExecutable()
