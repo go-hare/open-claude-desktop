@@ -7,6 +7,7 @@ import {
   removeDeferredSendByUuid,
   resolveTurnPermissionMode,
   shouldDeferMidStreamSend,
+  shouldDropCliMessageAfterInterruptAck,
   shouldEmitProcessExitError,
   shouldEndStdinAfterResult,
   resolveQueryLoopEndAction,
@@ -94,6 +95,90 @@ describe("shouldReassertRunningFromAssistantMessage", () => {
   it("ignores non-assistant rows", () => {
     expect(shouldReassertRunningFromAssistantMessage({ type: "result" }, false)).toBe(false);
     expect(shouldReassertRunningFromAssistantMessage({ type: "user" }, false)).toBe(false);
+  });
+});
+
+describe("shouldDropCliMessageAfterInterruptAck", () => {
+  it("keeps official interrupt user (createUserInterruptionMessage)", () => {
+    expect(
+      shouldDropCliMessageAfterInterruptAck({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] },
+      }),
+    ).toBe(false);
+    expect(
+      shouldDropCliMessageAfterInterruptAck({
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "[Request interrupted by user for tool use]" }],
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps parent result and nested/subagent rows", () => {
+    expect(shouldDropCliMessageAfterInterruptAck({ type: "result" })).toBe(false);
+    expect(
+      shouldDropCliMessageAfterInterruptAck({
+        type: "assistant",
+        parent_tool_use_id: "toolu_nested",
+      }),
+    ).toBe(false);
+    expect(
+      shouldDropCliMessageAfterInterruptAck({
+        type: "stream_event",
+        parent_tool_use_id: "toolu_nested",
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps abort pairing tool_result user (QueryEngine yieldMissingToolResultBlocks)", () => {
+    expect(
+      shouldDropCliMessageAfterInterruptAck({
+        type: "user",
+        message: {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "toolu_glob",
+            is_error: true,
+            content: "Interrupted by user",
+          }],
+        },
+      }),
+    ).toBe(false);
+    expect(
+      shouldDropCliMessageAfterInterruptAck({
+        type: "user",
+        message: {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "toolu_glob",
+            content: "matched files",
+          }],
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("drops leftover parent generation official HTTP abort never paints", () => {
+    expect(shouldDropCliMessageAfterInterruptAck({ type: "assistant" })).toBe(true);
+    expect(shouldDropCliMessageAfterInterruptAck({ type: "stream_event", parent_tool_use_id: null })).toBe(true);
+    expect(
+      shouldDropCliMessageAfterInterruptAck({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "hello" }] },
+      }),
+    ).toBe(true);
+  });
+
+  it("still drops leftover parent assistant after abort result (3p buffer)", () => {
+    // Parent result paints (settle) but leftover generation after it is still drop.
+    expect(shouldDropCliMessageAfterInterruptAck({ type: "result" })).toBe(false);
+    expect(shouldDropCliMessageAfterInterruptAck({ type: "assistant" })).toBe(true);
+    expect(shouldDropCliMessageAfterInterruptAck({ type: "stream_event", parent_tool_use_id: null })).toBe(true);
   });
 });
 

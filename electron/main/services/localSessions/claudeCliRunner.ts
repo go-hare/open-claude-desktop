@@ -1161,6 +1161,11 @@ export class ClaudeCliRunner {
     }
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     this.interruptInFlight.add(sessionId);
+    // densable ACK's interrupt before QueryEngine yields createUserInterruptionMessage.
+    // Drop leftover parent generation until that user / parent result (official HTTP abort).
+    // Official n() is only when interrupt() itself does not resolve within kkA — do not
+    // invent a second stopSession after ACK.
+    sdk.abortObservedPending = true;
     try {
       // Official: Promise.race([query.interrupt().then(()=>!1), setTimeout(kkA→true)])
       const timedOut = await Promise.race([
@@ -1247,12 +1252,16 @@ export class ClaudeCliRunner {
       if (!live) {
         sdk.isRunning = false;
         sdk.sawResult = true;
+        sdk.abortObservedPending = false;
         this.store.setRunning(sessionId, false, { kind: "claude-cli" });
         this.callbacks.onSessionUpdated(sessionId);
         return;
       }
       sdk.isRunning = true;
       sdk.sawResult = false;
+      // Official drain is a new turn — leftover abort-pending generation of the
+      // interrupted turn must not suppress follow-up stream_event/assistant.
+      sdk.abortObservedPending = false;
       this.store.setRunning(sessionId, true, {
         kind: "claude-cli",
         executable: "sdk-query",
@@ -1665,6 +1674,7 @@ export class ClaudeCliRunner {
 
     sdk.isRunning = true;
     sdk.sawResult = false;
+    sdk.abortObservedPending = false;
     this.store.setRunning(sessionId, true, {
       kind: "claude-cli",
       executable: "sdk-query",

@@ -40,6 +40,9 @@ import { normalizeSessionSshConfig } from "./sshTranscriptSync";
 import { buildCodeManagedSettingsResidual } from "./codeSdkManagedSettingsResidual";
 import { refreshCodeSdkOAuthTokenResidual } from "./codeSdkOauthResidual";
 import {
+  shouldDropCliMessageAfterInterruptAck,
+} from "./claudeCliTurnLifecycle";
+import {
   OFFICIAL_PRETOOLUSE_MATCHER_MZE_ZE,
   OFFICIAL_PRETOOLUSE_MATCHER_RZE,
   OFFICIAL_STRIP_SUGGESTIONS_TOOLS,
@@ -127,6 +130,12 @@ export type CodeSdkActiveSession = {
   sawInit: boolean;
   sawResult: boolean;
   sessionId: string;
+  /**
+   * densable ACK'd interrupt but QueryEngine has not yet yielded
+   * createUserInterruptionMessage / parent result. Leftover parent generation
+   * must not paint (official HTTP abort never emits it).
+   */
+  abortObservedPending: boolean;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -900,6 +909,7 @@ export async function createCodeSdkActiveSession(input: {
     sawInit: false,
     sawResult: false,
     sessionId,
+    abortObservedPending: false,
   };
 
 active.loop = (async () => {
@@ -1198,6 +1208,18 @@ function handleSdkMessage(
   if (type === "system" && stringValue(record.subtype) === "init") {
     active.sawInit = true;
   }
+  if (active.abortObservedPending) {
+    // Official CCD HTTP abort never emits leftover parent generation after Stop.
+    // densable ACK is early; 3p often flushes parent assistant AFTER the abort
+    // `result`. Clearing the drop window on result lets that leftover paint and
+    // handleAssistantMessage re-asserts isRunning (spark + new paragraphs).
+    // Keep dropping until drain/enqueue (new turn). Paint interrupt user,
+    // abort pairing tool_result, parent result, system, nested.
+    if (shouldDropCliMessageAfterInterruptAck(record)) {
+      return;
+    }
+  }
+
   if (type === "result") {
     active.sawResult = true;
     // Official asar: isRunning is NOT cleared on the result row itself.

@@ -128,6 +128,82 @@ export function shouldReassertRunningFromAssistantMessage(
 }
 
 /**
+ * Official densable / CCD interrupt user residual (`createUserInterruptionMessage`):
+ *   "[Request interrupted by user]"
+ *   "[Request interrupted by user for tool use]"
+ * Host must NOT invent this row — QueryEngine yields it after abort.
+ */
+export const OFFICIAL_CLI_INTERRUPT_USER_TEXTS = new Set([
+  "[Request interrupted by user]",
+  "[Request interrupted by user for tool use]",
+]);
+
+export function isOfficialCliInterruptUserMessage(msg: unknown): boolean {
+  if (!msg || typeof msg !== "object") return false;
+  const record = msg as Record<string, unknown>;
+  if (record.type !== "user") return false;
+  const nested = asRecord(record.message);
+  const content = nested.content ?? record.content;
+  if (typeof content === "string") return OFFICIAL_CLI_INTERRUPT_USER_TEXTS.has(content);
+  if (!Array.isArray(content)) return false;
+  return content.some((item) => {
+    const block = asRecord(item);
+    return block.type === "text"
+      && typeof block.text === "string"
+      && OFFICIAL_CLI_INTERRUPT_USER_TEXTS.has(block.text);
+  });
+}
+
+/**
+ * Official QueryEngine abort pairing (`yieldMissingToolResultBlocks` /
+ * `streamingToolExecutor.getRemainingResults`): parent `user` with
+ * `tool_result` closes in-flight tool_use (Searching → Searched).
+ * Host must NOT invent these rows — only stop dropping them.
+ */
+export function isOfficialCliAbortToolResultUserMessage(msg: unknown): boolean {
+  if (!msg || typeof msg !== "object") return false;
+  const record = msg as Record<string, unknown>;
+  if (record.type !== "user") return false;
+  const nested = asRecord(record.message);
+  const content = nested.content ?? record.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((item) => asRecord(item).type === "tool_result");
+}
+
+/**
+ * densable print ACK's control_request interrupt immediately (`sendControlResponseSuccess`)
+ * then `abortController.abort()`. Official QueryEngine only yields
+ * `createUserInterruptionMessage` once abort is observed between stream ticks.
+ * 3p HTTP often ignores AbortSignal, so parent `assistant` / `stream_event` /
+ * leftover text users keep arriving after ACK — official CCD never paints those
+ * (HTTP aborts). Abort pairing `tool_result` users ARE official and must paint
+ * so transcript rke can settle in-flight tools.
+ *
+ * Drop leftover parent generation until drain/enqueue (new turn). Do not
+ * invent the interrupt user row. Nested/subagent rows (`parent_tool_use_id`
+ * truthy) stay — they are not the main-turn typewriter. Parent `result` must
+ * still paint (settle H) but must NOT end the drop window — 3p leftover
+ * assistant after abort result is what official HTTP abort never paints.
+ */
+export function shouldDropCliMessageAfterInterruptAck(msg: unknown): boolean {
+  if (!msg || typeof msg !== "object") return false;
+  if (isOfficialCliInterruptUserMessage(msg)) return false;
+  if (isOfficialCliAbortToolResultUserMessage(msg)) return false;
+  const record = msg as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : "";
+  const parent = record.parent_tool_use_id ?? record.parentToolUseId;
+  if (parent != null && parent !== "") return false;
+  if (type === "result" || type === "system") return false;
+  // Leftover parent generation official CCD never paints after abort
+  // (stream_event / assistant tool_use / leftover prompt users).
+  return type === "stream_event" || type === "assistant" || type === "user";
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+/**
  * Official LocalSessionManager multi-turn residual (app.asar):
  * After parent `result`, CCD **does not** endInput / kill the Query process.
  * `signalTurnComplete` → `markNotRunning` only; query + inputStream stay warm so

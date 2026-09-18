@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, shell } from "electron";
+import { app, BrowserWindow, dialog, shell } from "electron";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -70,7 +70,6 @@ import {
   parseSimulatorAttachRequest,
   parseSimulatorInstallRequest,
 } from "../services/simulator/simulatorSessionResidual";
-import { listFramebufferSourcesIpc } from "../services/framebuffer/framebufferSourcesResidual";
 import {
   grandPrixDisconnectResidual,
   grandPrixPairedMapFromStore,
@@ -716,7 +715,6 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
   ];
   /** Official Simulator attachment store is an AmA[] residual, not a single bag. */
   let simulatorAttachments: unknown[] = [];
-  let framebufferSource: Record<string, unknown> | null = null;
   let activeOfficeFileId: string | null = null;
   let miniExpanded = false;
   /**
@@ -2296,27 +2294,19 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
         return isCoworkGrowthBookFeatureOn("1928275548");
       },
       /**
-       * Official listSources residual:
-       *   - main-window ixt empty when RFB unavailable → []
-       *   - MCP/launch residual reads .claude/launch.json + launch.d framebuffer entries
-       * Product: read real configs only (vnc/rfb schemes). No desktopCapturer invent.
-       * requestFramePort / attach still empty/throw without MessagePort RFB session.
+       * Official main-window ixt residual: listSources → [].
+       * Do not invent launch.json / desktopCapturer sources.
+       * requestFramePort / attach stay empty/throw without MessagePort RFB.
        */
-      listSources: async (_event, cwd?: unknown) => {
-        return listFramebufferSourcesIpc(cwd);
-      },
-      attach: async (_event, _cwdOrSource: unknown, _sessionName?: unknown) => {
-        // Official residual when FramebufferPreview not available in this window.
-        // listSources may return launch configs; attach still needs MessagePort RFB.
+      listSources: async () => [],
+      attach: async () => {
         throw new Error("FramebufferPreview not available in this window");
       },
-      detach: async (_event, _sessionId?: unknown) => {
-        framebufferSource = null;
+      detach: async () => {
         // Official residual: async () => {}
       },
       requestFramePort: async () => {
         // Official residual: async () => false — no invent MessagePort.
-        framebufferSource = null;
         return false;
       },
       /** Official residual: async () => {} — no invent input success. */

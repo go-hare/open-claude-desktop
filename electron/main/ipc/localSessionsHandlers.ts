@@ -66,6 +66,7 @@ import {
 } from "../services/localSessions/sshTranscriptSync";
 import { resolveCodeTranscriptPath } from "../services/localSessions/codeTranscriptJsonl";
 import { CodeSessionSummaryService } from "../services/localSessions/codeSessionSummary";
+import { CodeSideChatService } from "../services/localSessions/codeSideChat";
 import {
   getTranscriptSearchWorkerHost,
   type TranscriptSearchSession,
@@ -1121,6 +1122,22 @@ function createSessionHandlers(
   });
 
   /**
+   * Residual LocalSessionManager startSideChat (app.asar):
+   * Query fork keyed by parent id. Events: side_chat_ready|assistant|turn_end|error|closed.
+   * Do not store.start / sessionRunner.runTurn (no Recents child).
+   */
+  const sideChatService = new CodeSideChatService({
+    emit: (event) => {
+      dispatchBridgeSessionEvent({
+        type: event.type,
+        sessionId: event.sessionId,
+        data: event.data,
+        error: event.error,
+      });
+    },
+  });
+
+  /**
    * Official LocalSessionManager.getAllSessions residual:
    * list comes from userData session store only (metadata). Never scan/read
    * ~/.claude/projects/*.jsonl here — that is on-demand getTranscript only.
@@ -1458,11 +1475,10 @@ function createSessionHandlers(
     },
     sendMessage: sendCodeMessage,
     sendSideChatMessage: async (_event, id, text) => {
+      // Official sendSideChatMessage(sessionId, text) — enqueue on parent fork. Void.
       const sessionId = asString(id);
-      const session = sessionId && typeof text === "string" ? store.sendMessage(sessionId, text, "user") : null;
-      if (sessionId && session) dispatchSessionEvent("session_updated", sessionId, session);
-      if (sessionId && session && typeof text === "string") sessionRunner.runTurn(sessionId, text);
-      return bridgeSession(session);
+      if (!sessionId || typeof text !== "string") return;
+      sideChatService.send(sessionId, text);
     },
     forkSession: async (_event, id, messageId) => {
       const sessionId = asString(id);
@@ -3123,36 +3139,16 @@ function createSessionHandlers(
       return true;
     },
     getShellPtyBuffer: async (_event, sessionId) => (asString(sessionId) ? ptys.get(asString(sessionId)!)?.buffer ?? "" : ""),
-    startSideChat: async (_event, parentOrInput, maybeInput) => {
-      const parentId = asString(parentOrInput) ?? asString(asObject(parentOrInput).sessionId) ?? asString(asObject(parentOrInput).parentSessionId);
-      const parent = parentId ? store.getSession(parentId) : null;
-      const request = Object.keys(asObject(maybeInput)).length > 0 ? asObject(maybeInput) : asObject(parentOrInput);
-      const prompt = asString(request.prompt) ?? asString(request.message) ?? "";
-      const session = store.start({
-        ...request,
-        cwd: asString(request.cwd) ?? parent?.cwd,
-        folders: Array.isArray(request.folders) ? request.folders : parent?.folders,
-        kind: parent?.kind,
-        // Official: sidechat inherits sshConfig / worktree from parent when present.
-        sshConfig: sessionSshConfigFromUnknown(request.sshConfig) ?? parent?.sshConfig,
-        originCwd: asString(request.originCwd) ?? parent?.originCwd,
-        worktreePath: asString(request.worktreePath) ?? parent?.worktreePath,
-        worktreeName: asString(request.worktreeName) ?? parent?.worktreeName,
-        useWorktree: typeof request.useWorktree === "boolean" ? request.useWorktree : parent?.useWorktree,
-        origin: "sidechat",
-        prompt,
-        title: asString(request.title) ?? (parent ? `${parent.title} side chat` : "Side chat"),
-      } as never);
-      const updated = store.update(session.id, { metadata: { ...(session.metadata ?? {}), sideChat: true, parentSessionId: parentId } });
-      dispatchSessionEvent("start", session.id, updated ?? session);
-      if (prompt) sessionRunner.runTurn(session.id, prompt, request);
-      return bridgeSession(updated ?? session);
+    startSideChat: async (_event, id) => {
+      // Official startSideChat(sessionId) — Query fork of parent. Void. No Recents child.
+      const sessionId = asString(id);
+      if (!sessionId) return;
+      await sideChatService.start(store.getSession(sessionId));
     },
     stopSideChat: async (_event, id) => {
       const sessionId = asString(id) ?? asString(asObject(id).sessionId);
       if (!sessionId) return false;
-      // Official stopSession — same LSM teardown residual as LocalSessions.stop (stopped if query).
-      return sessionRunner.stop(sessionId);
+      return sideChatService.stop(sessionId);
     },
     /**
      * Official stopSessionSummary(sessionId) → boolean (true only if a forked
@@ -3478,6 +3474,7 @@ function ensureCodeAutoFixEngine(context: IpcHandlerContext): CodeAutoFixEngine 
               body: asString(c.body) ?? undefined,
               path: asString(c.path) ?? undefined,
               line: typeof c.line === "number" ? c.line : undefined,
+              url: asString(c.html_url) ?? asString(c.url) ?? undefined,
               userType: asString(user.type) ?? undefined,
               authorAssociation: asString(c.author_association) ?? undefined,
             };
