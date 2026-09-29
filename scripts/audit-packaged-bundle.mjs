@@ -103,8 +103,6 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
   const winAsar = winTargets.appAsar;
   const winExe = winTargets.binary;
   const winRuntimeRoot = path.join(winResources, "original-runtime-node_modules", "node_modules");
-  const winClaudeCodeBinary = winTargets.claudeCodeBinary;
-  const winClaudeCodeManifest = path.join(winResources, "claude-code-bin", "manifest.json");
   const winDualRoot = inspectPackagedDualRoot(winTargets);
   const winProductBuildId = winDualRoot.productBuildId;
   const winResidualBuildId = winDualRoot.residualBuildId;
@@ -169,10 +167,6 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
       dual_root: winDualRoot,
       dual_root_ok: winDualRoot.ok,
       original_runtime_exists: await exists(path.join(winResources, "original-runtime-node_modules")),
-      claude_code_binary_exists: await exists(winClaudeCodeBinary),
-      claude_code_binary_size: (await exists(winClaudeCodeBinary)) ? fsSync.statSync(winClaudeCodeBinary).size : 0,
-      claude_code_binary_sha256: (await exists(winClaudeCodeBinary)) ? await sha256(winClaudeCodeBinary) : null,
-      claude_code_manifest_exists: await exists(winClaudeCodeManifest),
       missing_original_runtime_entries: missingRequiredRuntime,
       missing_optional_runtime_entries: missingOptionalRuntime,
     },
@@ -192,9 +186,6 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
     report.resources.ion_dist_exists &&
     report.resources.dual_root_ok &&
     report.resources.original_runtime_exists &&
-    report.resources.claude_code_binary_exists &&
-    report.resources.claude_code_binary_size > 0 &&
-    report.resources.claude_code_manifest_exists &&
     report.resources.missing_original_runtime_entries.length === 0 &&
     report.asar.contains_vite_index &&
     report.asar.contains_vite_preload &&
@@ -217,9 +208,6 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
     `- dual-root 通过：${report.resources.dual_root_ok ? "是" : "否"}（${report.resources.dual_root?.reason ?? "ok"}）\n` +
     `- 产品 main 指纹：${report.asar.product_main.ok ? "是" : "否"}（${report.asar.product_main.reason ?? "ok"}）\n` +
     `- original-runtime-node_modules 存在：${report.resources.original_runtime_exists ? "是" : "否"}\n` +
-    `- Claude Code binary 存在：${report.resources.claude_code_binary_exists ? "是" : "否"}\n` +
-    `- Claude Code binary 大小：${report.resources.claude_code_binary_size}\n` +
-    `- Claude Code manifest 存在：${report.resources.claude_code_manifest_exists ? "是" : "否"}\n` +
     `- runtime 必选缺失数：${report.resources.missing_original_runtime_entries.length}\n` +
     `- runtime 可选缺失数：${report.resources.missing_optional_runtime_entries.length}\n` +
     `- app.asar 含 .vite 主入口：${report.asar.contains_vite_index ? "是" : "否"}\n` +
@@ -240,8 +228,6 @@ if (!(await exists(packagedApp)) && (await exists(packagedWinRoot))) {
     product_main_ok: report.asar.product_main.ok,
     runtime_missing: report.resources.missing_original_runtime_entries.length,
     runtime_optional_missing: report.resources.missing_optional_runtime_entries.length,
-    claude_code_binary_exists: report.resources.claude_code_binary_exists,
-    claude_code_binary_size: report.resources.claude_code_binary_size,
     contains_vite_index: report.asar.contains_vite_index,
     contains_vite_preload: report.asar.contains_vite_preload,
   }, null, 2));

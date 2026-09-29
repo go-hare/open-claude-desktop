@@ -4,7 +4,8 @@ import path from "node:path";
 import { resolveElectronShellPaths, type ElectronShellPaths } from "./paths/electronShellPaths";
 import { installAppProtocolHandler, registerAppProtocolScheme } from "./protocol";
 import { resolveDeploymentModeFromUserData } from "./services/custom3p/deploymentMode";
-import { bundledClaudeExecutable, defaultClaudeExecutable } from "./services/localSessions/claudeCliRunner";
+import { bundledClaudeExecutable } from "./services/localSessions/claudeCliRunner";
+import { officialClaudeCodeManager } from "./services/localSessions/officialClaudeCodeManager";
 import { configureOriginalRuntimeModules } from "./services/originalRuntime/originalRuntimeModules";
 import { createDefaultIpcContext, registerDesktopIpc } from "./ipc";
 import { getIpcHandlerRegistrySummary } from "./ipc/handlerRegistry";
@@ -221,9 +222,9 @@ function maybeCompleteSmoke(runtime: DesktopAppRuntime): void {
     applicationMenu: getApplicationMenuSummary(),
     ipcHandlers: getIpcHandlerRegistrySummary(),
     claudeCode: {
-      executable: defaultClaudeExecutable(),
+      executable: bundledClaudeExecutable() ?? null,
       bundledExecutable: bundledClaudeExecutable() ?? null,
-      usesBundledExecutable: defaultClaudeExecutable() === bundledClaudeExecutable(),
+      usesBundledExecutable: Boolean(bundledClaudeExecutable()),
     },
   };
 
@@ -379,6 +380,14 @@ export async function bootstrapDesktopApp(options: DesktopAppOptions = {}): Prom
       error instanceof Error ? error.message : String(error),
     );
   }
+  // Official Ta.prepare residual — after session proxy so Chromium/net.fetch can
+  // reach downloads.claude.ai. Fire-and-forget; spawn awaits resolveBinaryPathFresh.
+  void officialClaudeCodeManager.prepare().catch((error) => {
+    console.warn(
+      "[CCD] Ta.prepare failed",
+      error instanceof Error ? error.message : String(error),
+    );
+  });
   // Product: sandbox CSP frame-ancestors allows app://localhost (packaged residual)
   // but not Vite http://127.0.0.1:5176 → ERR_BLOCKED_BY_RESPONSE. Extend only.
   try {

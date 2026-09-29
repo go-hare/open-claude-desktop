@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   clearCodeTranscriptCaches,
+  compactCodeTranscriptEvent,
   readCodeSessionMetadata,
   readCodeTranscript,
   resolveCodeTranscriptPath,
@@ -663,7 +664,7 @@ export class LocalSessionStore {
   async getTranscript(id: string): Promise<unknown[]> {
     const session = this.sessions.get(id);
     if (!session) return [];
-    let liveEvents = this.getLiveEvents(id);
+    let liveEvents = this.getLiveEvents(id).map(compactCodeTranscriptEvent);
     if (session.cliSessionId) {
       // Official: ssh sessions → fetchRemoteTranscript (byte-sync mirror) before disk read.
       // Local sessions → loadTranscriptFromDisk with cwd/worktree/origin hints.

@@ -17,7 +17,6 @@ import {
   type SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import fs from "node:fs";
-import path from "node:path";
 import {
   buildClaudeCliSpawnEnv,
   enrichClaudeCliSpawnEnvWithEnterpriseAuth,
@@ -27,6 +26,7 @@ import type { LocalSession } from "./localSessionStore";
 import { resolveCodeTranscriptPath } from "./codeTranscriptJsonl";
 import { createSshSpawnClaudeCodeProcess, resolveSshRemoteCwd } from "./sshCliSpawn";
 import { buildCodeSdkUserMessage, type CodeSdkUserMessage } from "./codeSdkQuerySession";
+import { resolveOfficialClaudeCodeExecutable } from "./officialClaudeCodeManager";
 
 /** Residual `Rtr` — systemPrompt.append on preset claude_code. */
 export const OFFICIAL_SIDE_CHAT_SYSTEM_APPEND =
@@ -65,32 +65,8 @@ export type SideChatEmitter = {
   }) => void;
 };
 
-function hostPlatformKey(): string {
-  const arch = process.arch === "arm64" ? "arm64" : "x64";
-  if (process.platform === "win32") return `win32-${arch}`;
-  if (process.platform === "darwin") return `darwin-${arch}`;
-  return `linux-${arch}`;
-}
-
-function resolveCodeExecutable(): string {
-  if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE;
-  const binaryName = process.platform === "win32" ? "claude.exe" : "claude";
-  const roots = [
-    process.env.CLAUDE_DESKTOP_RESOURCES_ROOT
-      ? path.join(process.env.CLAUDE_DESKTOP_RESOURCES_ROOT, "claude-code-bin")
-      : undefined,
-    process.resourcesPath ? path.join(process.resourcesPath, "claude-code-bin") : undefined,
-    path.resolve(process.cwd(), "resources", "claude-code-bin"),
-  ].filter((value): value is string => Boolean(value));
-  for (const root of roots) {
-    for (const candidate of [
-      path.join(root, "platforms", hostPlatformKey(), binaryName),
-      path.join(root, binaryName),
-    ]) {
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  }
-  return process.platform === "win32" ? "claude.exe" : "claude";
+async function resolveCodeExecutable(): Promise<string> {
+  return resolveOfficialClaudeCodeExecutable();
 }
 
 function contentTextFromAssistant(message: SDKMessage): string {
@@ -224,7 +200,7 @@ export class CodeSideChatService {
       settingSources: [],
       mcpServers: {},
       strictMcpConfig: true,
-      pathToClaudeCodeExecutable: resolveCodeExecutable(),
+      pathToClaudeCodeExecutable: await resolveCodeExecutable(),
       systemPrompt: {
         type: "preset",
         preset: "claude_code",

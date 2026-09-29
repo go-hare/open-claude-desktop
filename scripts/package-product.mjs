@@ -194,12 +194,6 @@ if (targets.platform === "darwin") {
   }
 }
 
-if (targets.platform === "win32" && !fs.existsSync(targets.claudeCodeBinary)) {
-  throw new Error(
-    `packaged claude.exe missing: ${targets.claudeCodeBinary} (copy:claude-code-binary + align:win32)`,
-  );
-}
-
 const openHint =
   targets.platform === "win32"
     ? "npm run package:open\n  # or: start out\\Claudex-win32-<arch>\\Claudex.exe"
@@ -235,6 +229,6 @@ Windows notes:
   - Package on a Windows host (host-native forge + native modules).
   - Exe is Claudex.exe under out/Claudex-win32-<arch>/.
   - align keeps dual-root product-web + residual ion-dist (same as mac).
-  - smoke:packaged expects resources/claude-code-bin/claude.exe.
+  - smoke:packaged expects SDK native CLI (claude-agent-sdk-{platform}-{arch}/claude.exe).
 ────────────────────────────────────────
 `);

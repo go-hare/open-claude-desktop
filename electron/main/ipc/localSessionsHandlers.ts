@@ -38,6 +38,9 @@ import {
 import { originalEventSurface } from "./originalEventSurface";
 import { describeMcpServer, mcpConfigEntries, requestMcpServer } from "../services/mcp/mcpRuntime";
 import { getOfficialGitDiff } from "../services/localSessions/officialGitDiff";
+
+/** Official `wJ` shell PTY replay cap (index.js `startShellPty` onData). Not FileSystem 20 MiB. */
+const TEXT_LIMIT_BYTES = 256 * 1024;
 import {
   availableCodePermissionModes,
   clampCodePermissionMode,
@@ -68,6 +71,15 @@ import { resolveCodeTranscriptPath } from "../services/localSessions/codeTranscr
 import { CodeSessionSummaryService } from "../services/localSessions/codeSessionSummary";
 import { CodeSideChatService } from "../services/localSessions/codeSideChat";
 import {
+  isRejectedUncPath,
+  listSessionDirectoryEntries,
+  mimeTypeForSessionImage,
+  resolveSessionContainedPath,
+  resolveSessionFilePath,
+  SESSION_FILE_MAX_BYTES,
+  SESSION_IMAGE_MAX_BYTES,
+} from "../services/localSessions/sessionFilePath";
+import {
   getTranscriptSearchWorkerHost,
   type TranscriptSearchSession,
 } from "../services/shell/transcriptSearchWorkerHost";
@@ -91,7 +103,6 @@ import {
 } from "../services/coworkSessions/sessionsBridgeLifecycle";
 
 const execFileAsync = promisify(execFile);
-const TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
 
 // Code LocalSessions only. Cowork LocalAgentModeSessions is registered solely via
 // coworkSessionsHandlers + CoworkSessionManager (see registerDesktopIpc).
@@ -809,7 +820,7 @@ async function readText(filePath: string) {
       error: "Not a regular file",
     };
   }
-  if (stat.size > TEXT_LIMIT_BYTES) {
+  if (stat.size > SESSION_FILE_MAX_BYTES) {
     return { path: filePath, absPath: filePath, size: stat.size, tooLarge: true };
   }
   // Official epitaxy-file payload: { contents, absPath, hash } so vN F (Edit) can enable.
@@ -995,25 +1006,37 @@ function resolveSessionFile(store: LocalSessionStore, sessionId: string, relativ
   return target.startsWith(root) ? target : null;
 }
 
-function resolveSessionOrWorkspaceFile(store: LocalSessionStore, sessionId: string, filePath: string): string | null {
-  if (path.isAbsolute(filePath)) return filePath;
-  const cwd = cwdFromSession(store, sessionId);
-  if (cwd) return path.resolve(cwd, filePath);
+/** Official resolveSessionFilePath (read / preview). Fallback: session outputs dir. */
+async function resolveSessionOrWorkspaceFile(
+  store: LocalSessionStore,
+  sessionId: string,
+  filePath: string,
+): Promise<string | null> {
+  const session = store.getSession(sessionId);
+  const resolved = await resolveSessionFilePath(session, filePath);
+  if (resolved) return resolved;
+  if (session?.sshConfig) return null;
+  if (sessionWorkspaceHasRoot(session)) return null;
   return resolveSessionFile(store, sessionId, filePath);
 }
 
-function mimeTypeForFile(filePath: string): string {
-  switch (path.extname(filePath).toLowerCase()) {
-    case ".apng": return "image/apng";
-    case ".avif": return "image/avif";
-    case ".gif": return "image/gif";
-    case ".jpg":
-    case ".jpeg": return "image/jpeg";
-    case ".png": return "image/png";
-    case ".svg": return "image/svg+xml";
-    case ".webp": return "image/webp";
-    default: return "application/octet-stream";
-  }
+function sessionWorkspaceHasRoot(session: LocalSession | undefined): boolean {
+  return Boolean(session?.worktreePath || session?.cwd);
+}
+
+/** Official list/write/image: async `cQ` containment, not isFile. */
+async function resolveSessionContainedOrOutputs(
+  store: LocalSessionStore,
+  sessionId: string,
+  filePath: string,
+  options: { expandHome?: boolean } = {},
+): Promise<string | null> {
+  const session = store.getSession(sessionId);
+  const contained = await resolveSessionContainedPath(session, filePath, options);
+  if (contained) return contained;
+  if (session?.sshConfig) return null;
+  if (sessionWorkspaceHasRoot(session)) return null;
+  return resolveSessionFile(store, sessionId, filePath);
 }
 
 function configuredMcpServers(context: IpcHandlerContext): Array<[string, unknown]> {
@@ -2342,23 +2365,28 @@ function createSessionHandlers(
       await shell.openPath(store.getOutputsDir());
       return true;
     },
-    // Official XC (c11959232 ZC): fe.listSessionDirectory(sessionId, absPath)
-    // where absPath is cwd/worktree (or expanded branch). Not session outputs dir.
+    // Official listSessionDirectory: ssh / Hs UNC → []; cQ under worktreePath??cwd;
+    // skip dotfiles; {name, path: join(unresolved, name), isDirectory}.
     listSessionDirectory: async (_event, id, relative = ".") => {
       const sessionId = asString(id);
       if (!sessionId) return [];
+      const session = store.getSession(sessionId);
+      if (!session || session.sshConfig) return [];
       const rawPath = String(relative ?? ".");
-      let target: string | null = null;
-      if (path.isAbsolute(rawPath)) {
-        target = rawPath;
-      } else if (rawPath === "." || rawPath === "") {
-        target = cwdFromSession(store, sessionId) ?? sessionFileRoot(store, sessionId);
-      } else {
-        target = resolveSessionOrWorkspaceFile(store, sessionId, rawPath);
+      if (sessionWorkspaceHasRoot(session)) {
+        return listSessionDirectoryEntries(session, rawPath);
       }
+      const target = await resolveSessionContainedOrOutputs(store, sessionId, rawPath);
       if (!target) return [];
       try {
-        return await listDirectory(target);
+        const entries = await fs.readdir(target, { withFileTypes: true });
+        return entries
+          .filter((entry) => !entry.name.startsWith("."))
+          .map((entry) => ({
+            name: entry.name,
+            path: path.join(target, entry.name),
+            isDirectory: entry.isDirectory(),
+          }));
       } catch {
         return [];
       }
@@ -2366,41 +2394,54 @@ function createSessionHandlers(
     readSessionFile: async (_event, id, relative) => {
       const sessionId = asString(id);
       if (!sessionId) return null;
-      const target = resolveSessionOrWorkspaceFile(store, sessionId, String(relative ?? ""));
+      const target = await resolveSessionOrWorkspaceFile(store, sessionId, String(relative ?? ""));
       return target ? readText(target) : null;
     },
     readSessionImageAsDataUrl: async (_event, id, relative) => {
       const sessionId = asString(id);
       if (!sessionId) return null;
-      const target = resolveSessionOrWorkspaceFile(store, sessionId, String(relative ?? ""));
+      const session = store.getSession(sessionId);
+      if (!session || session.sshConfig) return null;
+      const rawPath = String(relative ?? "");
+      if (isRejectedUncPath(rawPath)) return null;
+      const target = await resolveSessionContainedPath(session, rawPath, { expandHome: false });
       if (!target) return null;
-      const buffer = await fs.readFile(target);
-      return `data:${mimeTypeForFile(target)};base64,${buffer.toString("base64")}`;
+      const mime = mimeTypeForSessionImage(target);
+      if (!mime) return null;
+      try {
+        const stat = await fs.stat(target).catch(() => null);
+        if (!stat?.isFile() || stat.size > SESSION_IMAGE_MAX_BYTES) return null;
+        const buffer = await fs.readFile(target);
+        return `data:${mime};base64,${buffer.toString("base64")}`;
+      } catch {
+        return null;
+      }
     },
-    // Official fe.writeSessionFile(sessionId, absPath|rel, contents, expectedHash?)
-    // → { status: "ok"|"conflict"|"denied", hash?, currentHash? } (c119 vN / UI enum).
+    // Official fe.writeSessionFile: cQ containment (file need not exist); hash conflict
+    // when expectedHash is defined and current (or missing) hash differs.
     writeSessionFile: async (_event, id, relative, content, expectedHash) => {
       const sessionId = asString(id);
       if (!sessionId) return null;
-      const target = resolveSessionOrWorkspaceFile(store, sessionId, String(relative ?? "file.txt"));
+      const session = store.getSession(sessionId);
+      if (!session || session.sshConfig) return { status: "denied" as const };
+      const target = await resolveSessionContainedPath(session, String(relative ?? "file.txt"), { expandHome: false });
       if (!target) return { status: "denied" as const };
       const nextContents = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+      let currentHash: string | undefined;
       try {
-        const existing = await fs.readFile(target, "utf8").catch((error: NodeJS.ErrnoException) => {
-          if (error?.code === "ENOENT") return null;
-          throw error;
-        });
-        if (existing != null && expectedHash != null && String(expectedHash).length > 0) {
-          const current = contentHash(existing);
-          if (current !== String(expectedHash)) {
-            return { status: "conflict" as const, currentHash: current };
-          }
-        }
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.writeFile(target, nextContents);
-        return { status: "ok" as const, hash: contentHash(nextContents), absPath: target };
+        const existing = await fs.readFile(target, "utf8");
+        currentHash = contentHash(existing);
       } catch {
-        return { status: "denied" as const };
+        currentHash = undefined;
+      }
+      if (expectedHash !== undefined && currentHash !== expectedHash) {
+        return { status: "conflict" as const, currentHash };
+      }
+      try {
+        await fs.writeFile(target, nextContents, "utf8");
+        return { status: "ok" as const, hash: contentHash(nextContents) };
+      } catch {
+        return null;
       }
     },
     pickSessionFile: async (_event, id) => {

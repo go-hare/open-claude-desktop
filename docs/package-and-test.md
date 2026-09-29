@@ -32,7 +32,7 @@
 1. `npm run build`  
    - 产品 main / preload 构建  
    - `copy:original-shell` 覆盖官方 `.vite`（供 `audit:original` 字节对齐）  
-   - residual runtime / claude-code-bin / `audit:original`
+   - residual runtime / SDK native CLI / `audit:original`
 2. `npm run restore:product-main`  
    - **再次** `build:main`，保证 asar 内是产品 main（`app://` / LoginDesktop），不是官方 1p→claude.ai
 3. `npm run build:product-web`  
@@ -40,13 +40,13 @@
 4. `prepare:electron-zip` + `electron-forge package`（主机平台）
 5. `align:bundle`  
    - **macOS**（`align-packaged-macos-bundle.mjs`）：  
-     拷官方 MacOS / Frameworks / Resources residual（保留 residual `ion-dist`）→ **注入** `Contents/Resources/product-web`（不覆盖 ion-dist）→ 注入 `claude-code-bin` → 产品 bundle id / ad-hoc codesign  
+     拷官方 MacOS / Frameworks / Resources residual（保留 residual `ion-dist`）→ **注入** `Contents/Resources/product-web`（不覆盖 ion-dist）→ 注入 SDK native CLI → 产品 bundle id / ad-hoc codesign  
    - **Windows**（`align-packaged-win32-bundle.mjs`）：  
-     保持 dual-root：`resources/product-web` + residual `resources/ion-dist` → 注入 `claude-code-bin`  
+     保持 dual-root：`resources/product-web` + residual `resources/ion-dist` → 注入 SDK native CLI  
      （无 mac 式 residual .app Frameworks 叠加；exe 名保持 forge `Claudex.exe`）
 6. `audit:bundle`  
    - mac：residual 外层 + 产品身份 + asar integrity + **产品 main 指纹** + **dual-root** + asar 无工作区污染  
-   - win：`Claudex.exe` / app.asar / **product-web 非 spa-dev** + residual ion-dist / 产品 main / runtime 必选 / `claude-code-bin/claude.exe`
+   - win：`Claudex.exe` / app.asar / **product-web 非 spa-dev** + residual ion-dist / 产品 main / runtime 必选 / SDK native CLI
 
 **asar 内容 allowlist**（`forge.config.cjs`）：只打 `package.json` + `.vite/**`。  
 - **禁止** workspace 根 `index.js`（常是 ~12MB 官方 residual dump，不是产品 main）。  
@@ -64,7 +64,7 @@ out/Claudex-darwin-<arch>/Claudex.app
   Contents/Resources/product-web/ ← 产品 web（data-build-id=react-shell）
   Contents/Resources/ion-dist/    ← residual 官方 SPA（setup-desktop-3p / spa-dev）
   Contents/Resources/app.asar    ← 产品 main（chunks 指纹）+ 官方 preload/renderer shell
-  Contents/Resources/claude-code-bin/
+  Contents/Resources/claude-agent-sdk-{platform}-{arch}/claude
 ```
 
 打包后强制检查（`package-product` + `audit:bundle`）：
@@ -73,7 +73,7 @@ out/Claudex-darwin-<arch>/Claudex.app
 - residual `ion-dist` 存在且与 product-web 不同（setup-desktop-3p）
 - asar 产品 main 指纹（`chunks/` 或小入口 + product markers；禁止官方 ~12MB monolith）
 - mac：`CFBundleIdentifier` + codesign Identifier = `com.local.claudex.desktop`
-- win：`resources/claude-code-bin/claude.exe` 存在
+- win：SDK native CLI（`claude-agent-sdk-win32-*/claude.exe`）存在
 
 ### Windows 产物示意
 
@@ -84,9 +84,8 @@ out/Claudex-win32-x64/           # 或 win32-arm64
     app.asar
     product-web/                 ← 产品 web（align 注入，非 spa-dev）
     ion-dist/                    ← residual 官方 SPA（setup-desktop-3p）
-    claude-code-bin/
+    claude-agent-sdk-win32-x64/
       claude.exe
-      manifest.json
     original-runtime-node_modules/   # forge extraResource；audit 会查
     …
 ```
@@ -126,7 +125,7 @@ npm run smoke:packaged     # 打包二进制 + 隔离 .smoke-user-data-packaged
 |--|--------|------|
 | smoke | Electron CLI + 项目 `.` | 注入 `MAIN_VIEW_URL`（默认 :5176） |
 | smoke:packaged mac | `Contents/MacOS/Claude` | **删除** `MAIN_VIEW_URL`，走 app:// |
-| smoke:packaged win | `out/Claudex-win32-<arch>/Claudex.exe` | 同上；校验 `resources/claude-code-bin/claude.exe` |
+| smoke:packaged win | `out/Claudex-win32-<arch>/Claudex.exe` | 同上；校验 SDK native CLI |
 
 ## Residual 同步（可选，主要服务 mac 对齐）
 
@@ -141,7 +140,7 @@ npm run sync:residual   # → resources/original-claude.app + resources/ion-dist
 Windows 打包**不**依赖 mac residual 的 MacOS/Frameworks 拷贝；仍需要：
 
 - `resources/product-web`（`build:product-web`）
-- `resources/claude-code-bin`（含 **claude.exe**，`copy:claude-code-binary` 在 win 主机应产出 top-level `claude.exe`）
+- `@anthropic-ai/claude-agent-sdk-{platform}-{arch}`（SDK 自带 native CLI，不要 `resources/claude-code-bin`）
 - `resources/original-runtime-node_modules`（`copy:original-runtime`；win 会补 win32 native / 安全 loader）
 
 ## 启动时序（app://、首屏、Dock）

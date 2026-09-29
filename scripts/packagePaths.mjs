@@ -49,7 +49,6 @@ export function resolvePackagedTargets(opts = {}) {
       ionIndex: path.join(resourcesRoot, "ion-dist/index.html"),
       residualIonIndex: path.join(resourcesRoot, "ion-dist/index.html"),
       appAsar: path.join(resourcesRoot, "app.asar"),
-      claudeCodeBinary: path.join(resourcesRoot, "claude-code-bin/claude.exe"),
       webLabel: "resources/product-web + resources/ion-dist residual",
     };
   }
@@ -78,7 +77,6 @@ export function resolvePackagedTargets(opts = {}) {
     residualIonIndex: path.join(resourcesRoot, "ion-dist/index.html"),
     appAsar: path.join(resourcesRoot, "app.asar"),
     infoPlist: path.join(packagedRoot, "Contents/Info.plist"),
-    claudeCodeBinary: path.join(resourcesRoot, "claude-code-bin/claude"),
     webLabel: "Contents/Resources/product-web + ion-dist residual",
   };
 }
@@ -230,92 +228,6 @@ export function readIonBuildId(ionIndexPath) {
   if (!fs.existsSync(ionIndexPath)) return null;
   const html = fs.readFileSync(ionIndexPath, "utf8");
   return html.match(/data-build-id="([^"]+)"/)?.[1] ?? "unknown";
-}
-
-/**
- * Host platform key matching scripts/copy-claude-code-binary.mjs.
- * @param {{ platform?: string, arch?: string }} [opts]
- */
-export function hostClaudeCodePlatformKey(opts = {}) {
-  const platform = opts.platform ?? process.platform;
-  const archRaw = opts.arch ?? process.arch;
-  const arch = archRaw === "arm64" ? "arm64" : "x64";
-  if (platform === "darwin") return `darwin-${arch}`;
-  if (platform === "win32") return `win32-${arch}`;
-  if (platform === "linux") return `linux-${arch}`;
-  return `${platform}-${arch}`;
-}
-
-/**
- * Prune foreign Claude Code CLI platforms from a packaged (or resources) tree.
- * Host-loop only spawns host binary; multi-platform matrix is optional fat tree.
- *
- * Keeps:
- *   platforms/<hostKey>/
- *   top-level host binary (claude / claude.exe)
- *   top-level vendor/ (host rg)
- * Removes:
- *   platforms/<other>/
- *   foreign top-level binary (e.g. claude.exe on darwin)
- *
- * @param {string} claudeCodeBinRoot  path to .../claude-code-bin
- * @param {{ platform?: string, arch?: string, allPlatforms?: boolean }} [opts]
- * @returns {{ pruned: boolean, hostKey: string, removedPlatforms: string[], removedTopLevel: string[] }}
- */
-export function pruneClaudeCodeBinToHost(claudeCodeBinRoot, opts = {}) {
-  const allPlatforms =
-    opts.allPlatforms === true || process.env.CLAUDE_CODE_ALL_PLATFORMS === "1";
-  const hostKey = hostClaudeCodePlatformKey(opts);
-  const removedPlatforms = [];
-  const removedTopLevel = [];
-  if (allPlatforms || !fs.existsSync(claudeCodeBinRoot)) {
-    return { pruned: false, hostKey, removedPlatforms, removedTopLevel };
-  }
-
-  const platformsRoot = path.join(claudeCodeBinRoot, "platforms");
-  if (fs.existsSync(platformsRoot)) {
-    for (const name of fs.readdirSync(platformsRoot)) {
-      if (name === hostKey) continue;
-      const full = path.join(platformsRoot, name);
-      try {
-        fs.rmSync(full, { recursive: true, force: true });
-        removedPlatforms.push(name);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
-  const platform = opts.platform ?? process.platform;
-  // Drop foreign top-level binary only.
-  if (platform === "darwin" || platform === "linux") {
-    const foreignExe = path.join(claudeCodeBinRoot, "claude.exe");
-    if (fs.existsSync(foreignExe)) {
-      try {
-        fs.rmSync(foreignExe, { force: true });
-        removedTopLevel.push("claude.exe");
-      } catch {
-        /* ignore */
-      }
-    }
-  } else if (platform === "win32") {
-    const foreignUnix = path.join(claudeCodeBinRoot, "claude");
-    if (fs.existsSync(foreignUnix)) {
-      try {
-        fs.rmSync(foreignUnix, { force: true });
-        removedTopLevel.push("claude");
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
-  return {
-    pruned: removedPlatforms.length > 0 || removedTopLevel.length > 0,
-    hostKey,
-    removedPlatforms,
-    removedTopLevel,
-  };
 }
 
 /**

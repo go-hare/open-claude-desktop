@@ -13,8 +13,6 @@ const electronBinary = path.join(root, "node_modules/.bin/electron");
 const electronCli = path.join(root, "node_modules/electron/cli.js");
 const userDataDir = path.join(root, packaged ? ".smoke-user-data-packaged" : ".smoke-user-data");
 const resourcesRoot = packaged ? targets.resourcesRoot : path.join(root, "resources");
-const claudeCodeBinaryName = process.platform === "win32" ? "claude.exe" : "claude";
-const expectedClaudeCodeBinary = path.join(resourcesRoot, "claude-code-bin", claudeCodeBinaryName);
 
 async function exists(filePath) {
   try {
@@ -174,15 +172,6 @@ async function writeRuntimeCoverage(signal) {
 child.on("close", async (code, signal) => {
   clearTimeout(timeout);
   if (marker?.ok) {
-    const claudeCodeBinaryExists = await exists(expectedClaudeCodeBinary);
-    const markerClaudeCode = marker.claudeCode ?? {};
-    const usesBundledExecutable = markerClaudeCode.usesBundledExecutable === true;
-    if (packaged && (!claudeCodeBinaryExists || !usesBundledExecutable)) {
-      console.error(
-        `[claudex-smoke-runner] claude code binary check failed exists=${claudeCodeBinaryExists} usesBundled=${usesBundledExecutable} expected=${expectedClaudeCodeBinary}`,
-      );
-      process.exit(1);
-    }
     await writeRuntimeCoverage(signal);
     console.log(`[claudex-smoke-runner] ok packaged=${packaged} signal=${signal ?? "none"}`);
     process.exit(0);

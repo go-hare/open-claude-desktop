@@ -73,7 +73,6 @@ function dedupeAndSort(commands: SupportedSlashCommand[]): SupportedSlashCommand
 }
 
 function getCommandsFromTemporaryQuery(cwd: string): Promise<SupportedSlashCommand[]> {
-  const executable = defaultClaudeExecutable();
   const args = ["--print", "--output-format", "stream-json", "--input-format", "text", "--verbose", "--bare", "/help"];
   return new Promise((resolve) => {
     let settled = false;
@@ -93,6 +92,7 @@ function getCommandsFromTemporaryQuery(cwd: string): Promise<SupportedSlashComma
 
     void (async () => {
       try {
+        const executable = await defaultClaudeExecutable();
         child = await spawnClaude(executable, args, cwd);
       } catch {
         finish([]);

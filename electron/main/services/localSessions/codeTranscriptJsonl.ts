@@ -49,6 +49,30 @@ const PARSE_YIELD_EVERY = 200;
 const TRANSCRIPT_CACHE_CAPACITY = 8;
 
 /**
+ * Official ez one-shots `[start,end)` into a single utf8 string. V8's max string is
+ * ~512MB (`kMaxLength`); a long-running CLI jsonl (tool_result dumps) crosses that
+ * and `toString` throws `ERR_STRING_TOO_LONG`. `getTranscript` then treats disk as
+ * empty and the UI keeps only live task bookends — history disappears.
+ * Bounded chunks keep ez/Az line semantics without a giant string.
+ */
+const DEFAULT_JSONL_READ_CHUNK_BYTES = 4 * 1024 * 1024;
+let jsonlReadChunkBytes = DEFAULT_JSONL_READ_CHUNK_BYTES;
+
+/** Test helper — force leftover-across-chunk parsing. */
+export function setCodeTranscriptReadChunkBytesForTests(bytes?: number): void {
+  jsonlReadChunkBytes = bytes && bytes > 0 ? bytes : DEFAULT_JSONL_READ_CHUNK_BYTES;
+}
+
+/**
+ * Renderer IPC clone budget. CLI jsonl stores full Read dumps on user tool_result
+ * AND again on toolUseResult (~500MB on long sessions). Structured-clone then
+ * fails the same way as ez toString, so history never reaches the web.
+ * Tool chips only need identity + a preview; keep agentId for subagent merge.
+ */
+const RENDERER_TOOL_RESULT_CHARS = 32 * 1024;
+const TOOL_USE_RESULT_KEEP_KEYS = ["agentId", "status", "toolUseId", "tool_use_id", "type"] as const;
+
+/**
  * Metadata only needs early fields (cwd / title / first user) + last timestamp.
  * Cap head/tail windows so a 400MB jsonl never fully enters V8 for list/title refresh.
  */
@@ -235,6 +259,159 @@ async function readByteWindow(
   }
 }
 
+type JsonlLineHandler = (record: JsonlRecord) => void;
+
+/**
+ * ez + Az without materializing the whole window as one string.
+ * Incomplete trailing line is left unparsed (official ez snaps to last newline).
+ */
+async function parseJsonlFile(
+  filePath: string,
+  start: number,
+  end: number,
+  onLine: JsonlLineHandler,
+): Promise<number> {
+  const length = end - start;
+  if (length <= 0) return 0;
+  const handle = await open(filePath, "r");
+  try {
+    const chunk = Buffer.alloc(Math.min(jsonlReadChunkBytes, length));
+    let leftover = Buffer.alloc(0);
+    let consumed = 0;
+    let lineCount = 0;
+    while (consumed < length) {
+      const toRead = Math.min(chunk.length, length - consumed);
+      const { bytesRead } = await handle.read(chunk, 0, toRead, start + consumed);
+      if (bytesRead === 0) break;
+      consumed += bytesRead;
+      leftover = leftover.length === 0
+        ? Buffer.from(chunk.subarray(0, bytesRead))
+        : Buffer.concat([leftover, chunk.subarray(0, bytesRead)]);
+      let offset = 0;
+      while (true) {
+        const nl = leftover.indexOf(10, offset);
+        if (nl === -1) break;
+        if (nl > offset) {
+          const line = leftover.toString("utf8", offset, nl);
+          if (line.trim()) {
+            try {
+              onLine(asRecord(JSON.parse(line)));
+            } catch {
+              // Official Az: skip a bad jsonl line.
+            }
+            lineCount += 1;
+            if (lineCount % PARSE_YIELD_EVERY === 0) {
+              await new Promise<void>((resolve) => setImmediate(resolve));
+            }
+          }
+        }
+        offset = nl + 1;
+      }
+      leftover = offset === 0 ? leftover : Buffer.from(leftover.subarray(offset));
+    }
+    return consumed - leftover.length;
+  } finally {
+    await handle.close();
+  }
+}
+
+function truncateUtf16(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}\n…`;
+}
+
+function compactToolResultInner(content: unknown): unknown {
+  if (typeof content === "string") return truncateUtf16(content, RENDERER_TOOL_RESULT_CHARS);
+  if (!Array.isArray(content)) return compactHeavyObject(content);
+  let changed = false;
+  const next = content.map((block) => {
+    const compacted = compactContentBlock(block);
+    if (compacted !== block) changed = true;
+    return compacted;
+  });
+  return changed ? next : content;
+}
+
+function compactContentBlock(block: unknown): unknown {
+  if (typeof block === "string") return truncateUtf16(block, RENDERER_TOOL_RESULT_CHARS);
+  const rec = asRecord(block);
+  if (Object.keys(rec).length === 0) return block;
+  if (rec.type === "image") {
+    const source = asRecord(rec.source);
+    const data = typeof source.data === "string" ? source.data : typeof rec.data === "string" ? rec.data : undefined;
+    if (data && data.length > RENDERER_TOOL_RESULT_CHARS) {
+      if (rec.source && typeof rec.source === "object") {
+        return { ...rec, source: { ...source, data: "", truncated: true } };
+      }
+      return { ...rec, data: "", truncated: true };
+    }
+    return block;
+  }
+  if (rec.type === "tool_result") {
+    const nextInner = compactToolResultInner(rec.content);
+    if (nextInner === rec.content) return block;
+    return { ...rec, content: nextInner };
+  }
+  if (typeof rec.text === "string" && rec.text.length > RENDERER_TOOL_RESULT_CHARS) {
+    return { ...rec, text: truncateUtf16(rec.text, RENDERER_TOOL_RESULT_CHARS) };
+  }
+  return block;
+}
+
+function compactHeavyObject(value: unknown): unknown {
+  if (value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return compactToolResultInner(value);
+  const rec = asRecord(value);
+  if (typeof rec.data === "string" && rec.data.length > RENDERER_TOOL_RESULT_CHARS) {
+    return { ...rec, data: "", truncated: true };
+  }
+  if (typeof rec.text === "string" && rec.text.length > RENDERER_TOOL_RESULT_CHARS) {
+    return { ...rec, text: truncateUtf16(rec.text, RENDERER_TOOL_RESULT_CHARS) };
+  }
+  return value;
+}
+
+function compactToolUseResult(value: unknown): unknown {
+  if (value == null || typeof value !== "object") {
+    return typeof value === "string" ? truncateUtf16(value, RENDERER_TOOL_RESULT_CHARS) : value;
+  }
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(value);
+  } catch {
+    return { truncated: true };
+  }
+  if (encoded.length <= RENDERER_TOOL_RESULT_CHARS) return value;
+  const rec = asRecord(value);
+  const keep: JsonlRecord = { truncated: true };
+  for (const key of TOOL_USE_RESULT_KEEP_KEYS) {
+    if (rec[key] !== undefined) keep[key] = rec[key];
+  }
+  return keep;
+}
+
+/** Drop duplicate Read dumps so getTranscript can clone across IPC. */
+export function compactCodeTranscriptEvent(event: unknown): unknown {
+  return compactHeavyTranscriptFields(asRecord(event));
+}
+
+function compactHeavyTranscriptFields(record: JsonlRecord): JsonlRecord {
+  const message = asRecord(record.message);
+  let nextMessage: JsonlRecord | undefined;
+  if (Array.isArray(message.content)) {
+    const content = compactToolResultInner(message.content);
+    if (content !== message.content) nextMessage = { ...message, content };
+  } else if (typeof message.content === "string" && message.content.length > RENDERER_TOOL_RESULT_CHARS) {
+    nextMessage = { ...message, content: truncateUtf16(message.content, RENDERER_TOOL_RESULT_CHARS) };
+  }
+  const nextTur = compactToolUseResult(record.toolUseResult);
+  if (!nextMessage && nextTur === record.toolUseResult) return record;
+  const next: JsonlRecord = { ...record };
+  if (nextMessage) next.message = nextMessage;
+  if (nextTur !== record.toolUseResult) next.toolUseResult = nextTur;
+  return next;
+}
+
 /**
  * Official stripThinkingBlocks residual:
  * filter message.content blocks with type thinking / redacted_thinking.
@@ -395,63 +572,69 @@ function sortByTimestamp(events: unknown[]): void {
   });
 }
 
-async function parseMainChunk(
-  content: string,
+function ingestMainRecord(
+  record: JsonlRecord,
   into: unknown[],
   agentLaunches: Map<string, string | undefined>,
-): Promise<void> {
-  for await (const line of iterateLines(content)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const record = asRecord(parsed);
-    const type = asString(record.type);
-    if (!type || !CODE_TRANSCRIPT_TYPES.has(type)) continue;
+): void {
+  const type = asString(record.type);
+  if (!type || !CODE_TRANSCRIPT_TYPES.has(type)) return;
 
-    if (type === "assistant") {
-      const stripped = stripThinkingBlocks(record);
-      if (stripped !== null) into.push(stripped);
-    } else {
-      into.push(record);
+  const launch = extractAgentLaunch(record);
+  if (launch) {
+    // Prefer first non-empty parent tool id; fill parent if an earlier row only had agentId.
+    const previous = agentLaunches.get(launch.agentId);
+    if (!agentLaunches.has(launch.agentId)) {
+      agentLaunches.set(launch.agentId, launch.parentToolUseId);
+    } else if (!previous && launch.parentToolUseId) {
+      agentLaunches.set(launch.agentId, launch.parentToolUseId);
     }
+  }
 
-    const launch = extractAgentLaunch(record);
-    if (launch) {
-      // Prefer first non-empty parent tool id; fill parent if an earlier row only had agentId.
-      const previous = agentLaunches.get(launch.agentId);
-      if (!agentLaunches.has(launch.agentId)) {
-        agentLaunches.set(launch.agentId, launch.parentToolUseId);
-      } else if (!previous && launch.parentToolUseId) {
-        agentLaunches.set(launch.agentId, launch.parentToolUseId);
-      }
-    }
+  if (type === "assistant") {
+    const stripped = stripThinkingBlocks(record);
+    if (stripped !== null) into.push(compactHeavyTranscriptFields(asRecord(stripped)));
+  } else {
+    into.push(compactHeavyTranscriptFields(record));
   }
 }
 
-async function parseAgentChunk(
-  content: string,
+function ingestAgentRecord(
+  record: JsonlRecord,
   into: unknown[],
   parentToolUseId?: string,
-): Promise<void> {
-  for await (const line of iterateLines(content)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (!isAgentMergeMessage(parsed)) continue;
-    const record = asRecord(parsed);
-    // Keep tool rows as-is; strip thinking on assistant text rows so the pane is readable.
-    const event =
-      record.type === "assistant" && !isAgentToolMessage(parsed)
-        ? stripThinkingBlocks(record) ?? parsed
-        : parsed;
-    into.push(stampAgentParent(event, parentToolUseId));
-  }
+): void {
+  if (!isAgentMergeMessage(record)) return;
+  // Keep tool rows as-is; strip thinking on assistant text rows so the pane is readable.
+  const event =
+    record.type === "assistant" && !isAgentToolMessage(record)
+      ? stripThinkingBlocks(record) ?? record
+      : record;
+  into.push(stampAgentParent(compactHeavyTranscriptFields(asRecord(event)), parentToolUseId));
+}
+
+async function parseMainFile(
+  filePath: string,
+  start: number,
+  end: number,
+  into: unknown[],
+  agentLaunches: Map<string, string | undefined>,
+): Promise<number> {
+  return parseJsonlFile(filePath, start, end, (record) => {
+    ingestMainRecord(record, into, agentLaunches);
+  });
+}
+
+async function parseAgentFile(
+  filePath: string,
+  start: number,
+  end: number,
+  into: unknown[],
+  parentToolUseId?: string,
+): Promise<number> {
+  return parseJsonlFile(filePath, start, end, (record) => {
+    ingestAgentRecord(record, into, parentToolUseId);
+  });
 }
 
 async function loadAgentFile(
@@ -465,12 +648,11 @@ async function loadAgentFile(
   try {
     const stat = await lstat(filePath);
     if (!stat.isFile()) return { agentId, agentMsgs: [] };
-    const window = await readByteWindow(filePath, 0, stat.size);
     const agentMsgs: unknown[] = [];
-    await parseAgentChunk(window.content, agentMsgs, parentToolUseId);
+    const bytesConsumed = await parseAgentFile(filePath, 0, stat.size, agentMsgs, parentToolUseId);
     return {
       agentId,
-      stat: { mtimeMs: stat.mtimeMs, size: window.bytesConsumed, parentToolUseId },
+      stat: { mtimeMs: stat.mtimeMs, size: bytesConsumed, parentToolUseId },
       agentMsgs,
       filePath,
     };
@@ -563,9 +745,14 @@ export async function readCodeTranscript(
         const agentStats = new Map(cached.agentStats);
         const newAgentLaunches = new Map<string, string | undefined>();
 
-        const delta = await readByteWindow(mainPath, cached.mainSize, mainStat.size);
-        await parseMainChunk(delta.content, messages, newAgentLaunches);
-        const mainSize = cached.mainSize + delta.bytesConsumed;
+        const deltaBytes = await parseMainFile(
+          mainPath,
+          cached.mainSize,
+          mainStat.size,
+          messages,
+          newAgentLaunches,
+        );
+        const mainSize = cached.mainSize + deltaBytes;
 
         // Agents already known: only parse growth; drop from "new" set.
         for (const known of agentStats.keys()) newAgentLaunches.delete(known);
@@ -583,12 +770,17 @@ export async function readCodeTranscript(
               });
               return;
             }
-            const chunk = await readByteWindow(filePath, prev.size, cur.size);
             const extra: unknown[] = [];
-            await parseAgentChunk(chunk.content, extra, prev.parentToolUseId);
+            const chunkBytes = await parseAgentFile(
+              filePath,
+              prev.size,
+              cur.size,
+              extra,
+              prev.parentToolUseId,
+            );
             agentStats.set(agentId, {
               mtimeMs: cur.mtimeMs,
-              size: prev.size + chunk.bytesConsumed,
+              size: prev.size + chunkBytes,
               parentToolUseId: prev.parentToolUseId,
             });
             return extra;
@@ -639,18 +831,16 @@ export async function readCodeTranscript(
   }
 
   // ---- full parse ----
-  let mainWindow: { content: string; bytesConsumed: number };
+  const messages: unknown[] = [];
+  const agentLaunches = new Map<string, string | undefined>();
+  let mainBytesConsumed = 0;
   try {
-    mainWindow = await readByteWindow(mainPath, 0, mainStat.size);
+    mainBytesConsumed = await parseMainFile(mainPath, 0, mainStat.size, messages, agentLaunches);
   } catch {
     projectDirCache.delete(cliSessionId);
     transcriptCache.delete(cliSessionId);
     return [];
   }
-
-  const messages: unknown[] = [];
-  const agentLaunches = new Map<string, string | undefined>();
-  await parseMainChunk(mainWindow.content, messages, agentLaunches);
 
   const agentStats = new Map<string, AgentStat>();
   if (agentLaunches.size > 0) {
@@ -673,7 +863,7 @@ export async function readCodeTranscript(
       projectDir,
       mainMtimeMs: mainStat.mtimeMs,
       mainIno: mainStat.ino,
-      mainSize: mainWindow.bytesConsumed,
+      mainSize: mainBytesConsumed,
       agentStats,
       messages,
     });

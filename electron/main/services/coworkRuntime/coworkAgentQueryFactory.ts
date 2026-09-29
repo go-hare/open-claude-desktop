@@ -430,7 +430,7 @@ export function buildCoworkSdkOptions(
       : {}),
     model: input.model,
     pathToClaudeCodeExecutable: input.hostLoopMode
-      ? options.executable ?? resolveCoworkClaudeExecutable()
+      ? options.executable
       : // Official dual-exec: guest binary at /usr/local/bin/claude
         "/usr/local/bin/claude",
     permissionMode: permissionMode(input.permissionMode),
@@ -487,6 +487,9 @@ export async function buildCoworkSdkOptionsAsync(
     { ...(sdkOptions.env ?? {}) },
     { userDataPath },
   );
+  if (input.hostLoopMode && !sdkOptions.pathToClaudeCodeExecutable) {
+    sdkOptions.pathToClaudeCodeExecutable = await resolveCoworkClaudeExecutable();
+  }
   return sdkOptions;
 }
 

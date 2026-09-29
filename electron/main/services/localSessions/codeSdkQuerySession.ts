@@ -21,7 +21,6 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import fs from "node:fs";
-import path from "node:path";
 import {
   buildClaudeCliSpawnEnv,
   enrichClaudeCliSpawnEnvWithEnterpriseAuth,
@@ -32,9 +31,11 @@ import { CoworkAsyncInputQueue } from "../coworkSessions/coworkAsyncInputQueue";
 import { getClaudePreviewCliMcpConfigCache, setClaudePreviewSessionCwd } from "../launch/claudePreviewHostRegistry";
 import type { LocalSession, LocalToolPermissionRequest } from "./localSessionStore";
 import { resolveCodeTranscriptPath } from "./codeTranscriptJsonl";
+import { resolveOfficialClaudeCodeExecutable } from "./officialClaudeCodeManager";
 import { mergeCodeQueryMcpServers } from "./codeDesktopMcpResidual";
 import { collectCcdSdkPlugins } from "./codeCcdPluginsResidual";
 import { createSshSpawnClaudeCodeProcess, resolveSshRemoteCwd } from "./sshCliSpawn";
+import { ensureSshRemoteClaudeExecutable } from "./sshRemoteCliInstall";
 import { rewriteCcdPluginsForSsh } from "./sshHostPipePluginSync";
 import { normalizeSessionSshConfig } from "./sshTranscriptSync";
 import { buildCodeManagedSettingsResidual } from "./codeSdkManagedSettingsResidual";
@@ -131,6 +132,13 @@ export type CodeSdkActiveSession = {
   sawResult: boolean;
   sessionId: string;
   /**
+   * Stop drained a queued follow-up onto this query. The interrupted turn's
+   * trailing parent `result` must not markNotRunning — the sidebar would go
+   * idle while that follow-up is already streaming. Cleared once the follow-up
+   * itself emits output, so its own result can still settle.
+   */
+  followUpAwaitingOutput: boolean;
+  /**
    * densable ACK'd interrupt but QueryEngine has not yet yielded
    * createUserInterruptionMessage / parent result. Leftover parent generation
    * must not paint (official HTTP abort never emits it).
@@ -166,32 +174,8 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function hostPlatformKey(): string {
-  const arch = process.arch === "arm64" ? "arm64" : "x64";
-  if (process.platform === "win32") return `win32-${arch}`;
-  if (process.platform === "darwin") return `darwin-${arch}`;
-  return `linux-${arch}`;
-}
-
-function resolveCodeExecutable(): string {
-  if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE;
-  const binaryName = process.platform === "win32" ? "claude.exe" : "claude";
-  const roots = [
-    process.env.CLAUDE_DESKTOP_RESOURCES_ROOT
-      ? path.join(process.env.CLAUDE_DESKTOP_RESOURCES_ROOT, "claude-code-bin")
-      : undefined,
-    process.resourcesPath ? path.join(process.resourcesPath, "claude-code-bin") : undefined,
-    path.resolve(process.cwd(), "resources", "claude-code-bin"),
-  ].filter((value): value is string => Boolean(value));
-  for (const root of roots) {
-    for (const candidate of [
-      path.join(root, "platforms", hostPlatformKey(), binaryName),
-      path.join(root, binaryName),
-    ]) {
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  }
-  return process.platform === "win32" ? "claude.exe" : "claude";
+async function resolveCodeExecutable(): Promise<string> {
+  return resolveOfficialClaudeCodeExecutable();
 }
 
 type PendingPermissionWaiter = {
@@ -317,7 +301,9 @@ async function buildCodeSdkOptions(
     // Official warm: always allowDangerouslySkipPermissions:true on SDK options bag
     // (permissionMode still clamps bypass without desktop gi flag).
     allowDangerouslySkipPermissions: true,
-    pathToClaudeCodeExecutable: resolveCodeExecutable(),
+    pathToClaudeCodeExecutable: session.sshConfig
+      ? await ensureSshRemoteClaudeExecutable(session.sshConfig)
+      : await resolveCodeExecutable(),
     permissionMode: mode ?? "default",
     canUseTool,
     settingSources: ["user", "project", "local"],
@@ -431,9 +417,9 @@ async function buildCodeSdkOptions(
       sshConfig: session.sshConfig,
       remoteCwd: resolveSshRemoteCwd(session),
     });
-    // Remote binary name (official pathToClaudeCodeExecutable = o.cliPath ?? "claude").
-    options.pathToClaudeCodeExecutable =
-      process.env.CLAUDE_SSH_REMOTE_EXECUTABLE || "claude";
+    // Official configureSSHSpawn: A.pathToClaudeCodeExecutable = o.cliPath ?? "claude".
+    // Host-pipe subset: Her-equivalent install into ~/.claude/remote/ccd-cli/<VOe>/claude.
+    // Already stamped above via ensureSshRemoteClaudeExecutable.
   }
 
   // Official warm options residual (flag-gated only — never invent on):
@@ -909,6 +895,7 @@ export async function createCodeSdkActiveSession(input: {
     sawInit: false,
     sawResult: false,
     sessionId,
+    followUpAwaitingOutput: false,
     abortObservedPending: false,
   };
 

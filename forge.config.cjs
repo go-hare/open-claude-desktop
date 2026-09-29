@@ -6,7 +6,6 @@ const resourcesDir = path.join(root, "resources");
 const iconPath = path.join(resourcesDir, "electron");
 const ionDistRoot = path.join(resourcesDir, "ion-dist");
 const originalRuntimeRoot = path.join(resourcesDir, "original-runtime-node_modules");
-const claudeCodeBinRoot = path.join(resourcesDir, "claude-code-bin");
 const extraResource = [];
 const electronVersion = require("electron/package.json").version;
 const packagePlatform = process.env.CLAUDE_PACKAGE_PLATFORM || process.platform;
@@ -67,9 +66,6 @@ if (fs.existsSync(path.join(productWebRoot, "index.html"))) {
 }
 if (fs.existsSync(originalRuntimeRoot)) {
   extraResource.push(originalRuntimeRoot);
-}
-if (fs.existsSync(claudeCodeBinRoot)) {
-  extraResource.push(claudeCodeBinRoot);
 }
 
 // Official Hot() tray assets (TrayIconTemplate*.png / Tray-Win32*.ico) must sit in

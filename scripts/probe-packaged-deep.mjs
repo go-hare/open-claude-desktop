@@ -181,20 +181,6 @@ check(
 const asarMain = inspectPackagedAsarMain(targets.appAsar);
 check("asar product main", asarMain.ok, asarMain.reason || `chunks=${asarMain.hasChunks}`);
 
-const claudeName = process.platform === "win32" ? "claude.exe" : "claude";
-const claudePaths = [
-  path.join(targets.resourcesRoot, "claude-code-bin", claudeName),
-  path.join(
-    targets.resourcesRoot,
-    "claude-code-bin",
-    "platforms",
-    `${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`,
-    claudeName,
-  ),
-];
-const claudeHit = claudePaths.find((p) => fs.existsSync(p));
-check("bundled claude CLI present", Boolean(claudeHit), claudeHit || claudePaths.join(" | "));
-
 const setupAssets = [
   "resources/product-web/index.html",
   "resources/ion-dist/index.html",

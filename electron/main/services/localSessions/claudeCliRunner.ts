@@ -38,6 +38,21 @@ import {
   resolveCodeSdkPermission,
   type CodeSdkActiveSession,
 } from "./codeSdkQuerySession";
+import {
+  officialClaudeCodeExecutableCandidates,
+  resolveOfficialClaudeCodeExecutable,
+  resolveOfficialClaudeCodeExecutableSync,
+} from "./officialClaudeCodeManager";
+
+/**
+ * Follow-up parent assistant (not leftover stream_event of the interrupted turn).
+ * Nested tool rows do not count.
+ */
+function isParentTurnOutput(message: Record<string, unknown>): boolean {
+  if (message.type !== "assistant") return false;
+  const parent = message.parent_tool_use_id ?? message.parentToolUseId;
+  return parent == null || parent === "";
+}
 
 type RunnerCallbacks = {
   onEvent: (event: Record<string, unknown>) => void;
@@ -79,7 +94,7 @@ const CONTROL_REQUEST_TIMEOUT_MS = 15_000;
  * query.interrupt() against this timeout; general control_request stays 15s.
  */
 const OFFICIAL_INTERRUPT_TIMEOUT_MS = 1_500;
-/** CLI residual `MODEL_CONTEXT_WINDOW_DEFAULT` (claude-code-bin context.ts). */
+/** CLI residual `MODEL_CONTEXT_WINDOW_DEFAULT`. */
 const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000;
 /** Official / CLI model tags like `claude-sonnet-4-5[1m]` or `[200k]`. */
 const contextWindowPattern = /\[(\d+(?:\.\d+)?)\s*([km])\]/i;
@@ -153,58 +168,16 @@ function pushCliMcpConfig(args: string[], value: unknown): void {
   if (wire) pushJsonOption(args, "--mcp-config", wire);
 }
 
-function claudeBinaryName(): string {
-  return process.platform === "win32" ? "claude.exe" : "claude";
-}
-
-/** Same key layout as scripts/copy-claude-code-binary.mjs platforms/<key>/. */
-function hostPlatformKey(): string {
-  const arch = process.arch === "arm64" ? "arm64" : "x64";
-  if (process.platform === "darwin") return `darwin-${arch}`;
-  if (process.platform === "win32") return `win32-${arch}`;
-  if (process.platform === "linux") return `linux-${arch}`;
-  return `${process.platform}-${arch}`;
-}
-
-/**
- * Prefer platforms/<host>/claude (binary + vendor co-located). Top-level copy
- * is secondary — without sibling vendor Glob/Grep ENOENT on bunfs vendor path.
- */
-function claudeBinCandidatesUnder(root: string): string[] {
-  const binaryName = claudeBinaryName();
-  return [
-    path.join(root, "platforms", hostPlatformKey(), binaryName),
-    path.join(root, binaryName),
-  ];
-}
-
 export function bundledClaudeExecutableCandidates(): string[] {
-  const roots = [
-    process.env.CLAUDE_DESKTOP_RESOURCES_ROOT
-      ? path.join(process.env.CLAUDE_DESKTOP_RESOURCES_ROOT, "claude-code-bin")
-      : undefined,
-    process.resourcesPath ? path.join(process.resourcesPath, "claude-code-bin") : undefined,
-    path.resolve(process.cwd(), "resources", "claude-code-bin"),
-  ].filter((candidate): candidate is string => Boolean(candidate));
-  const candidates = roots.flatMap((root) => claudeBinCandidatesUnder(root));
-  return [...new Set(candidates)];
+  return officialClaudeCodeExecutableCandidates();
 }
 
 export function bundledClaudeExecutable(): string | undefined {
-  return bundledClaudeExecutableCandidates().find((candidate) => fs.existsSync(candidate));
+  return resolveOfficialClaudeCodeExecutableSync() ?? undefined;
 }
 
-export function defaultClaudeExecutable(): string {
-  if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE;
-  const bundled = bundledClaudeExecutable();
-  if (bundled) return bundled;
-  if (process.platform !== "win32") return "claude";
-  const candidates = [
-    process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "node_modules", "@go-hare", "claude-code", "bin", "claude.exe") : undefined,
-    process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe") : undefined,
-    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".bun", "bin", "claude.exe") : undefined,
-  ];
-  return candidates.find((candidate): candidate is string => Boolean(candidate && fs.existsSync(candidate))) ?? "claude.cmd";
+export async function defaultClaudeExecutable(): Promise<string> {
+  return resolveOfficialClaudeCodeExecutable();
 }
 
 /**
@@ -965,7 +938,7 @@ export class ClaudeCliRunner {
     effortLevels: string[] | null;
     ultracodeOfferable: boolean | null;
   } | null> {
-    const executable = defaultClaudeExecutable();
+    const executable = await defaultClaudeExecutable();
     const enterprise = resolveAppliedEnterpriseForSpawn();
     const normalizedModel = normalizeModel(model, enterprise);
     const args = [
@@ -1262,6 +1235,8 @@ export class ClaudeCliRunner {
       // Official drain is a new turn — leftover abort-pending generation of the
       // interrupted turn must not suppress follow-up stream_event/assistant.
       sdk.abortObservedPending = false;
+      // Trailing result of the turn we just stopped must not clear isRunning.
+      sdk.followUpAwaitingOutput = true;
       this.store.setRunning(sessionId, true, {
         kind: "claude-cli",
         executable: "sdk-query",
@@ -1325,14 +1300,23 @@ export class ClaudeCliRunner {
       return { status: "failed", error: "sessionId and taskId are required" };
     }
     const sdk = this.sdkSessions.get(sessionId);
-    if (!sdk) return { status: "no_turn" };
+    // No live Query: Host Tasks still shows a stale Running row. Closing it is
+    // the same as "No task found" — not a toast.
+    if (!sdk) return { status: "informed" };
     try {
       await sdk.query.stopTask(id);
       return { status: "informed" };
     } catch (error) {
+      const message = error instanceof Error ? error.message : "stopTask failed";
+      // CLI registry has no live task (stale Host Tasks row, e.g. 362m after
+      // process already dropped the bash). Official Xr onSuccess closes the
+      // row; "No task found" is the same end-state — not a toast + Running.
+      if (/no task found/i.test(message)) {
+        return { status: "informed" };
+      }
       return {
         status: "failed",
-        error: error instanceof Error ? error.message : "stopTask failed",
+        error: message,
       };
     }
   }
@@ -1890,9 +1874,21 @@ export class ClaudeCliRunner {
             if (eventType === "message") {
               const settleMsg = asRecord(asRecord(event).message);
               const active = this.sdkSessions.get(sessionId);
+              if (
+                active?.followUpAwaitingOutput
+                && shouldSignalTurnCompleteFromCliMessage(settleMsg)
+              ) {
+                // Interrupted turn's trailing parent result after drain.
+                // Keep isRunning so the sidebar stays on the follow-up.
+                return;
+              }
+              if (active && isParentTurnOutput(settleMsg)) {
+                active.followUpAwaitingOutput = false;
+              }
               if (active && shouldReassertRunningFromAssistantMessage(settleMsg, active.isRunning)) {
                 active.isRunning = true;
                 active.sawResult = false;
+                active.followUpAwaitingOutput = false;
                 this.store.setRunning(sessionId, true, {
                   kind: "claude-cli",
                   executable: "sdk-query",

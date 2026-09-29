@@ -22,7 +22,7 @@ const CLIS = {
   official_2_1_218: path.join(os.homedir(), ".local/bin/claude"),
   desktop_2_7_24: path.join(
     REPO,
-    "resources/claude-code-bin/platforms/darwin-arm64/claude",
+    "node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude",
   ),
 };
 

@@ -47,7 +47,7 @@
 ### 本机 host-loop 与 VM dual-exec
 
 - **默认产品路径是本机（host-loop）**，不要为日常 Code / Cowork 会话强行走虚拟机。
-- **Local Code 会话**（`claudeCliRunner.spawnClaude`）永远在本机 spawn 自带 CLI（`resources/claude-code-bin`），与 dual-exec 无关。
+- **Local Code 会话**永远在本机走 Agent SDK `query()`。CLI 由官方 Ta 下到 `userData/claude-code/<requiredVersion>`（pin 2.1.128），**不是** SDK 包内 native、**不是** `resources/claude-code-bin` / go-hare。
 - **Cowork**：`hostLoopMode: true` → 本机 SDK / host spawn；`hostLoopMode: false` → dual-exec guest + 可能 `startVM`。
 - 产品 GrowthBook kni（3p residual）默认打开 host-loop flag `1143815894`；无 `requireCoworkFullVmSandbox` / `forceDisableHostLoop` 时新会话应为本机。
 - **VM / dual-exec 代码必须保留**（官方 residual 对照与可选策略路径），禁止以“只要本机”为由删除 `coworkVm` / dual-exec 实现。

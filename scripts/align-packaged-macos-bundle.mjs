@@ -3,12 +3,11 @@
  *
  * Normal Electron model:
  *   - forge already packed OUR project resources/ into Contents/Resources
- *     (product-web, ion-dist, claude-code-bin, smol-bin, locale JSON, …)
+ *     (product-web, ion-dist, SDK native CLI, smol-bin, locale JSON, …)
  *   - This script only finalizes what forge cannot do alone:
  *       1) lift Resources/Helpers → Contents/Helpers (chrome-native-host path residual)
  *       2) inject runtime natives into app.asar (forge asar allowlist excludes node_modules)
- *       3) host-only prune of claude-code-bin
- *       4) product identity + adhoc codesign
+ *       3) product identity + adhoc codesign
  *
  * Package NEVER reads resources/original-claude.app or Downloads.
  * Assets must already live under resources/ (one-time: npm run sync:residual / sync:helpers).
@@ -24,7 +23,6 @@ import {
   OFFICIAL_BUNDLE_ID,
   PRODUCT_BUNDLE_ID,
   PRODUCT_NAME,
-  pruneClaudeCodeBinToHost,
   resolvePackagedTargets,
 } from "./packagePaths.mjs";
 
@@ -292,13 +290,6 @@ if (await exists(path.join(resourcesHelpers, "chrome-native-host"))) {
   );
 }
 
-// Host-only CLI prune (files already in package from forge extraResource).
-let claudeCodeBinPrune = null;
-const claudeCodeBinTarget = path.join(packagedResources, "claude-code-bin");
-if (await exists(claudeCodeBinTarget)) {
-  claudeCodeBinPrune = pruneClaudeCodeBinToHost(claudeCodeBinTarget, { platform: "darwin" });
-}
-
 // Runtime natives → app.asar (project resources/original-runtime-node_modules only).
 const appAsar = path.join(packagedResources, "app.asar");
 if (!(await exists(appAsar))) {
@@ -367,7 +358,6 @@ console.log(
       residualIonBuildId: residualBuildId,
       dualRoot: "product-web + ion-dist (forge-packed)",
       helpersPlaced,
-      claudeCodeBinPrune,
       smolPresent,
       localePresent,
       note: "No residual .app copy at package time. Assets must already be under resources/.",

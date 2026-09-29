@@ -55,12 +55,11 @@ import {
 import { getCoworkClaudeVmService } from "../services/coworkVm/coworkClaudeVm";
 import { getHardwareBuddyService } from "../services/buddy/hardwareBuddyService";
 import {
-  getClaudeCodeInstallStatus,
   grandPrixStatusResidual,
-  prepareClaudeCodeInstall,
   restartAfterVmpInstallResidual,
   simulatorAttachmentStateResidual,
 } from "./shellSoftTrueResidual";
+import { officialClaudeCodeManager } from "../services/localSessions/officialClaudeCodeManager";
 import { askClaudeResidual } from "../services/coworkArtifacts/coworkArtifactAskClaude";
 import { isCoworkGrowthBookFeatureOn } from "../services/coworkHostLoop/coworkGrowthBookFeatures";
 import {
@@ -1103,13 +1102,15 @@ export function registerFeatureHandlers(context: IpcHandlerContext): void {
       },
       /**
        * Official Tl residual via Ta.getStatus: not_installed|updating|ready|download_failed.
-       * Ready only when a real absolute Claude Code binary exists on disk.
        */
-      getStatus: async () => getClaudeCodeInstallStatus(),
+      getStatus: async () => officialClaudeCodeManager.getStatus(),
       /**
        * Official prepare residual: `{ success: ready, error? }` — no invent success.
        */
-      prepare: async () => prepareClaudeCodeInstall(),
+      prepare: async () => {
+        const result = await officialClaudeCodeManager.prepare();
+        return { success: result.ready, error: result.error };
+      },
       resolveLocalSettings: async (_event, workspacePath) => {
         const workspace = asString(workspacePath);
         const result: Record<string, unknown> = {};

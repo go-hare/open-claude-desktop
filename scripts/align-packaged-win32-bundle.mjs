@@ -5,7 +5,7 @@
  * electron-forge already emits:
  *   out/Claudex-win32-<arch>/Claudex.exe
  *   resources/app.asar
- *   resources/* extraResource (ion-dist residual, product-web, claude-code-bin, …)
+ *   resources/* extraResource (ion-dist residual, product-web, SDK native CLI, …)
  *
  * Dual-root residual (must match electronShellPaths + staticIonDist):
  *   primary SPA  → resources/product-web  (open-claude-web)
@@ -23,7 +23,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { injectPackagedAsarRuntime } from "./inject-packaged-asar-runtime.mjs";
 import {
-  pruneClaudeCodeBinToHost,
   readIonBuildId,
   resolvePackagedTargets,
 } from "./packagePaths.mjs";
@@ -35,7 +34,6 @@ const packagedExe = targets.binary;
 const packagedResources = targets.resourcesRoot;
 const productWebSource = path.join(projectRoot, "resources/product-web");
 const residualIonSource = path.join(projectRoot, "resources/ion-dist");
-const claudeCodeBinSource = path.join(projectRoot, "resources/claude-code-bin");
 const originalRuntimeSource = path.join(projectRoot, "resources/original-runtime-node_modules");
 const appIconIco = path.join(projectRoot, "resources/electron.ico");
 
@@ -151,17 +149,6 @@ const ionDistTarget = path.join(packagedResources, "ion-dist");
 await copyTree(productWebSource, productWebTarget);
 await copyTree(residualIonSource, ionDistTarget);
 
-let claudeCodeBinInjected = false;
-let claudeCodeBinPrune = null;
-if (existsSync(claudeCodeBinSource)) {
-  // Host-only: win package ships only platforms/win32-<arch> (+ top-level claude.exe).
-  pruneClaudeCodeBinToHost(claudeCodeBinSource, { platform: "win32" });
-  const claudeCodeBinTarget = path.join(packagedResources, "claude-code-bin");
-  await copyTree(claudeCodeBinSource, claudeCodeBinTarget);
-  claudeCodeBinPrune = pruneClaudeCodeBinToHost(claudeCodeBinTarget, { platform: "win32" });
-  claudeCodeBinInjected = true;
-}
-
 // Ensure extraResource runtime tree is present (may already be from forge).
 if (existsSync(originalRuntimeSource)) {
   const runtimeTarget = path.join(packagedResources, "original-runtime-node_modules");
@@ -192,14 +179,6 @@ if (residualBuildId === productBuildId) {
   );
 }
 
-const claudeExe = targets.claudeCodeBinary;
-const claudeExeExists = existsSync(claudeExe);
-if (!claudeExeExists) {
-  throw new Error(
-    `claude.exe missing after align: ${claudeExe}. Run npm run copy:claude-code-binary on Windows, then re-package.`,
-  );
-}
-
 // PE icon must be residual Claude mark (not stock Electron atom). Re-stamp after
 // forge so Explorer/taskbar pick up BMP+PNG ICO even when shell cache is sticky.
 const exeIconStamp = stampWin32ExeIcon(packagedExe);
@@ -218,9 +197,6 @@ console.log(
       productBuildId,
       residualIonBuildId: residualBuildId,
       dualRoot: "product-web primary + ion-dist residual",
-      claudeCodeBinInjected,
-      claudeCodeBinPrune,
-      claudeExeExists,
       asarRuntimeInjected: asarInject.ok,
       exeIconStamp,
       load: "app://localhost → resources/product-web (setup residual → ion-dist)",

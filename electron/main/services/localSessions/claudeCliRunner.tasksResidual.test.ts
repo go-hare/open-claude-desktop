@@ -62,6 +62,7 @@ function plantSdk(
     sawInit: true,
     sawResult: false,
     sessionId,
+    followUpAwaitingOutput: false,
     ...overrides,
   } as unknown as CodeSdkActiveSession;
   (
@@ -289,6 +290,80 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     expect(
       (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
     ).toBe(true);
+    expect(sdk.followUpAwaitingOutput).toBe(true);
+  });
+
+  it("drained follow-up ignores leftover parent result until follow-up assistant", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "first", cwd: "/tmp/proj", title: "leftover result skip" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    store.setCliSessionId(session.id, "cli-leftover-result");
+    let capturedOnEvent: ((event: Record<string, unknown>) => void) | null = null;
+    const enqueue = vi.fn();
+    createCodeSdkActiveSession.mockImplementation(async (opts: {
+      callbacks: CodeSdkSessionCallbacks;
+      sessionId: string;
+    }) => {
+      capturedOnEvent = opts.callbacks.onEvent;
+      return {
+        deferredSends: [{ text: "queued follow-up", request: {}, messageUuid: "q-left" }],
+        input: { enqueue, done: vi.fn() },
+        isRunning: true,
+        isStopping: false,
+        queryLoopEnded: false,
+        loop: Promise.resolve(),
+        pendingPermissions: new Map(),
+        query: {
+          interrupt: vi.fn(async () => undefined),
+          stopTask: vi.fn(async () => undefined),
+          close: vi.fn(),
+          setPermissionMode: vi.fn(async () => undefined),
+          setModel: vi.fn(async () => undefined),
+          applyFlagSettings: vi.fn(async () => true),
+          getContextUsage: vi.fn(async () => null),
+        },
+        sawInit: true,
+        sawResult: false,
+        sessionId: opts.sessionId,
+        followUpAwaitingOutput: false,
+        abortObservedPending: false,
+      } as unknown as CodeSdkActiveSession;
+    });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.warmSession(session.id)).resolves.toBe(true);
+    const sdk = (
+      runner as unknown as { sdkSessions: Map<string, CodeSdkActiveSession> }
+    ).sdkSessions.get(session.id);
+    expect(sdk).toBeTruthy();
+    await expect(runner.interrupt(session.id)).resolves.toEqual({ continued: true });
+    expect(sdk?.followUpAwaitingOutput).toBe(true);
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+
+    capturedOnEvent!({
+      type: "message",
+      sessionId: session.id,
+      message: { type: "result", subtype: "success" },
+    });
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+    expect(sdk?.followUpAwaitingOutput).toBe(true);
+
+    capturedOnEvent!({
+      type: "message",
+      sessionId: session.id,
+      message: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } },
+    });
+    expect(sdk?.followUpAwaitingOutput).toBe(false);
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+
+    capturedOnEvent!({
+      type: "message",
+      sessionId: session.id,
+      message: { type: "result", subtype: "success" },
+    });
+    expect(store.getSession(session.id)?.isRunning).toBe(false);
   });
 
   it("interrupt ACK after in-flight Stop drain is markNotRunning (official double signalTurnComplete)", async () => {
@@ -944,6 +1019,32 @@ describe("ClaudeCliRunner SDK residual (official LocalSessionManager)", () => {
     expect(
       (runner as unknown as { sdkSessions: Map<string, unknown> }).sdkSessions.has(session.id),
     ).toBe(true);
+    expect(store.getSession(session.id)?.isRunning).toBe(true);
+  });
+
+  it("stopTask with no live Query is informed (stale Host Tasks row)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "go", cwd: "/tmp/proj", title: "stale stop task" });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    await expect(runner.stopTask(session.id, "task-stale")).resolves.toEqual({ status: "informed" });
+  });
+
+  it("stopTask 'No task found' is informed (Xr onSuccess, not toast)", async () => {
+    const store = makeStore();
+    const session = store.start({ prompt: "go", cwd: "/tmp/proj", title: "missing task" });
+    store.setRunning(session.id, true, { kind: "claude-cli", startedAt: new Date().toISOString() });
+    const runner = new ClaudeCliRunner(store, {
+      onEvent: () => undefined,
+      onSessionUpdated: () => undefined,
+    });
+    const sdk = plantSdk(runner, session.id);
+    sdk.query.stopTask = vi.fn(async () => {
+      throw new Error("No task found");
+    });
+    await expect(runner.stopTask(session.id, "task-gone")).resolves.toEqual({ status: "informed" });
     expect(store.getSession(session.id)?.isRunning).toBe(true);
   });
 

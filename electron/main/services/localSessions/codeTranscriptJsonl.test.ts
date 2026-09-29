@@ -9,6 +9,7 @@ import {
   readCodeSessionMetadata,
   readCodeTranscript,
   resolveCodeTranscriptPath,
+  setCodeTranscriptReadChunkBytesForTests,
   stripThinkingBlocks,
 } from "./codeTranscriptJsonl";
 
@@ -16,6 +17,7 @@ const tempDirs: string[] = [];
 
 afterEach(() => {
   clearCodeTranscriptCaches();
+  setCodeTranscriptReadChunkBytesForTests();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -387,4 +389,71 @@ it("readCodeSessionMetadata: does not require whole-file read for large jsonl", 
   expect(meta?.cwd).toBe(cwd);
   expect(meta?.createdAt).toBe("2026-07-27T01:00:00.000Z");
   expect(meta?.updatedAt).toBe("2026-07-27T03:00:00.000Z");
+});
+
+it("readCodeTranscript: parses lines that span bounded read chunks", async () => {
+  const configDir = tempDir("code-tr-config-");
+  const cwd = "D:\\chunked";
+  const payload = "x".repeat(400);
+  writeCliJsonl(configDir, cwd, "sess-chunk", [
+    { type: "user", cwd, timestamp: "2026-07-27T01:00:00.000Z", message: { role: "user", content: payload } },
+    {
+      type: "assistant",
+      timestamp: "2026-07-27T01:00:01.000Z",
+      message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+    },
+  ]);
+  setCodeTranscriptReadChunkBytesForTests(64);
+  const events = await readCodeTranscript("sess-chunk", cwd, configDir);
+  expect(events).toHaveLength(2);
+  expect((events[0] as { message: { content: string } }).message.content).toBe(payload);
+});
+
+it("readCodeTranscript: truncates huge tool_result dumps for renderer IPC", async () => {
+  const configDir = tempDir("code-tr-config-");
+  const cwd = "D:\\huge-tr";
+  const dump = "FILE".repeat(20_000);
+  const imageData = "iVBORw0KGgo".repeat(8_000);
+  writeCliJsonl(configDir, cwd, "sess-tr", [
+    {
+      type: "user",
+      cwd,
+      timestamp: "2026-07-27T01:00:00.000Z",
+      uuid: "u-tr",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "call_1", content: dump }],
+      },
+      toolUseResult: { type: "file", file: { content: dump }, agentId: "sub1" },
+    },
+    {
+      type: "user",
+      cwd,
+      timestamp: "2026-07-27T01:00:01.000Z",
+      uuid: "u-img",
+      message: {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "call_2",
+          content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: imageData } }],
+        }],
+      },
+    },
+  ]);
+  const events = await readCodeTranscript("sess-tr", cwd, configDir);
+  expect(events).toHaveLength(2);
+  const row = events[0] as {
+    message: { content: Array<{ content: string }> };
+    toolUseResult: { truncated?: boolean; agentId?: string };
+  };
+  expect(row.message.content[0]?.content.length).toBeLessThan(dump.length);
+  expect(row.message.content[0]?.content).toContain("FILE");
+  expect(row.toolUseResult.truncated).toBe(true);
+  expect(row.toolUseResult.agentId).toBe("sub1");
+  const imageRow = events[1] as {
+    message: { content: Array<{ content: Array<{ source?: { data?: string; truncated?: boolean } }> }> };
+  };
+  expect(imageRow.message.content[0]?.content[0]?.source?.data).toBe("");
+  expect(imageRow.message.content[0]?.content[0]?.source?.truncated).toBe(true);
 });
