@@ -10,7 +10,7 @@
  *
  * Product: map existing coworkEnterpriseConfig readers only — never invent domains/tokens.
  */
-import type { Settings } from "@anthropic-ai/claude-agent-sdk";
+import type { Settings } from "@go-hare/claude-agent-sdk";
 import {
   resolveEnterpriseAllowedWorkspaceFolders,
   resolveEnterpriseForceLoginOrgUUIDs,

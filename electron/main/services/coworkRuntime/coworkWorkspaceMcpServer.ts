@@ -8,7 +8,7 @@
  * the official "Workspace unavailable" / allowlist deny messages — it does
  * **not** invent host-side bash.
  */
-import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, tool } from "@go-hare/claude-agent-sdk";
 import { z } from "zod";
 
 /** Official Cl */

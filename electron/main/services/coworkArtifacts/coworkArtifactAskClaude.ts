@@ -180,7 +180,7 @@ async function defaultRunArtifactSample(
   token: string,
 ): Promise<AskClaudeResult> {
   // Lazy import so unit tests without SDK still load residual gates.
-  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const { query } = await import("@go-hare/claude-agent-sdk");
   const samplePrompt = buildArtifactSamplePrompt(prompt, data);
   // Official G4-ish env + artifact_sample tags. Use localSessionEnv overlay so
   // 3p bag still applies when present; token only when OAuth residual returned one.

@@ -5,7 +5,7 @@ import path from "node:path";
 import type {
   SpawnOptions as ClaudeSpawnOptions,
   SpawnedProcess,
-} from "@anthropic-ai/claude-agent-sdk";
+} from "@go-hare/claude-agent-sdk";
 
 export const CLAUDE_CODE_OAUTH_TOKEN = "CLAUDE_CODE_OAUTH_TOKEN";
 export const CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR = "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR";

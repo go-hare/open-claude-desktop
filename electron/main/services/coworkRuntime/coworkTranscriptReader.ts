@@ -2,7 +2,7 @@ import {
   getSessionMessages,
   type GetSessionMessagesOptions,
   type SessionMessage,
-} from "@anthropic-ai/claude-agent-sdk";
+} from "@go-hare/claude-agent-sdk";
 import type {
   CoworkTranscriptOptions,
   CoworkTranscriptReader,

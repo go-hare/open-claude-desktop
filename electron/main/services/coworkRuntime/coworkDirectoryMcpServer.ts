@@ -11,7 +11,7 @@
  * with official messages. Dual-exec VM remount rwd, scratchpad promote iJA, and full
  * getVMPathContext VM mounts remain residual. No Anthropic share invent.
  */
-import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, tool } from "@go-hare/claude-agent-sdk";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";

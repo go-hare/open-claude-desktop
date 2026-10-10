@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import type {
   SpawnOptions as ClaudeSpawnOptions,
   SpawnedProcess,
-} from "@anthropic-ai/claude-agent-sdk";
+} from "@go-hare/claude-agent-sdk";
 import {
   getCoworkClaudeVmService,
   loadCoworkSwiftVm,

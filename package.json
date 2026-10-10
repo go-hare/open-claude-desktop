@@ -68,7 +68,7 @@
     "@ant/ipc-codegen": "file:vendor/ant/ipc-codegen",
     "@ant/rfb-client": "file:vendor/ant/rfb-client",
     "@ant/utils": "file:vendor/ant/utils",
-    "@anthropic-ai/claude-agent-sdk": "0.2.128",
+    "@go-hare/claude-agent-sdk": "0.3.289",
     "@anthropic-ai/claude-agent-sdk-future": "file:vendor/anthropic-ai/claude-agent-sdk-future",
     "@anthropic-ai/conway-client": "file:vendor/anthropic-ai/conway-client",
     "@anthropic-ai/electron-devtools-mcp": "file:vendor/anthropic-ai/electron-devtools-mcp",

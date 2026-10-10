@@ -1,17 +1,15 @@
 /**
- * Official ClaudeCodeManager residual (`index.js` jki / Ta).
+ * Host CLI for Query (`pathToClaudeCodeExecutable`).
  *
- * Host CLI is NOT the Agent SDK optional package and NOT go-hare.
- *   storageDir = userData/claude-code
- *   requiredVersion = VOe().version (2.1.128)
- *   darwin + bundle in manifest → claude.app.tar.zst → claude.app/Contents/MacOS/claude
- *   else → {binaryName}.zst
- *   ready = binary + sibling .verified
- *   CLAUDE_CODE_LOCAL_BINARY → initLocalBinary override
+ * Product spawn uses `@go-hare/claude-agent-sdk` optional native
+ * `@go-hare/claude-code-{platform}-{arch}/claude` (same resolver the SDK
+ * ProcessTransport uses when path is omitted). Ta `userData/claude-code/<VOe>`
+ * stays as fallback. SSH remote still uses Her zst materialize.
  *
- * LocalSessionManager.resolveBinaryPathFresh stamps options.pathToClaudeCodeExecutable.
+ * CLAUDE_CODE_EXECUTABLE / CLAUDE_CODE_LOCAL_BINARY still override.
  */
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
@@ -24,6 +22,8 @@ import {
   OFFICIAL_CLAUDE_CODE_RELEASE,
   type OfficialClaudeCodePlatformId,
 } from "./officialClaudeCodeRelease";
+
+const requireFromHere = createRequire(import.meta.url);
 
 const BUNDLE_REL = path.join("claude.app", "Contents", "MacOS", "claude");
 
@@ -60,6 +60,53 @@ function hostPlatform(): OfficialClaudeCodePlatformId {
     return arch === "arm64" ? "win32-arm64" : "win32-x64";
   }
   throw new Error(`Unsupported platform: ${process.platform}-${arch}`);
+}
+
+function goHareNativePackageName(platform = hostPlatform()): string {
+  return `@go-hare/claude-code-${platform}`;
+}
+
+function goHareNativeBinaryName(): string {
+  return process.platform === "win32" ? "claude.exe" : "claude";
+}
+
+/**
+ * `@go-hare/claude-agent-sdk` ProcessTransport resolves
+ * `@go-hare/claude-code-${platform}-${arch}/claude`. Prefer that for local Query.
+ */
+export function resolveGoHareClaudeCodeNative(): string | null {
+  const pkg = goHareNativePackageName();
+  const binary = goHareNativeBinaryName();
+  const roots: string[] = [];
+  try {
+    roots.push(path.dirname(requireFromHere.resolve(`${pkg}/package.json`)));
+  } catch {
+    /* not resolvable from this file */
+  }
+  try {
+    const sdkDir = path.dirname(requireFromHere.resolve("@go-hare/claude-agent-sdk/package.json"));
+    roots.push(path.join(sdkDir, "..", path.basename(pkg)));
+    roots.push(path.join(sdkDir, "..", "..", pkg));
+  } catch {
+    /* sdk not installed */
+  }
+  roots.push(path.join(process.cwd(), "node_modules", pkg));
+  if (typeof process.resourcesPath === "string" && process.resourcesPath) {
+    roots.push(path.join(process.resourcesPath, "app.asar.unpacked", "node_modules", pkg));
+    roots.push(path.join(process.resourcesPath, "node_modules", pkg));
+  }
+  for (const root of roots) {
+    const candidate = path.join(root, binary);
+    try {
+      if (fsSync.existsSync(candidate)) {
+        fsSync.accessSync(candidate, fsSync.constants.X_OK);
+        return candidate;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
 }
 
 function userDataRoot(): string {
@@ -447,6 +494,8 @@ export const officialClaudeCodeManager = new OfficialClaudeCodeManager();
 export async function resolveOfficialClaudeCodeExecutable(): Promise<string> {
   const envOverride = process.env.CLAUDE_CODE_EXECUTABLE;
   if (envOverride && fsSync.existsSync(envOverride)) return envOverride;
+  const native = resolveGoHareClaudeCodeNative();
+  if (native) return native;
   return officialClaudeCodeManager.resolveBinaryPathFresh();
 }
 
@@ -501,6 +550,8 @@ export function officialClaudeCodeExecutableCandidates(): string[] {
   const candidates: string[] = [];
   if (process.env.CLAUDE_CODE_EXECUTABLE) candidates.push(process.env.CLAUDE_CODE_EXECUTABLE);
   if (process.env.CLAUDE_CODE_LOCAL_BINARY) candidates.push(process.env.CLAUDE_CODE_LOCAL_BINARY);
+  const native = resolveGoHareClaudeCodeNative();
+  if (native) candidates.push(native);
   try {
     const targetPlatform = hostPlatform();
     const storage = path.join(userDataRoot(), "claude-code", OFFICIAL_CLAUDE_CODE_RELEASE.version);
@@ -520,6 +571,8 @@ export function officialClaudeCodeExecutableCandidates(): string[] {
 export function resolveOfficialClaudeCodeExecutableSync(): string | null {
   const envOverride = process.env.CLAUDE_CODE_EXECUTABLE;
   if (envOverride && fsSync.existsSync(envOverride)) return envOverride;
+  const native = resolveGoHareClaudeCodeNative();
+  if (native) return native;
   const local = process.env.CLAUDE_CODE_LOCAL_BINARY;
   if (local && fsSync.existsSync(local)) return local;
   const listed = officialClaudeCodeExecutableCandidates().find((item) => {

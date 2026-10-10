@@ -37,7 +37,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
+import type { SpawnedProcess, SpawnOptions } from "@go-hare/claude-agent-sdk";
 import {
   buildSshArgv,
   shellQuote,

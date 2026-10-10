@@ -1,6 +1,6 @@
 /**
- * Official VOe residual (app.asar) — ClaudeCodeManager requiredVersion pin.
- * Do not invent a different pin. Do not load SDK-package native or go-hare bins.
+ * Official VOe residual (app.asar) — Ta userData pin, used as fallback when
+ * `@go-hare/claude-code-*` native is missing. Local Query prefers go-hare native.
  */
 export const OFFICIAL_CLAUDE_CODE_RELEASE = {
   version: "2.1.128",

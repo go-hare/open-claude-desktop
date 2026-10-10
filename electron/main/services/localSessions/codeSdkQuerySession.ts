@@ -19,7 +19,7 @@ import {
   type Query,
   type SDKMessage,
   type SDKUserMessage,
-} from "@anthropic-ai/claude-agent-sdk";
+} from "@go-hare/claude-agent-sdk";
 import fs from "node:fs";
 import {
   buildClaudeCliSpawnEnv,

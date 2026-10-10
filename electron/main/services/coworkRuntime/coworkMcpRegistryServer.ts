@@ -3,7 +3,7 @@
  * tools search_mcp_registry / suggest_connectors / list_connectors
  * handleToolCall → xxi / Hxi / Pxi (directory bridge).
  */
-import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, tool } from "@go-hare/claude-agent-sdk";
 import { z } from "zod";
 import type { CoworkVmPathContext } from "../coworkSessions/coworkVmPathTranslation";
 import {

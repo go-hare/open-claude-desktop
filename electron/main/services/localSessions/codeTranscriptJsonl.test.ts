@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 import {
   clearCodeTranscriptCaches,
+  compactCodeTranscriptEvent,
   isAgentToolMessage,
   mangleCodeProjectDir,
   readCodeSessionMetadata,
@@ -118,6 +119,35 @@ it("stripThinkingBlocks: drops thinking / redacted_thinking; null when empty", (
       message: { content: [{ type: "thinking", thinking: "only" }] },
     }),
   ).toBeNull();
+});
+
+it("compactCodeTranscriptEvent: keeps user image base64 (Hb thumbs), truncates tool_result dumps", () => {
+  const png = "A".repeat(40 * 1024);
+  const compacted = compactCodeTranscriptEvent({
+    type: "user",
+    uuid: "u1",
+    message: {
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: png } },
+        { type: "text", text: "?" },
+      ],
+    },
+  }) as { message: { content: Array<Record<string, unknown>> } };
+  const image = compacted.message.content.find((block) => block.type === "image");
+  expect(image).toBeDefined();
+  expect((image?.source as { data?: string } | undefined)?.data).toBe(png);
+  expect(compacted.message.content.some((block) => block.type === "text" && block.text === "?")).toBe(true);
+
+  const dump = compactCodeTranscriptEvent({
+    type: "user",
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "t1", content: "R".repeat(40 * 1024) }],
+    },
+  }) as { message: { content: Array<{ content?: string }> } };
+  expect((dump.message.content[0]?.content ?? "").length).toBeLessThan(40 * 1024);
+  expect(dump.message.content[0]?.content).toMatch(/…$/);
 });
 
 it("isAgentToolMessage: official Utr residual", () => {

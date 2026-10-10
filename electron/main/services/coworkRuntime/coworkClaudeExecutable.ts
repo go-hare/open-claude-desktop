@@ -6,8 +6,8 @@ import {
 } from "../localSessions/officialClaudeCodeManager";
 
 /**
- * Official host-loop residual: same Ta CLI as Code Query
- * (userData/claude-code/<requiredVersion>). Dual-exec guest still uses
+ * Host-loop residual: same CLI as Code Query (`@go-hare/claude-code-*`
+ * native, Ta userData fallback). Dual-exec guest still uses
  * `/usr/local/bin/claude` in the factory.
  */
 export function coworkClaudeExecutableCandidates(): string[] {

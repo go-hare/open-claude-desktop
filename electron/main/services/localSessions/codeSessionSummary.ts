@@ -6,14 +6,14 @@
  *   consume → for await query → session_summary_result | session_summary_error
  *   stopSessionSummary(id) → query.close() → true if aborted
  *
- * Product: same fork path via @anthropic-ai/claude-agent-sdk query (not invent 1000-char dump).
+ * Product: same fork path via @go-hare/claude-agent-sdk query (not invent 1000-char dump).
  */
 import {
   query as sdkQuery,
   type Options,
   type Query,
   type SDKMessage,
-} from "@anthropic-ai/claude-agent-sdk";
+} from "@go-hare/claude-agent-sdk";
 import fs from "node:fs";
 import {
   buildClaudeCliSpawnEnv,

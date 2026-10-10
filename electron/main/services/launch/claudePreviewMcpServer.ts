@@ -15,7 +15,7 @@
  */
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, tool } from "@go-hare/claude-agent-sdk";
 import { z } from "zod";
 import type { LocalLaunchManager } from "./localLaunchManager";
 import type { LaunchPreviewViewManager } from "./launchPreviewViewManager";

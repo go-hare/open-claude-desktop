@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import type { SpawnOptions, SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
+import type { SpawnOptions, SpawnedProcess } from "@go-hare/claude-agent-sdk";
 import { expect, it, vi } from "vitest";
 import {
   CLAUDE_CODE_OAUTH_TOKEN,

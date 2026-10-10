@@ -17,7 +17,7 @@
  * natives load; otherwise honest refuse (no invent screenshots).
  */
 import { randomUUID } from "node:crypto";
-import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, tool } from "@go-hare/claude-agent-sdk";
 import { z } from "zod";
 import {
   bindSessionContext,

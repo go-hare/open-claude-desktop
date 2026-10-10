@@ -4,7 +4,7 @@
  *   B9e = "plugins" → list_plugins, search_plugins (Qde / $xi reverse-RPC)
  * suggest_plugin_install is pure render from tool args (no reverse-RPC) — omitted here.
  */
-import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, tool } from "@go-hare/claude-agent-sdk";
 import { z } from "zod";
 import type { CoworkVmPathContext } from "../coworkSessions/coworkVmPathTranslation";
 import {

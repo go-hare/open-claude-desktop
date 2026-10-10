@@ -8,7 +8,7 @@ import {
   type Query,
   type SDKUserMessage,
   type SpawnedProcess,
-} from "@anthropic-ai/claude-agent-sdk";
+} from "@go-hare/claude-agent-sdk";
 import { app } from "electron";
 import {
   createCoworkHostProcessAdapter,

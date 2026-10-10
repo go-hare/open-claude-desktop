@@ -325,37 +325,55 @@ function compactToolResultInner(content: unknown): unknown {
   if (!Array.isArray(content)) return compactHeavyObject(content);
   let changed = false;
   const next = content.map((block) => {
-    const compacted = compactContentBlock(block);
+    const compacted = compactContentBlock(block, true);
     if (compacted !== block) changed = true;
     return compacted;
   });
   return changed ? next : content;
 }
 
-function compactContentBlock(block: unknown): unknown {
+function compactMessageContent(content: unknown): unknown {
+  if (typeof content === "string") return truncateUtf16(content, RENDERER_TOOL_RESULT_CHARS);
+  if (!Array.isArray(content)) return compactHeavyObject(content);
+  let changed = false;
+  const next = content.map((block) => {
+    const compacted = compactContentBlock(block, false);
+    if (compacted !== block) changed = true;
+    return compacted;
+  });
+  return changed ? next : content;
+}
+
+function compactImageBlock(rec: JsonlRecord, source: JsonlRecord, data: string): JsonlRecord {
+  if (data.length <= RENDERER_TOOL_RESULT_CHARS) return rec;
+  if (rec.source && typeof rec.source === "object") {
+    return { ...rec, source: { ...source, data: "", truncated: true } };
+  }
+  return { ...rec, data: "", truncated: true };
+}
+
+function compactContentBlock(block: unknown, stripImages: boolean): unknown {
   if (typeof block === "string") return truncateUtf16(block, RENDERER_TOOL_RESULT_CHARS);
   const rec = asRecord(block);
   if (Object.keys(rec).length === 0) return block;
   if (rec.type === "image") {
+    // Official Hb thumbs: top-level user `type:image` + source.base64 must survive IPC.
+    // Nested tool_result screenshots still strip (Read dumps, history clone budget).
+    if (!stripImages) return rec;
     const source = asRecord(rec.source);
     const data = typeof source.data === "string" ? source.data : typeof rec.data === "string" ? rec.data : undefined;
-    if (data && data.length > RENDERER_TOOL_RESULT_CHARS) {
-      if (rec.source && typeof rec.source === "object") {
-        return { ...rec, source: { ...source, data: "", truncated: true } };
-      }
-      return { ...rec, data: "", truncated: true };
-    }
-    return block;
+    if (data) return compactImageBlock(rec, source, data);
+    return rec;
   }
   if (rec.type === "tool_result") {
     const nextInner = compactToolResultInner(rec.content);
-    if (nextInner === rec.content) return block;
+    if (nextInner === rec.content) return rec;
     return { ...rec, content: nextInner };
   }
   if (typeof rec.text === "string" && rec.text.length > RENDERER_TOOL_RESULT_CHARS) {
     return { ...rec, text: truncateUtf16(rec.text, RENDERER_TOOL_RESULT_CHARS) };
   }
-  return block;
+  return rec;
 }
 
 function compactHeavyObject(value: unknown): unknown {
@@ -399,7 +417,7 @@ function compactHeavyTranscriptFields(record: JsonlRecord): JsonlRecord {
   const message = asRecord(record.message);
   let nextMessage: JsonlRecord | undefined;
   if (Array.isArray(message.content)) {
-    const content = compactToolResultInner(message.content);
+    const content = compactMessageContent(message.content);
     if (content !== message.content) nextMessage = { ...message, content };
   } else if (typeof message.content === "string" && message.content.length > RENDERER_TOOL_RESULT_CHARS) {
     nextMessage = { ...message, content: truncateUtf16(message.content, RENDERER_TOOL_RESULT_CHARS) };
